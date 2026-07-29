@@ -28,10 +28,10 @@ Metrics at each run's best epoch:
 Run on the held-out test set of the best model (`convlstm 15h34`, 637 patches):
 
 ```bash
-python src/inference/test.py \
+python -m sinkholes test-patches \
     --test_data_path outputs/convlstm_v1_2026-07-28_15h34/test_dataset_convlstm_v1_2026-07-28_15h34.pkl \
     --model outputs/convlstm_v1_2026-07-28_15h34/checkpoints/best.pt \
-    --convlstm_unet --k_prevs 2
+    --k_prevs 2
 ```
 
 | metric | value |
@@ -84,7 +84,7 @@ and a pickled test set. `run_v2` predates the validation-preview feature so it h
 Regenerate any run's curves with:
 
 ```bash
-python src/training/train_reporter.py outputs/<run>/
+python -m sinkholes curves outputs/<run>/
 ```
 
 Disk use is 3.0 GB total, almost all checkpoints (2.2 GB) and pickled test sets (820 MB);

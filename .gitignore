@@ -1,18 +1,13 @@
 /.venv/
-/.venv/bin/
 *.unw
 *.unw.ers
 *npy
-*xml
-/data_patches_H200_W100
-/data_patches_H200_W100_strpp2_11days
-/mask_patches_H200_W100
-/mask_patches_H200_W100_strpp2_11days
-/models
+*.egg-info/
+.pytest_cache/
 
 # run artifacts (checkpoints, pickled test sets, reconstructions, shapefiles)
+/models
 /outputs/
-/pred_outputs2/
 /test_data/
 /out_polygs/
 

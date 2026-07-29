@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sinkholes"
+version = "1.0.0"
+description = "Dead Sea sinkhole detection in Sentinel-1 InSAR interferograms: patch preparation, U-Net-family training, full-scene inference and polygon export"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "numpy",
+    "scipy",
+    "pandas",
+    "matplotlib",
+    "tqdm",
+    "geopandas>=0.14",
+    "pyogrio",
+    "rasterio>=1.3",
+    "shapely>=2.0",
+    "affine",
+    "scikit-image",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+sinkholes = "sinkholes.cli:main"
+
+# PEP 420 namespace packages: the package directories carry no __init__.py.
+[tool.setuptools.packages.find]
+include = ["sinkholes*"]
+namespaces = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,17 +1,7 @@
 {
     "python-envs.defaultEnvManager": "ms-python.python:pyenv",
-
-    // Modules import each other by bare name (`from unet import UNet`) from any src/
-    // subfolder; src/_bootstrap.py does that at runtime. Pylance needs the same search
-    // path list or every first-party import shows as unresolved. CHANGELOG.md #10, #12
     "python.analysis.extraPaths": [
-        "${workspaceFolder}",
-        "${workspaceFolder}/src",
-        "${workspaceFolder}/src/models",
-        "${workspaceFolder}/src/data_prep",
-        "${workspaceFolder}/src/training",
-        "${workspaceFolder}/src/inference",
-        "${workspaceFolder}/src/utils"
+        "${workspaceFolder}"
     ],
     "python.testing.pytestEnabled": true,
     "python.testing.pytestArgs": [
