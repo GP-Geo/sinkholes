@@ -1,8 +1,16 @@
+# --- path bootstrap: flat imports from any src/ subfolder. EDIT 2026-07-29, CHANGELOG.md #10 ---
+import sys as _sys, pathlib as _pathlib
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import _bootstrap  # noqa: F401,E402
+# --- end bootstrap ---
 import torch
-from unet_parts import *
-import matplotlib.pyplot as plt
+import torch.nn as nn
+import torch.nn.functional as F
 
+from unet_parts import DoubleConv, Down, Up, OutConv
 
+# This module applies multi-head self attention to 2D feature maps.
+# 
 class MultiHeadSelfAttention2D(nn.Module):
     def __init__(self, in_channels, num_heads=2):
         super().__init__()

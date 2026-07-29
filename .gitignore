@@ -9,3 +9,15 @@
 /mask_patches_H200_W100
 /mask_patches_H200_W100_strpp2_11days
 /models
+
+# run artifacts (checkpoints, pickled test sets, reconstructions, shapefiles)
+/outputs/
+/pred_outputs2/
+/test_data/
+/out_polygs/
+
+# locally downloaded patches and the train-ready tree derived from them
+/data/
+
+.DS_Store
+__pycache__/

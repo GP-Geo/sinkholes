@@ -1,3 +1,8 @@
+# --- path bootstrap: flat imports from any src/ subfolder. EDIT 2026-07-29, CHANGELOG.md #10 ---
+import sys as _sys, pathlib as _pathlib
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import _bootstrap  # noqa: F401,E402
+# --- end bootstrap ---
 import os
 
 from get_intf_info import *
@@ -42,7 +47,8 @@ def plg_indx2longlat(polyg_gdf, intf_coords, x_start=None):
 if __name__ == '__main__':
     plt.rcParams['backend'] = 'Qt5Agg'
 
-    directory_path = 'pred_outputs2/'
+    # EDIT 2026-07-29: followed test_full_intf.py out of 'pred_outputs2/'. CHANGELOG.md #14
+    directory_path = 'outputs/predictions/'
     dir_polygs = directory_path #+ 'polygs/'
     outpath = dir_polygs + 'polygs_longlat/'
     os.makedirs(outpath, exist_ok=True)

@@ -1,7 +1,14 @@
+# --- path bootstrap: flat imports from any src/ subfolder. EDIT 2026-07-29, CHANGELOG.md #10 ---
+import sys as _sys, pathlib as _pathlib
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import _bootstrap  # noqa: F401,E402
+# --- end bootstrap ---
 import argparse
 import os
 from pathlib import Path
 from unet import *
+# EDIT 2026-07-29: shared checkpoint -> model factory. CHANGELOG.md #12
+from factory import architecture_from_flags, build_from_checkpoint
 import torch
 import logging
 import geopandas as gpd
@@ -182,7 +189,7 @@ def find_11day_sequences(
     return chains_map, valid_intfs
 
 def get_intf_coords(intf_name):
-    intf_dict_file = open('intf_coord.json', 'r')
+    intf_dict_file = open(_bootstrap.asset('intf_coord.json'), 'r')
     intf_coords = json.load(intf_dict_file)
     x0 = intf_coords[intf_name]['east']
     y0 = intf_coords[intf_name]['north']
@@ -199,7 +206,7 @@ def get_intf_coords(intf_name):
     return (x0, y0, dx, dy,ncells, nlines,lidar_mask,num_nonz_p,bo,frame)
 
 def get_intf_lidar_mask(intf_name):
-    with open('lidar_intf_mask.txt', 'r') as f:
+    with open(_bootstrap.asset('lidar_intf_mask.txt'), 'r') as f:
         mask = 'no_mask'
         for line in f:
             if intf_name[:8] == line[8:16] and intf_name[9:17] == line[24:32]:
@@ -311,7 +318,7 @@ def reconstruct_intf_prediction(
     mask_all = None  # (C, out_h, out_w) uint8
 
     if add_lidar_mask:
-        lidar_gdf = gpd.read_file('lidar_mask_polygs.shp')
+        lidar_gdf = gpd.read_file(_bootstrap.asset('lidar_mask_polygs.shp'))
         # sources list
         if lidar_sources is None:
             srcs = [current_lidar_mask] * C
@@ -480,6 +487,16 @@ def get_args():
     parser.add_argument('--align_frames',  action='store_true')
     parser.add_argument('--unioned_mask', action='store_true')
     parser.add_argument('--k_prevs', type=int, default=0)
+    # EDIT 2026-07-29: architecture is detected from the checkpoint; these are optional
+    # overrides. CHANGELOG.md #12
+    parser.add_argument('--attn_unet', action='store_true',
+                        help='Checkpoint is an AttentionUNet (usually auto-detected)')
+    parser.add_argument('--add_attn', action='store_true',
+                        help='Checkpoint is a UNet with bottleneck attention (usually auto-detected)')
+    parser.add_argument('--convlstm_unet', action='store_true',
+                        help='Checkpoint is a ConvLSTM U-Net (usually auto-detected)')
+    parser.add_argument('--treat_nodata_regions', action='store_true',
+                        help='Checkpoint was trained with validity channels (2 per timestep)')
     parser.add_argument('--blend_type', type=str, default=None, choices=['hann', 'center-crop'])
     parser.add_argument('--window_gamma', type=float, default=1.0)
     parser.add_argument('--plot',  action='store_true')
@@ -498,19 +515,42 @@ if __name__ == '__main__':
     stride = (args.patch_size[0]//args.strdpp, args.patch_size[1]//args.strdpp)
     intfs_list = args.intfs_list.split(',')
     if args.k_prevs >0:
-        with open('intf_coord.json', "r") as f:
+        with open(_bootstrap.asset('intf_coord.json'), "r") as f:
             intf_info = json.load(f)
         prev_dict, updated = find_11day_sequences(intf_info, k_prev=args.k_prevs, restrict_to=intfs_list)
     num_c = args.k_prevs + 1
     # model
-    net = UNet(n_channels=num_c, n_classes=1, bilinear=False)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    net.to(device=device)
     state_dict = torch.load(args.model_dir + args.model_file, map_location=device)
-    mask_values = state_dict.pop('mask_values', [0, 1])
+
+    # EDIT 2026-07-29: was a hardcoded UNet; the factory detects the architecture from
+    # the weights so ConvLSTM checkpoints load here too. CHANGELOG.md #12
+    loaded = build_from_checkpoint(
+        state_dict,
+        arch=architecture_from_flags(
+            attn_unet=getattr(args, 'attn_unet', False),
+            add_attn=getattr(args, 'add_attn', False),
+            convlstm_unet=getattr(args, 'convlstm_unet', False),
+        ),
+        n_classes=1,
+        bilinear=False,
+        treat_nodata_regions=getattr(args, 'treat_nodata_regions', False),
+    )
+    net = loaded.model
+    mask_values = loaded.mask_values
+    net.to(device=device)
     net.load_state_dict(state_dict)
     net.eval()
-    logging.info('Model loaded!')
+    logging.info(
+        f'Model loaded! architecture={loaded.architecture} '
+        f'in-channels={loaded.n_channels}'
+    )
+    if loaded.architecture != 'convlstm_unet' and loaded.n_channels not in (None, num_c):
+        logging.warning(
+            f'checkpoint expects {loaded.n_channels} input channels but --k_prevs '
+            f'{args.k_prevs} produces {num_c}; the forward pass will fail. '
+            f'Set --k_prevs {loaded.n_channels - 1}.'
+        )
 
     for i, intf in enumerate(intfs_list):
 

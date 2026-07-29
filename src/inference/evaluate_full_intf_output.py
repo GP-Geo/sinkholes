@@ -1,3 +1,8 @@
+# --- path bootstrap: flat imports from any src/ subfolder. EDIT 2026-07-29, CHANGELOG.md #10 ---
+import sys as _sys, pathlib as _pathlib
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import _bootstrap  # noqa: F401,E402
+# --- end bootstrap ---
 import glob
 
 import numpy as np
@@ -23,7 +28,7 @@ def plot_full_intfs_preds_vprevs_wlidarmask(
     *,
     add_lidar_mask=True,
     intf_lidar_mask=None,            # <-- pass the CURRENT INTF's lidar source id
-    lidar_shp_path='lidar_mask_polygs.shp',
+    lidar_shp_path=_bootstrap.asset('lidar_mask_polygs.shp'),
     overlay_on_preds=True            # overlay lidar on pred/conf panels too
 ):
     from scipy.ndimage import gaussian_filter
@@ -457,7 +462,8 @@ def str2bool(arg):
     return arg
 
 parser = argparse.ArgumentParser(description='evaluate full intf output')
-parser.add_argument('--path',  type=str, default='pred_outputs2/job_rand_by_intf_11diff_nonzth_testdata_hp0_09_09_13h14/', help='reconstructed interferogram path')
+# EDIT 2026-07-29: default followed test_full_intf.py out of 'pred_outputs2/'. CHANGELOG.md #14
+parser.add_argument('--path',  type=str, default='outputs/predictions/<model>/<job>_<timestamp>/', help='reconstructed interferogram path (a test_full_intf.py output dir)')
 parser.add_argument('--th',  type=float, default=0)
 parser.add_argument('--k_prevs',  type=int, default=0)
 parser.add_argument('--aligned_patches',  action='store_true')
@@ -475,7 +481,7 @@ unique_intf_list = list(set(intf_list))
 #recheck nonz num
 now = datetime.now()  # ← no dot before ()
 nowstr = now.strftime("%m%d%H%M")
-with open('intf_coord.json', 'r') as json_file:
+with open(_bootstrap.asset('intf_coord.json'), 'r') as json_file:
     coord_dict = json.load(json_file)
 
 for intf in unique_intf_list:

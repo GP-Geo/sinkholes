@@ -1,3 +1,8 @@
+# --- path bootstrap: flat imports from any src/ subfolder. EDIT 2026-07-29, CHANGELOG.md #10 ---
+import sys as _sys, pathlib as _pathlib
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import _bootstrap  # noqa: F401,E402
+# --- end bootstrap ---
 import logging
 import os
 import sys
@@ -108,6 +113,27 @@ def has_consecutive_zeros(arr, min_consecutive=10, max_consecutive=1000):
     return np.any(row_check) or np.any(col_check)
 
 
+# EDIT 2026-07-28: the temporal target is now the LATEST timestep's mask, not the union
+# across the stack. CHANGELOG.md #7
+def temporal_target_mask(masks_per_t, union: bool = False):
+    """Ground-truth mask for a temporal sample.
+
+    `masks_per_t`: list of (N, H, W) arrays, chronological **oldest -> newest**
+    (`tids = list(prevs) + [id]`, see :176).
+
+    Default: the newest interferogram's mask, which is what the model is asked to
+    predict — the decoder's skip connections come from the newest timestep and the
+    ConvLSTM hidden state summarises the history leading up to it.
+
+    `union=True` restores the previous behaviour (positive wherever *any* timestep was
+    positive) for comparison against runs made before 2026-07-28; it is reachable from
+    the CLI as `--union_temporal_mask`.
+    """
+    if union:
+        return (np.stack(masks_per_t, axis=0) > 0).any(axis=0).astype(np.float32)
+    return (masks_per_t[-1] > 0).astype(np.float32)
+
+
 class SubsiDataset(Dataset):
     test_dataset_for_nonoverlap_split = []
     test_mask_for_nonoverlap_split = []
@@ -134,6 +160,11 @@ class SubsiDataset(Dataset):
                 self.seq_dict = seq_dict
         else:
             self.temporal = False
+        # EDIT 2026-07-28: index at which the validity channels begin, i.e. T when
+        # --treat_nodata_regions appends a per-time validity map. None means the sample
+        # carries no validity channels. Set where the concatenation actually happens
+        # (:296) so it can never disagree with the data. CHANGELOG.md #8
+        self.n_value_channels = None
         if args.nonz_only and args.partition_mode != 'spatial' and not args.add_nulls_to_train and not args.nonoverlap_tr_tst and not self.temporal:
             pref, mask_pref = 'data_patches_nonz_', 'mask_patches_nonz_'
         else:
@@ -260,7 +291,10 @@ class SubsiDataset(Dataset):
                     image_data = np.stack(patches_per_t, axis=0).astype(np.float32)  # (T,N,H,W)
 
                     masks_per_t = [np.stack([p[x, y] for (x, y) in rc_use], axis=0) for p in msk_pa]  # each (N,H,W)
-                    mask_data = (np.stack(masks_per_t, axis=0) > 0).any(axis=0).astype(np.float32)  # (N,H,W)
+                    # EDIT 2026-07-28: was `(stack > 0).any(axis=0)` — the union over the
+                    # temporal stack. Now the newest timestep only. CHANGELOG.md #7
+                    mask_data = temporal_target_mask(
+                        masks_per_t, union=getattr(args, 'union_temporal_mask', False))  # (N,H,W)
 
                     # (optional) your no-data treatment stays unchanged
                     if args.treat_nodata_regions:
@@ -270,6 +304,12 @@ class SubsiDataset(Dataset):
                             V = V & (~np.isnan(image_data))
                             image_data = np.nan_to_num(image_data, nan=0.0)
                         image_data = np.concatenate([image_data, V], axis=0).astype(np.float32)  # -> (2T,N,H,W)
+                        # BLOCK layout: channels [0,T) are the images (chronological,
+                        # oldest->newest) and [T,2T) the matching validity maps. Anything
+                        # un-flattening this to (T,2,H,W) must account for that.
+                        # EDIT 2026-07-28: record T so preprocess() can leave the validity
+                        # channels strictly {0,1}. CHANGELOG.md #8
+                        self.n_value_channels = len(tids)
 
                 elif args.nonoverlap_tr_tst:
                     if dset == 'train':
@@ -474,7 +514,10 @@ class SubsiDataset(Dataset):
                     image_data = np.stack(patches_per_t, axis=0).astype(np.float32)  # (T,N,H,W)
 
                     masks_per_t = [np.stack([p[x, y] for (x, y) in rc_use], axis=0) for p in msk_pa]  # each (N,H,W)
-                    mask_data = (np.stack(masks_per_t, axis=0) > 0).any(axis=0).astype(np.float32)  # (N,H,W)
+                    # EDIT 2026-07-28: was `(stack > 0).any(axis=0)` — the union over the
+                    # temporal stack. Now the newest timestep only. CHANGELOG.md #7
+                    mask_data = temporal_target_mask(
+                        masks_per_t, union=getattr(args, 'union_temporal_mask', False))  # (N,H,W)
 
                 elif args.nonz_only:
                     mask_nz, image_nz = [], []
@@ -524,7 +567,19 @@ class SubsiDataset(Dataset):
         return len(self.index_map)
 
     @staticmethod
-    def preprocess(mask_values, img, is_mask):
+    def preprocess(mask_values, img, is_mask, n_value_channels=None):
+        """Normalise a patch.
+
+        `n_value_channels`: index at which validity channels begin, or None. Channels at
+        or after it are binary validity maps and are left EXACTLY as they are.
+
+        EDIT 2026-07-28: previously every channel went through the normalisation below,
+        including the validity maps appended by --treat_nodata_regions. Their min/max are
+        0/1, so they took the `else` branch and had their zeros rewritten to 0.5 — which
+        meant `segmentation_loss` (train_sinkholes_unet.py:124) computed `V_any` values of
+        0.5 rather than 0, and the no-data masking never actually masked anything.
+        CHANGELOG.md #8
+        """
 
         if is_mask:
             mask = np.zeros((img.shape[0], img.shape[1]), dtype=np.int64)
@@ -538,7 +593,10 @@ class SubsiDataset(Dataset):
 
         out = img.copy()
         tol = 1e-1
-        for c in range(out.shape[0]):
+        # EDIT 2026-07-28: stop at the validity block; those channels must stay {0,1}.
+        # CHANGELOG.md #8
+        n_normalise = out.shape[0] if n_value_channels is None else int(n_value_channels)
+        for c in range(n_normalise):
             mn = float(np.nanmin(out[c]));
             mx = float(np.nanmax(out[c]))
             if (mn < -tol) or (mx > 1.0 + tol):
@@ -569,7 +627,11 @@ class SubsiDataset(Dataset):
             msk = self.mask_data[intf_idx][0, patch_idx].astype(np.float32)
 
         # Preprocess
-        img = self.preprocess(self.mask_values, img, 0)  # keeps shape; (T,H,W) or (H,W)
+        # EDIT 2026-07-28: pass the validity-block offset so those channels are left
+        # strictly {0,1}. getattr() keeps datasets pickled before this change loadable.
+        # CHANGELOG.md #8
+        img = self.preprocess(self.mask_values, img, 0,
+                              n_value_channels=getattr(self, 'n_value_channels', None))  # keeps shape; (T,H,W) or (H,W)
         msk = self.preprocess(self.mask_values, msk, 1)  # -> (H,W) labels
         # if self.dataset != 'train':
         #     T = img.shape[0];

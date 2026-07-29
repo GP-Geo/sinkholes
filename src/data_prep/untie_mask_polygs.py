@@ -1,3 +1,8 @@
+# --- path bootstrap: flat imports from any src/ subfolder. EDIT 2026-07-29, CHANGELOG.md #10 ---
+import sys as _sys, pathlib as _pathlib
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import _bootstrap  # noqa: F401,E402
+# --- end bootstrap ---
 import geopandas as gpd
 import pandas as pd
 
@@ -11,7 +16,7 @@ mask2020['source'] = 'LiDAR2020'
 mask2021['source'] = 'LiDAR2021'
 mask2022['source'] = 'LiDAR2022'
 united_gdf = pd.concat([mask2019, mask2020, mask2021, mask2022], ignore_index=True)
-united_gdf.to_file('lidar_mask_polygs.shp')
+united_gdf.to_file(_bootstrap.asset('lidar_mask_polygs.shp'))
 
 # Verify the result
 print(united_gdf)

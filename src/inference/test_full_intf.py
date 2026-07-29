@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+
+# --- path bootstrap: flat imports from any src/ subfolder. EDIT 2026-07-29, CHANGELOG.md #10 ---
+import sys as _sys, pathlib as _pathlib
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import _bootstrap  # noqa: F401,E402
+# --- end bootstrap ---
 import os, sys, json, pickle, logging, glob
 from datetime import datetime
 import numpy as np
@@ -10,10 +16,13 @@ from rasterio.features import rasterize
 
 import torch
 
-from unet import UNet
-from attn_unet import AttentionUNet
+# EDIT 2026-07-29: UNet / AttentionUNet are no longer constructed here — model building
+# moved to the shared factory, which detects the architecture from the checkpoint so this
+# script loads every architecture, ConvLSTM included. CHANGELOG.md #12
+from factory import architecture_from_flags, build_from_checkpoint
 from polygs import plg_indx2longlat, mask_array_to_polygons
 from get_intf_info import get_intf_coords, find_11day_sequences
+from device_utils import get_device, memory_format_for  # EDIT 2026-07-27, CHANGELOG.md #1
 
 # ----------------------------- utils -----------------------------
 def str2bool(arg: str) -> bool:
@@ -100,7 +109,7 @@ def reconstruct_intf_prediction(
     mask_all = None  # (C, out_h, out_w) uint8
 
     if add_lidar_mask:
-        lidar_gdf = gpd.read_file('lidar_mask_polygs.shp')
+        lidar_gdf = gpd.read_file(_bootstrap.asset('lidar_mask_polygs.shp'))
         # sources list
         if lidar_sources is None:
             srcs = [current_lidar_mask] * C
@@ -161,7 +170,15 @@ def reconstruct_intf_prediction(
                 continue
 
             # Build (1, C or 2C, H, W) for net and predict
-            x_np = data_stack[:, i, j]  # (C, H, W)
+            # EDIT 2026-07-28: was `x_np = data_stack[:, i, j]`, which fed the net in the
+            # order `pa` was assembled at :396 — `[cur] + prevs[::-1]`, i.e. newest ->
+            # oldest. Training feeds oldest -> newest (`tids = list(prevs) + [id]`,
+            # sinkholes_data_loading.py:176), so every --k_prevs > 0 evaluation was run
+            # with its temporal channels reversed relative to training. Reversed here,
+            # at the point of feeding the net only: `data_stack` itself keeps index 0 =
+            # current, which reconstructed_intf_all[0], the LiDAR gating and the plots
+            # all rely on. No-op at --k_prevs 0 or --replicate_input. CHANGELOG.md #9
+            x_np = data_stack[::-1, i, j].copy()  # (C, H, W), now oldest -> newest
 
             if treat_nodata_regions:
                 tol = 1e-9
@@ -170,7 +187,8 @@ def reconstruct_intf_prediction(
                 v_np = (np.abs(x_np - 0.5) > tol).astype(np.float32)  # (C, H, W), 1=valid, 0=no-data
                 x_np = np.concatenate([x_np, v_np], axis=0)  # (2C, H, W)
 
-            image = torch.from_numpy(x_np[None]).to(device=device, memory_format=torch.channels_last)
+            # EDIT 2026-07-27: memory format chosen per device (see CHANGELOG.md #1)
+            image = torch.from_numpy(x_np[None]).to(device=device, memory_format=memory_format_for(device))
             with torch.no_grad():
                 logits = net(image)
                 prob = torch.sigmoid(logits).squeeze().cpu().numpy().astype(np.float32)  # (H, W)
@@ -252,9 +270,19 @@ def get_pred_args():
     p.add_argument('--data_stride', type=int, default=2)
     p.add_argument('--recon_th', type=float, default=0.25)
     p.add_argument('--job_name', type=str, default='job')
+    # EDIT 2026-07-29: outputs used to go to a hardcoded 'pred_outputs2/'. CHANGELOG.md #14
+    p.add_argument('--output_dir', type=str, default='outputs/predictions',
+                   help='root for prediction outputs; a <model>/<job>_<timestamp>/ '
+                        'subtree is created under it')
     p.add_argument('--add_lidar_mask', type=str, default='True')
     p.add_argument('--plot', action='store_true')
     p.add_argument('--attn_unet', action='store_true')
+    # EDIT 2026-07-29: architecture is detected from the checkpoint; these flags are an
+    # optional override kept for backward compatibility. CHANGELOG.md #12
+    p.add_argument('--add_attn', action='store_true',
+                   help='Checkpoint is a UNet with bottleneck attention (usually auto-detected)')
+    p.add_argument('--convlstm_unet', action='store_true',
+                   help='Checkpoint is a ConvLSTM U-Net (usually auto-detected)')
     p.add_argument('--unioned_mask', action='store_true')
     p.add_argument('--k_prevs', type=int, default=0)
     p.add_argument('--treat_nodata_regions', action='store_true')
@@ -288,7 +316,10 @@ if __name__ == '__main__':
 
     job_name   = f"{args.job_name}_{now}"
     model_name = args.model.split('.')[0]
-    output_path      = f'pred_outputs2/{model_name}/{job_name}/'
+    # EDIT 2026-07-29: was f'pred_outputs2/{model_name}/{job_name}/', a second top-level
+    # results tree at the CWD, unrelated to where training writes. Predictions now land
+    # under outputs/ beside the runs that produced them. CHANGELOG.md #14
+    output_path      = os.path.join(args.output_dir, model_name, job_name, '')
     output_polyg_dir = os.path.join(output_path, 'polygs/')
     os.makedirs(output_path, exist_ok=True)
     os.makedirs(output_polyg_dir, exist_ok=True)
@@ -322,16 +353,41 @@ if __name__ == '__main__':
 
     if args.treat_nodata_regions:
         num_c = num_c*2
-    # model
-    net = UNet(n_channels=num_c, n_classes=1, bilinear=False)
-    if args.attn_unet:
-        net = AttentionUNet(n_channels=num_c, n_classes=1, bilinear=False)
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # EDIT 2026-07-27: was `torch.device('cuda' if ... else 'cpu')`; get_device() adds MPS. CHANGELOG.md #1
+    device = get_device()
     logging.info(f'Loading model {args.model} on device {device}')
-    net.to(device=device)
     state_dict = torch.load('./models/' + args.model, map_location=device)
-    _ = state_dict.pop('mask_values', [0, 1])  # unused here
+
+    # EDIT 2026-07-29: was a hardcoded UNet/AttentionUNet pair, which could not load a
+    # ConvLSTM checkpoint at all. The factory reads the architecture off the weights;
+    # --attn_unet / --add_attn / --convlstm_unet still force it. CHANGELOG.md #12
+    loaded = build_from_checkpoint(
+        state_dict,
+        arch=architecture_from_flags(
+            attn_unet=args.attn_unet,
+            add_attn=args.add_attn,
+            convlstm_unet=args.convlstm_unet,
+        ),
+        n_classes=1,
+        bilinear=False,
+        treat_nodata_regions=args.treat_nodata_regions,
+    )
+    net = loaded.model
+    logging.info(f'Architecture {loaded.architecture} ({loaded.n_channels} in-channels)')
+    # The checkpoint decides the model's channel count; --k_prevs decides how many the
+    # data loader will feed. A mismatch means the data side is misconfigured and the
+    # forward pass will fail later, so say so now. CHANGELOG.md #12
+    if loaded.architecture != 'convlstm_unet' and loaded.n_channels not in (None, num_c):
+        logging.warning(
+            f'checkpoint expects {loaded.n_channels} input channels but --k_prevs '
+            f'{args.k_prevs}'
+            + (' with --treat_nodata_regions' if args.treat_nodata_regions else '')
+            + f' produces {num_c}. Set --k_prevs '
+            f'{loaded.n_channels // (2 if args.treat_nodata_regions else 1) - 1} '
+            f'to match how this model was trained.'
+        )
+    net.to(device=device)
     net.load_state_dict(state_dict); net.eval()
 
     # data dirs
@@ -359,7 +415,7 @@ if __name__ == '__main__':
     # prev sequences
     prev_dict = None
     if args.k_prevs > 0 and not args.replicate_input:
-        with open('intf_coord.json', "r") as f:
+        with open(_bootstrap.asset('intf_coord.json'), "r") as f:
             intf_info = json.load(f)
         prev_dict, updated = find_11day_sequences(intf_info, k_prev=args.k_prevs, restrict_to=intf_list, require_current_nonz_gt0=False)
         if not args.fallback_replicate:
@@ -537,7 +593,7 @@ if __name__ == '__main__':
 
     # ── merge all per-intf shapefiles into one combined shapefile ──────────────
     if args.merge_polygs:
-        with open('intf_coord.json') as _f:
+        with open(_bootstrap.asset('intf_coord.json')) as _f:
             _intf_info = json.load(_f)
 
         _shp_files = sorted(glob.glob(os.path.join(output_polyg_dir, '*.shp')))

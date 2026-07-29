@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
+# --- path bootstrap: flat imports from any src/ subfolder. EDIT 2026-07-29, CHANGELOG.md #10 ---
+import sys as _sys, pathlib as _pathlib
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import _bootstrap  # noqa: F401,E402
+# --- end bootstrap ---
 import math
 import geopandas as gpd
 import matplotlib.pyplot as plt
 
 # ==== EDIT THESE ====
-SHP_PATH   = "lidar_mask_polygs.shp"
+SHP_PATH   = _bootstrap.asset("lidar_mask_polygs.shp")
 GROUPBY    = "source"      # column to split panels by
 MAX_COLS   = 4             # max panels per row
 SAVE_PATH  = None          # e.g. "masks.png" or None to just show

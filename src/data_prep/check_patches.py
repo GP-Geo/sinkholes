@@ -1,3 +1,8 @@
+# --- path bootstrap: flat imports from any src/ subfolder. EDIT 2026-07-29, CHANGELOG.md #10 ---
+import sys as _sys, pathlib as _pathlib
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import _bootstrap  # noqa: F401,E402
+# --- end bootstrap ---
 import argparse
 from os import listdir
 import numpy as np
@@ -9,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 parser = argparse.ArgumentParser()
 parser.add_argument('--input_patch_dir', type=str, default='/home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/patches/data_patches_H200_W100_strpp2_11days/',
                     help='full unw files directory for input')
-with open ('intf_coord.json', 'r') as f:
+with open (_bootstrap.asset('intf_coord.json'), 'r') as f:
     intf_mdata = json.load(f)
 for intf in intf_mdata:
     if 'nonz_num' not in intf_mdata[intf]:
@@ -30,5 +35,5 @@ for item in intfs:
 
     logging.info(f'{intf_name} is {intf_part} and has {nonz_patches_num} nonz' )
     intf_mdata[intf_name]['nonz_num'] = nonz_patches_num
-with open('intf_coord.json', 'w') as file:
+with open(_bootstrap.asset('intf_coord.json'), 'w') as file:
     json.dump(intf_mdata, file,indent=4)

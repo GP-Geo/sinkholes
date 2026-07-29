@@ -1,11 +1,18 @@
+# --- path bootstrap: flat imports from any src/ subfolder. EDIT 2026-07-29, CHANGELOG.md #10 ---
+import sys as _sys, pathlib as _pathlib
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import _bootstrap  # noqa: F401,E402
+# --- end bootstrap ---
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 from shapely.geometry import Polygon
 from shapely.affinity import translate
+import matplotlib.pyplot as plt
 
 
 from dice_score import multiclass_dice_coeff, dice_coeff
+from device_utils import memory_format_for  # EDIT 2026-07-27, CHANGELOG.md #1
 
 import rasterio
 from rasterio.features import shapes
@@ -679,7 +686,29 @@ def calc_precision_recall (y_pred, y_true):
     return precision, recall
 
 @torch.inference_mode()
-def evaluate(net, dataloader, device, amp ,is_local,out_path,epoch,mode = 'val',save_val = False,net_aux=None,th=0.7,buffer=5,plot=False):
+# EDIT 2026-07-27: added the optional `metrics_out` dict. CHANGELOG.md #3
+# EDIT 2026-07-27: added `loss_fn` and `samples_out`. CHANGELOG.md #5
+def evaluate(net, dataloader, device, amp ,is_local,out_path,epoch,mode = 'val',save_val = False,net_aux=None,th=0.7,buffer=5,plot=False,metrics_out=None,loss_fn=None,samples_out=None):
+    """`metrics_out`: pass a dict to receive pixel-level precision/recall/TP counts.
+
+    Opt-in and non-breaking — the return value is unchanged, so existing callers
+    (test.py, test_full_intf.py, train_sinkholes_unet.py) are unaffected. Only
+    binary (n_classes == 1) runs populate it. Counts are accumulated globally
+    rather than averaged per batch, which avoids the division-by-zero that
+    `calc_precision_recall` hits on an all-negative batch.
+
+    `loss_fn`: optional `f(logits, images, mask_true) -> scalar tensor`, called
+    under `no_grad` on the *pre-threshold* logits and averaged over batches into
+    `metrics_out['loss']`. The training script passes the very function it
+    optimises, so `val/loss` is directly comparable with `train/loss` and cannot
+    drift away from it.
+
+    `samples_out`: optional dict; set `{'n': k}` to receive `image`, `gt` and
+    `prob` arrays `(k, H, W)` for the first k validation patches, for rendering
+    a qualitative grid. Patches whose ground truth has positive pixels are
+    preferred — an all-background sample shows nothing useful — and the pick is
+    deterministic across epochs as long as the loader is not shuffled.
+    """
     net.eval()
     num_val_batches = len(dataloader)
     dice_score = 0
@@ -687,6 +716,12 @@ def evaluate(net, dataloader, device, amp ,is_local,out_path,epoch,mode = 'val',
     recall = 0
     ol_precision = 0
     ol_recall = 0
+    # EDIT 2026-07-27: global confusion counts for `metrics_out`. CHANGELOG.md #3
+    _tp = _fp = _fn = 0.0
+    # EDIT 2026-07-27: validation loss and qualitative samples. CHANGELOG.md #5
+    _loss_sum, _loss_n = 0.0, 0
+    _n_samples = int(samples_out.get('n', 4)) if samples_out is not None else 0
+    _samp_pos, _samp_any = [], []  # positive-GT picks, then any-GT fallback
 
     # iterate over the validation set
     with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
@@ -695,7 +730,10 @@ def evaluate(net, dataloader, device, amp ,is_local,out_path,epoch,mode = 'val',
             image, mask_true = batch['image'], batch['mask']
 
             # move images and labels to correct device and type
-            image = image.to(device=device, dtype=torch.float32, memory_format=torch.channels_last)
+            # EDIT 2026-07-27: memory format chosen per device so validation matches the
+            # model's layout on MPS (inference with channels_last does work there, but
+            # mixing layouts forces a per-batch copy). See CHANGELOG.md #1.
+            image = image.to(device=device, dtype=torch.float32, memory_format=memory_format_for(device))
             mask_true = mask_true.to(device=device, dtype=torch.long)
 
             # predict the mask
@@ -706,7 +744,18 @@ def evaluate(net, dataloader, device, amp ,is_local,out_path,epoch,mode = 'val',
             if net.n_classes == 1:
                 mask_true = mask_true.unsqueeze(1)
                 assert mask_true.min() >= 0 and mask_true.max() <= 1, 'True mask indices should be in [0, 1]'
-                mask_pred = (F.sigmoid(mask_pred) > 0.5).float()
+                # EDIT 2026-07-27: keep the logits and the probability map before
+                # thresholding — the loss needs logits, the sample grid needs
+                # probabilities, and both used to be discarded here. CHANGELOG.md #5
+                logits = mask_pred
+                mask_prob = F.sigmoid(logits)
+                if loss_fn is not None:
+                    with torch.no_grad():  # never build a graph for a reported number
+                        _l = float(loss_fn(logits, image, mask_true))
+                    if np.isfinite(_l):
+                        _loss_sum += _l
+                        _loss_n += 1
+                mask_pred = (mask_prob > 0.5).float()
                 if net_aux is not None:
                     mask_pred1 = (F.sigmoid(mask_pred1) > 0.5).float()
 
@@ -715,6 +764,30 @@ def evaluate(net, dataloader, device, amp ,is_local,out_path,epoch,mode = 'val',
                 image_np = image.squeeze(1).cpu().detach().numpy()
                 if net_aux is not None:
                     mask_pred1_np = mask_pred1.squeeze(1).cpu().detach().numpy()
+
+                # EDIT 2026-07-27: collect a handful of patches for the qualitative
+                # grid. Bounded by `n`, so this stops costing anything after the
+                # first few batches. CHANGELOG.md #5
+                if _n_samples and len(_samp_pos) < _n_samples:
+                    # `image` is (B, C, H, W) with C = T (+T validity channels when
+                    # treat_nodata_regions). Channel T-1 is the current
+                    # interferogram — `sinkholes_data_loading.py:176` orders the
+                    # stack prevs…present — so the caller passes T-1 and we fall
+                    # back to the last channel, which is the same thing whenever
+                    # no validity channels are appended.
+                    _ch = samples_out.get('channel')
+                    _ch = image.shape[1] - 1 if _ch is None else int(_ch)
+                    _ch = min(max(_ch, 0), image.shape[1] - 1)
+                    _img_b = image[:, _ch].cpu().detach().numpy()
+                    _prob_b = mask_prob.squeeze(1).cpu().detach().numpy()
+                    for _i in range(_img_b.shape[0]):
+                        _triple = (_img_b[_i], mask_true_np[_i], _prob_b[_i])
+                        if mask_true_np[_i].sum() > 0:
+                            if len(_samp_pos) < _n_samples:
+                                _samp_pos.append(_triple)
+                        elif len(_samp_any) < _n_samples:
+                            _samp_any.append(_triple)
+
                 epoch_suf = '_epoch' + str(epoch)
                 if epoch % 2 == 0:
                     pred_batches.append(mask_pred_np)
@@ -726,6 +799,15 @@ def evaluate(net, dataloader, device, amp ,is_local,out_path,epoch,mode = 'val',
                 # compute the Dice score
 
                 dice_score += dice_coeff(mask_pred, mask_true, reduce_batch_first=False)
+                # EDIT 2026-07-27: cheap global confusion counts, only when a caller
+                # asked for them. No polygonization here, so validation stays fast.
+                # CHANGELOG.md #3
+                if metrics_out is not None:
+                    _p = mask_pred_np.astype(bool)
+                    _g = mask_true_np.astype(bool)
+                    _tp += float(np.logical_and(_g, _p).sum())
+                    _fp += float(np.logical_and(~_g, _p).sum())
+                    _fn += float(np.logical_and(_g, ~_p).sum())
                 if mode == 'test':
                     batch_precision, batch_recall = calc_precision_recall(mask_pred_np, mask_true_np)
                     olr, olp, b_gt_a,_ = object_level_evaluate(mask_true_np, mask_pred_np,image_np,features=[],th=th,buffer=buffer,is_local=is_local,plot=plot)
@@ -756,6 +838,33 @@ def evaluate(net, dataloader, device, amp ,is_local,out_path,epoch,mode = 'val',
             np.save(out_path + '/mask_pred_valid'+epoch_suf,mask_pred)
     net.train()
     mean_dice_score = dice_score / max(num_val_batches, 1)
+    # EDIT 2026-07-27: fill the caller's dict. CHANGELOG.md #3
+    if metrics_out is not None:
+        metrics_out['tp'], metrics_out['fp'], metrics_out['fn'] = _tp, _fp, _fn
+        metrics_out['precision'] = _tp / (_tp + _fp) if (_tp + _fp) else 0.0
+        metrics_out['recall'] = _tp / (_tp + _fn) if (_tp + _fn) else 0.0
+        metrics_out['n_batches'] = num_val_batches
+        # EDIT 2026-07-27: IoU and F1 over the same pooled counts. Note that this
+        # F1 is *not* the returned Dice: F1 pools every pixel in the split, while
+        # `mean_dice_score` averages per batch, so a patch with 3 positive pixels
+        # weighs as much as one with 3000. Both are correct and they will differ;
+        # PROJECT_SUMMARY/inspect_run call the same split macro vs micro.
+        # CHANGELOG.md #5
+        _den_iou = _tp + _fp + _fn
+        metrics_out['iou'] = _tp / _den_iou if _den_iou else 0.0
+        metrics_out['f1'] = 2 * _tp / (2 * _tp + _fp + _fn) if _den_iou else 0.0
+        if _loss_n:
+            metrics_out['loss'] = _loss_sum / _loss_n
+
+    # EDIT 2026-07-27: hand back the collected samples, positives first, padded
+    # with all-background patches only if there were not enough. CHANGELOG.md #5
+    if samples_out is not None:
+        _picked = (_samp_pos + _samp_any)[:_n_samples]
+        if _picked:
+            samples_out['image'] = np.stack([p[0] for p in _picked])
+            samples_out['gt'] = np.stack([p[1] for p in _picked])
+            samples_out['prob'] = np.stack([p[2] for p in _picked])
+            samples_out['n_positive'] = len(_samp_pos)
     if mode == 'test':
         mean_p = round(precision / num_val_batches,2)
         mean_r = round(recall / num_val_batches,2)

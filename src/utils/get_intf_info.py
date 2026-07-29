@@ -1,7 +1,12 @@
+# --- path bootstrap: flat imports from any src/ subfolder. EDIT 2026-07-29, CHANGELOG.md #10 ---
+import sys as _sys, pathlib as _pathlib
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+import _bootstrap  # noqa: F401,E402
+# --- end bootstrap ---
 import argparse
 import json
 def get_intf_coords(intf_name):
-    intf_dict_file = open('intf_coord.json', 'r')
+    intf_dict_file = open(_bootstrap.asset('intf_coord.json'), 'r')
     intf_coords = json.load(intf_dict_file)
     x0 = intf_coords[intf_name]['east']
     y0 = intf_coords[intf_name]['north']
@@ -19,7 +24,7 @@ def get_intf_coords(intf_name):
 
     return (x0, y0, dx, dy,ncells, nlines, x4000, x8500,lidar_mask,num_nonz_p,bo,frame)
 def get_intf_lidar_mask(intf_name):
-    with open('lidar_intf_mask.txt', 'r') as f:
+    with open(_bootstrap.asset('lidar_intf_mask.txt'), 'r') as f:
         mask = 'no_mask'
         for line in f:
             if intf_name[:8] == line[8:16] and intf_name[9:17] == line[24:32]:
@@ -213,10 +218,16 @@ def build_common_grid_for_region(
     return x_star, y_star, width, height, dx, dy
 import json
 
-intf_dict_file = open('intf_coord.json', 'r')
+intf_dict_file = open(_bootstrap.asset('intf_coord.json'), 'r')
 intf_coords = json.load(intf_dict_file)
 new_grid = build_common_grid_for_region(intf_coords,'North')
-print(new_grid)
+# EDIT 2026-07-27: was `print(new_grid)`. This runs at *import*, so every
+# DataLoader worker re-printed the North grid tuple — 15+ lines of noise before
+# training output, and the reason a clean CLI table was impossible. `new_grid`
+# is not read anywhere else in the repo (grep confirms), so only the print is
+# removed; the assignment stays in case something imports it. Restore the line
+# to get the old behaviour back. CHANGELOG.md #3
+# print(new_grid)
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 
@@ -324,7 +335,7 @@ def find_11day_sequences(
 
 if __name__ == '__main__':
 
-    with open ('intf_coord.json', 'r') as f:
+    with open (_bootstrap.asset('intf_coord.json'), 'r') as f:
         info = json.load(f)
     intf_list =  ['20210120_20210131', '20210222_20210305', '20210119_20210130', '20210210_20210221']
     p_dict, upt_list = find_11day_sequences(info,restrict_to=intf_list)
