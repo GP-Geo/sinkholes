@@ -37,24 +37,29 @@ def checkpoint_for(model, mask_values=(0, 1), extra=None):
     return sd
 
 
+#: A config for a ConvLSTM built with explicit, non-default settings. Kept
+#: independent of the current defaults so these tests keep exercising the
+#: "checkpoint overrides the default" path rather than agreeing with it by
+#: accident.
 CONVLSTM_CONFIG = {
     "n_channels_per_timestep": 1,
     "n_classes": 1,
     "bilinear": False,
-    "convlstm_hidden_channels": 1024,
+    "convlstm_hidden_channels": 128,
     "convlstm_kernel_size": 3,
 }
 
 
 def make_cases():
+    # The ConvLSTM config comes from the model itself: duplicating it here would
+    # go stale the moment a default moves, and the mismatch would surface as an
+    # unrelated-looking load failure.
+    convlstm = ConvLSTMUNet(n_channels_per_timestep=1, n_classes=1)
     return {
         "unet": (UNet(n_channels=3, n_classes=1, bilinear=False), None),
         "unet_add_attn": (UNet(n_channels=3, n_classes=1, bilinear=False, add_attn=True), None),
         "attention_unet": (AttentionUNet(n_channels=3, n_classes=1, bilinear=False), None),
-        "convlstm_unet": (
-            ConvLSTMUNet(n_channels_per_timestep=1, n_classes=1),
-            {CONFIG_KEY: dict(CONVLSTM_CONFIG)},
-        ),
+        "convlstm_unet": (convlstm, {CONFIG_KEY: convlstm.config_dict()}),
     }
 
 
@@ -98,6 +103,48 @@ def test_convlstm_config_drives_reconstruction():
     sd = checkpoint_for(model, extra={CONFIG_KEY: {
         **CONVLSTM_CONFIG, "convlstm_hidden_channels": 64,
     }})
+
+    loaded = build_from_checkpoint(sd, n_channels_per_timestep=1)
+
+    assert loaded.model.convlstm_hidden_channels == 64
+    loaded.model.load_state_dict(sd)
+
+
+def test_legacy_convlstm_checkpoint_without_config_is_rebuilt_from_its_weights():
+    """Checkpoints predating CONFIG_KEY have no recorded width. The gate conv's
+    output axis is 4*hidden, so the weights still say what they need — without
+    that, moving the default would break every one of these files."""
+    width = 128
+    assert width != ConvLSTMUNet(n_channels_per_timestep=1, n_classes=1).convlstm_hidden_channels
+    model = ConvLSTMUNet(n_channels_per_timestep=1, n_classes=1,
+                         convlstm_hidden_channels=width)
+    sd = checkpoint_for(model)  # deliberately no CONFIG_KEY
+    assert CONFIG_KEY not in sd
+
+    loaded = build_from_checkpoint(sd, n_channels_per_timestep=1)
+
+    assert loaded.architecture == "convlstm_unet", "detected via the convlstm.* keys"
+    assert loaded.model.convlstm_hidden_channels == width
+    loaded.model.load_state_dict(sd)
+
+
+def test_infer_convlstm_hidden_reads_the_gate_conv():
+    for width in (64, 128, 256):
+        sd = ConvLSTMUNet(n_channels_per_timestep=1, n_classes=1,
+                          convlstm_hidden_channels=width).state_dict()
+        assert factory.infer_convlstm_hidden(sd) == width
+
+
+def test_infer_convlstm_hidden_is_none_on_a_non_convlstm_checkpoint():
+    sd = UNet(n_channels=3, n_classes=1, bilinear=False).state_dict()
+    assert factory.infer_convlstm_hidden(sd) is None
+
+
+def test_recorded_config_still_beats_the_inferred_width():
+    """Inference is only a fallback: an explicit config must win."""
+    model = ConvLSTMUNet(n_channels_per_timestep=1, n_classes=1,
+                         convlstm_hidden_channels=64)
+    sd = checkpoint_for(model, extra={CONFIG_KEY: model.config_dict()})
 
     loaded = build_from_checkpoint(sd, n_channels_per_timestep=1)
 

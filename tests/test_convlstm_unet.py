@@ -10,6 +10,9 @@ import torch
 
 from sinkholes.models.convlstm_unet import (
     CONFIG_KEY,
+    DEFAULT_CONVLSTM_HIDDEN_CHANNELS,
+    FORGET_GATE_INDEX,
+    GATE_ORDER,
     ConvLSTMCell,
     ConvLSTMUNet,
     build_convlstm_unet,
@@ -254,6 +257,29 @@ def test_checkpoint_config_round_trip():
     rebuilt.load_state_dict(sd)
 
 
+def test_checkpoint_pins_a_width_that_differs_from_the_current_default():
+    """The property that makes changing the default safe: a checkpoint carries
+    its own width, so it reloads at that width no matter what the default is."""
+    pinned = DEFAULT_CONVLSTM_HIDDEN_CHANNELS * 2
+    trained = ConvLSTMUNet(n_channels_per_timestep=1, n_classes=1,
+                           convlstm_hidden_channels=pinned)
+    sd = trained.state_dict()
+    sd[CONFIG_KEY] = trained.config_dict()
+
+    rebuilt = build_convlstm_unet(sd)
+
+    assert rebuilt.convlstm_hidden_channels == pinned
+    rebuilt.load_state_dict(sd)  # would raise on a width mismatch
+
+
+def test_config_stores_the_resolved_width_not_the_unset_sentinel():
+    """A default-built model must record 256, not 0/None — otherwise reloading
+    it after the default moved would silently give a different network."""
+    model = ConvLSTMUNet(n_channels_per_timestep=1, n_classes=1,
+                         convlstm_hidden_channels=0)
+    assert model.config_dict()["convlstm_hidden_channels"] == DEFAULT_CONVLSTM_HIDDEN_CHANNELS
+
+
 def test_pop_model_config_is_a_noop_on_a_plain_checkpoint():
     sd = {"inc.double_conv.0.weight": torch.zeros(1), "mask_values": [0, 1]}
     assert pop_model_config(sd) is None
@@ -264,13 +290,15 @@ def test_n_channels_attribute_is_per_timestep():
     model = ConvLSTMUNet(n_channels_per_timestep=2, n_classes=1)
     assert model.n_channels == 2
     assert model.bottleneck_channels == 1024
-    assert model.convlstm_hidden_channels == 1024  # defaults to the bottleneck width
+    assert model.convlstm_hidden_channels == DEFAULT_CONVLSTM_HIDDEN_CHANNELS
 
 
-def test_bilinear_halves_the_bottleneck_and_still_returns_patch_size():
+def test_bilinear_halves_the_bottleneck_but_not_the_hidden_state():
+    """How far the decoder upsamples says nothing about how wide memory
+    should be, so --bilinear no longer resizes the recurrent state."""
     model = make_model(n_channels_per_timestep=1, n_classes=1, bilinear=True)
     assert model.bottleneck_channels == 512
-    assert model.convlstm_hidden_channels == 512
+    assert model.convlstm_hidden_channels == DEFAULT_CONVLSTM_HIDDEN_CHANNELS
     with torch.no_grad():
         logits = model(torch.randn(1, 2, PATCH_H, PATCH_W))
     assert logits.shape == (1, 1, PATCH_H, PATCH_W)
@@ -282,3 +310,135 @@ def test_narrow_hidden_state_is_projected_back_to_the_bottleneck_width():
     with torch.no_grad():
         logits = model(torch.randn(1, 3, 64, 32))
     assert logits.shape == (1, 1, 64, 32)
+
+
+def test_default_hidden_state_is_projected_not_identity():
+    """At the default width the hidden state is narrower than the bottleneck,
+    so the projection is now on the default path rather than an edge case."""
+    model = make_model(n_channels_per_timestep=1, n_classes=1)
+    assert model.convlstm_hidden_channels < model.bottleneck_channels
+    assert isinstance(model.convlstm_proj, torch.nn.Conv2d)
+    assert model.convlstm_proj.in_channels == DEFAULT_CONVLSTM_HIDDEN_CHANNELS
+    assert model.convlstm_proj.out_channels == model.bottleneck_channels
+
+
+def test_matching_hidden_width_still_skips_the_projection():
+    model = make_model(n_channels_per_timestep=1, n_classes=1, convlstm_hidden_channels=1024)
+    assert isinstance(model.convlstm_proj, torch.nn.Identity)
+
+
+def test_default_width_keeps_the_cell_a_minority_of_the_network():
+    """The regression this default exists to prevent: one cell dominating."""
+    model = make_model(n_channels_per_timestep=2, n_classes=1)
+    cell = sum(p.numel() for p in model.convlstm.parameters())
+    assert cell / model.get_num_params() < 0.35
+
+
+# -- ConvLSTM initialisation ------------------------------------------------------------
+
+def gate_rows(cell, gate_index):
+    h = cell.hidden_channels
+    return slice(gate_index * h, (gate_index + 1) * h)
+
+
+def test_forget_gate_bias_starts_at_one_and_the_rest_at_zero():
+    cell = ConvLSTMCell(input_channels=5, hidden_channels=8, kernel_size=3)
+
+    for index, name in enumerate(GATE_ORDER):
+        block = cell.conv.bias[gate_rows(cell, index)]
+        expected = 1.0 if index == FORGET_GATE_INDEX else 0.0
+        assert torch.all(block == expected), f"gate {name!r} bias should be {expected}"
+
+
+def test_forget_gate_is_the_slice_the_forward_pass_actually_uses():
+    """Guards the i,f,o,g order: nn.LSTM uses i,f,g,o, so a copied recipe would
+    put the 1.0 on the output gate with no shape error to reveal it."""
+    cell = ConvLSTMCell(input_channels=4, hidden_channels=6, kernel_size=1)
+    with torch.no_grad():
+        cell.conv.weight.zero_()  # the bias alone decides the gates
+
+    x = torch.zeros(1, 4, 3, 3)
+    c_prev = torch.ones(1, 6, 3, 3)
+    h_next, c_next = cell(x, (torch.zeros(1, 6, 3, 3), c_prev))
+
+    # i = sigmoid(0) = 0.5, g = tanh(0) = 0, so c_next = f * c_prev exactly.
+    assert torch.allclose(c_next, torch.full_like(c_next, torch.sigmoid(torch.tensor(1.0))),
+                          atol=1e-6), "the 1.0 bias must land on f, not o or g"
+
+
+def test_forget_gate_retains_more_than_a_zero_bias_would():
+    cell = ConvLSTMCell(input_channels=4, hidden_channels=6, kernel_size=1)
+    with torch.no_grad():
+        cell.conv.weight.zero_()
+    state = (torch.zeros(1, 6, 3, 3), torch.ones(1, 6, 3, 3))
+    x = torch.zeros(1, 4, 3, 3)
+
+    with torch.no_grad():
+        for _ in range(3):  # T=3, the configured sequence length
+            state = cell(x, state)
+    retained = float(state[1].mean())
+
+    assert retained > 0.5 ** 3 * 1.5, "a zero forget bias would decay to 0.125 by T=3"
+    assert retained == pytest.approx(float(torch.sigmoid(torch.tensor(1.0))) ** 3, abs=1e-5)
+
+
+def test_input_half_is_xavier_and_recurrent_half_is_orthogonal():
+    c_in, h, k = 12, 16, 3
+    cell = ConvLSTMCell(input_channels=c_in, hidden_channels=h, kernel_size=k)
+
+    for index, name in enumerate(GATE_ORDER):
+        block = cell.conv.weight[gate_rows(cell, index)]
+
+        # Xavier uniform over per-gate fan-in/fan-out: bound = sqrt(6/(fan_in+fan_out)).
+        bound = (6.0 / (c_in * k * k + h * k * k)) ** 0.5
+        input_half = block[:, :c_in]
+        assert input_half.abs().max() <= bound + 1e-6, f"gate {name!r} exceeds the Xavier bound"
+        assert input_half.abs().max() > 0.5 * bound, f"gate {name!r} looks unscaled"
+
+        # Orthogonal rows: flattening (h, h, k, k) to (h, h*k*k) gives W @ W.T = I.
+        recurrent = block[:, c_in:].reshape(h, -1)
+        assert torch.allclose(recurrent @ recurrent.T, torch.eye(h), atol=1e-5), \
+            f"gate {name!r} recurrent half is not orthogonal"
+
+
+def test_initialisation_survives_a_cell_without_bias():
+    cell = ConvLSTMCell(input_channels=4, hidden_channels=6, kernel_size=3, bias=False)
+    assert cell.conv.bias is None
+    h, c = cell(torch.randn(1, 4, 5, 5))
+    assert torch.isfinite(h).all() and torch.isfinite(c).all()
+
+
+def test_every_gate_block_is_initialised_distinctly():
+    """A slicing bug that wrote one block four times would pass norm checks."""
+    cell = ConvLSTMCell(input_channels=8, hidden_channels=8, kernel_size=3)
+    blocks = [cell.conv.weight[gate_rows(cell, i)] for i in range(len(GATE_ORDER))]
+    for i in range(len(blocks)):
+        for j in range(i + 1, len(blocks)):
+            assert not torch.allclose(blocks[i], blocks[j]), f"gates {i} and {j} are identical"
+
+
+# -- CLI ---------------------------------------------------------------------------------
+
+def parse_train_args(argv):
+    import argparse
+
+    from sinkholes.training.train import add_arguments
+
+    parser = argparse.ArgumentParser()
+    add_arguments(parser)
+    return parser.parse_args(argv)
+
+
+@pytest.mark.parametrize("flag", ["--convlstm_hidden", "--convlstm_hidden_channels"])
+def test_both_hidden_flag_spellings_reach_the_same_option(flag):
+    """The long name matches the constructor kwarg; the short one is what
+    existing job scripts already pass, so both have to work."""
+    assert parse_train_args([flag, "512"]).convlstm_hidden == 512
+
+
+def test_hidden_flag_defaults_to_the_unset_sentinel():
+    args = parse_train_args([])
+    assert args.convlstm_hidden == 0
+    model = ConvLSTMUNet(n_channels_per_timestep=1, n_classes=1,
+                         convlstm_hidden_channels=args.convlstm_hidden)
+    assert model.convlstm_hidden_channels == DEFAULT_CONVLSTM_HIDDEN_CHANNELS

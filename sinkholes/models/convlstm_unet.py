@@ -37,6 +37,20 @@ CONFIG_KEY = "convlstm_unet_config"
 #: [B, C*T, H, W] form ambiguous.
 SUPPORTED_CHANNELS_PER_TIMESTEP = (1, 2)
 
+#: Hidden width of the ConvLSTM when nothing is specified. Deliberately *not*
+#: the bottleneck width: at a 200x100 patch the bottleneck grid is only ~13x7,
+#: and a cell matched to 1024 channels there is 75.5M parameters — 71% of the
+#: whole network — against 11.8M (27%) at 256. The decoder still receives the
+#: bottleneck width; ``convlstm_proj`` widens the hidden state back up.
+DEFAULT_CONVLSTM_HIDDEN_CHANNELS = 256
+
+#: Index of the forget gate in the packed gate axis. This cell emits the gates
+#: in the order i, f, o, g — NOT torch.nn.LSTM's i, f, g, o — so any recipe
+#: copied from a standard LSTM would land on the wrong slice, silently, with
+#: no shape error to catch it.
+GATE_ORDER = ("i", "f", "o", "g")
+FORGET_GATE_INDEX = GATE_ORDER.index("f")
+
 
 class ConvLSTMCell(nn.Module):
     """A single ConvLSTM cell. Gates are 2D convolutions, so spatial dims persist.
@@ -62,6 +76,50 @@ class ConvLSTMCell(nn.Module):
             padding=self.kernel_size // 2,
             bias=bias,
         )
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        """Gate-aware initialisation, replacing Conv2d's generic default.
+
+        The single convolution is really eight blocks: four gates, each with an
+        input-to-hidden half (columns ``[:C_in]``) and a recurrent
+        hidden-to-hidden half (columns ``[C_in:]``). They are initialised
+        differently on purpose:
+
+        - **input-to-hidden: Xavier.** Fan-in and fan-out are computed per gate,
+          so each gate is scaled for the one hidden block it actually feeds
+          rather than for the packed 4H output.
+        - **hidden-to-hidden: orthogonal.** The recurrent path is applied
+          repeatedly, so an orthogonal map keeps the state's scale steady across
+          the unroll instead of compounding it (Saxe et al., 2014).
+        - **biases: zero, except the forget gate, which starts at 1.**
+          A zero forget bias means ``f = sigmoid(0) = 0.5``, halving the cell
+          state every timestep — at T=3 the oldest interferogram would reach the
+          decoder at ~25% strength. Starting at 1 gives ``f ~ 0.73``, so the
+          sequence is remembered by default and the model has to learn to
+          forget (Jozefowicz et al., 2015).
+
+        Each block is built in its own contiguous tensor and copied in: the
+        strided view ``weight[rows, :C_in]`` cannot be passed to
+        ``orthogonal_``, which reshapes its argument.
+        """
+        h, c_in, k = self.hidden_channels, self.input_channels, self.kernel_size
+        with torch.no_grad():
+            for gate in range(len(GATE_ORDER)):
+                rows = slice(gate * h, (gate + 1) * h)
+
+                input_half = torch.empty(h, c_in, k, k)
+                nn.init.xavier_uniform_(input_half)
+                self.conv.weight[rows, :c_in].copy_(input_half)
+
+                recurrent_half = torch.empty(h, h, k, k)
+                nn.init.orthogonal_(recurrent_half)
+                self.conv.weight[rows, c_in:].copy_(recurrent_half)
+
+            if self.conv.bias is not None:
+                self.conv.bias.zero_()
+                forget = slice(FORGET_GATE_INDEX * h, (FORGET_GATE_INDEX + 1) * h)
+                self.conv.bias[forget].fill_(1.0)
 
     def init_state(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         b, _, h, w = x.shape
@@ -129,10 +187,12 @@ class ConvLSTMUNet(nn.Module):
         self.bottleneck_channels = 1024 // factor
         self.down4 = Down(512, self.bottleneck_channels)
 
-        # None (or 0, the CLI's spelling of "unset") means: match the U-Net
-        # bottleneck, so the decoder consumes the hidden state directly.
+        # None (or 0, the CLI's spelling of "unset") selects the default width.
+        # It is a flat number rather than the bottleneck width, so --bilinear
+        # no longer changes the size of the recurrent state: how far the decoder
+        # upsamples has no bearing on how much memory the sequence needs.
         hidden = (
-            self.bottleneck_channels
+            DEFAULT_CONVLSTM_HIDDEN_CHANNELS
             if convlstm_hidden_channels in (None, 0)
             else int(convlstm_hidden_channels)
         )

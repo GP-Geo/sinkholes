@@ -38,7 +38,7 @@ from ..device import get_device, memory_format_for
 from ..meta import find_11day_sequences, load_coord_dict
 from ..models.attention_unet import AttentionUNet
 from ..models.convlstm_unet import CONFIG_KEY as CONVLSTM_CONFIG_KEY
-from ..models.convlstm_unet import ConvLSTMUNet
+from ..models.convlstm_unet import DEFAULT_CONVLSTM_HIDDEN_CHANNELS, ConvLSTMUNet
 from ..models.unet import UNet
 from ..paths import asset
 from .evaluate import evaluate
@@ -130,8 +130,12 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--add_attn", action="store_true", help="UNet + bottleneck attention")
     p.add_argument("--convlstm_unet", action="store_true",
                    help="ConvLSTM U-Net (requires --add_temporal)")
-    p.add_argument("--convlstm_hidden", type=int, default=0,
-                   help="ConvLSTM hidden channels (0 = match the bottleneck, 1024)")
+    p.add_argument("--convlstm_hidden", "--convlstm_hidden_channels",
+                   dest="convlstm_hidden", type=int, default=0,
+                   help=f"ConvLSTM hidden channels "
+                        f"(0 = the default, {DEFAULT_CONVLSTM_HIDDEN_CHANNELS}). The value "
+                        f"used is written into the checkpoint, so it is restored on load "
+                        f"whatever the default becomes later.")
     p.add_argument("--convlstm_kernel", type=int, default=3)
 
     p.add_argument("--reporter", action=argparse.BooleanOptionalAction, default=True,

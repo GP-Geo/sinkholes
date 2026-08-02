@@ -42,6 +42,10 @@ FIRST_CONV_WEIGHT = "inc.double_conv.0.weight"
 #: holds parameters where the plain U-Net's Sequential stops at 4.
 ATTENTION_UNET_MARKER = "down1.maxpool_conv.1.double_conv.5.weight"
 
+#: The ConvLSTM's packed gate convolution. Its output axis is 4 * hidden, which
+#: makes the hidden width recoverable from the weights alone.
+CONVLSTM_GATE_WEIGHT = "convlstm.conv.weight"
+
 
 @dataclass(frozen=True)
 class Architecture:
@@ -95,6 +99,21 @@ def infer_input_channels(state_dict: Mapping[str, Any]) -> Optional[int]:
     return None if weight is None else int(weight.shape[1])
 
 
+def infer_convlstm_hidden(state_dict: Mapping[str, Any]) -> Optional[int]:
+    """Hidden width read straight off the gate convolution, or None.
+
+    The gate conv emits four gates stacked on the output axis, so its shape is
+    ``(4 * hidden, C_in + hidden, k, k)`` and ``hidden = shape[0] // 4``. This
+    is what keeps checkpoints written before ``CONFIG_KEY`` existed loadable
+    across a change to the default hidden size: the weights say what they need,
+    so no default has to guess right.
+    """
+    weight = state_dict.get(CONVLSTM_GATE_WEIGHT)
+    if weight is None or getattr(weight, "ndim", 0) != 4:
+        return None
+    return int(weight.shape[0]) // 4
+
+
 def strip_non_parameters(state_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Pop non-parameter keys **in place**; return what was removed.
 
@@ -110,6 +129,9 @@ def _build_convlstm(state_dict, *, n_channels_per_timestep=None, treat_nodata_re
                     n_classes=1, bilinear=False, **_):
     # Hidden size, kernel and channels-per-timestep come from the config the
     # trainer embedded in the checkpoint; these are only fallbacks for old files.
+    # The hidden fallback is read from the weights rather than left to the
+    # constructor default, so a checkpoint predating CONFIG_KEY still rebuilds
+    # at its own width instead of at whatever the current default happens to be.
     if n_channels_per_timestep is None:
         n_channels_per_timestep = 2 if treat_nodata_regions else 1
     return build_convlstm_unet(
@@ -117,6 +139,7 @@ def _build_convlstm(state_dict, *, n_channels_per_timestep=None, treat_nodata_re
         n_channels_per_timestep=n_channels_per_timestep,
         n_classes=n_classes,
         bilinear=bilinear,
+        convlstm_hidden_channels=infer_convlstm_hidden(state_dict),
     )
 
 
