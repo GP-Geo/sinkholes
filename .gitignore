@@ -14,5 +14,10 @@
 # locally downloaded patches and the train-ready tree derived from them
 /data/
 
+# LSF scheduler stdout/stderr from scripts/ (the directory itself stays tracked)
+/logs/*
+!/logs/.gitkeep
+
 .DS_Store
+._*
 __pycache__/

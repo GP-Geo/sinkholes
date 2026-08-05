@@ -2,8 +2,14 @@
 
 Run as ``sinkholes count-positives`` after generating patches — training skips
 any interferogram whose ``nonz_num`` is ``'none'``, so a stale dictionary
-silently excludes data. Reads the counts off the ``*_nonz_*`` files' shapes;
-interferograms without a nonz file in the patch directory are set to ``'none'``.
+silently excludes data. Reads the counts off the ``*_nonz_*`` files' shapes.
+
+Counts already in the dictionary are kept: an interferogram found in the patch
+directory is recounted, one that is absent keeps whatever count it had, and
+only an interferogram that has never been counted is initialised to ``'none'``.
+The patch population is fixed once patches are generated, so a single run over
+the full patch directory fills the dictionary and later partial runs (a local
+subset, one region) extend it instead of resetting the ids they cannot see.
 
 Reads and writes are explicit paths (``--intf_dict`` in, ``--out_path`` out;
 they may be the same file).
