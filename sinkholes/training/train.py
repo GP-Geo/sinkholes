@@ -142,6 +142,19 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                    help="per-epoch table + results.csv + curves.png")
     p.add_argument("--patience", type=int, default=0,
                    help="early-stop after N epochs without val/dice improvement (0 = off)")
+    p.add_argument("--lr_schedule", type=str, default="plateau", choices=["plateau", "cosine"],
+                   help="plateau: cut the LR when val/dice stops improving. cosine: decay "
+                        "from --learning-rate to --min_lr over --epochs, ignoring val "
+                        "(deterministic, so runs stay comparable when val is small and noisy)")
+    p.add_argument("--lr_factor", type=float, default=0.5,
+                   help="plateau: multiply the LR by this on each plateau")
+    p.add_argument("--lr_patience", type=int, default=5,
+                   help="plateau: epochs without val/dice improvement before cutting the LR. "
+                        "Kept short deliberately — on the k10split run the first cut is what "
+                        "broke a five-epoch plateau; a longer patience delays it past the "
+                        "point where it helps")
+    p.add_argument("--min_lr", type=float, default=1e-8,
+                   help="floor for both schedules; stops the LR decaying into dead epochs")
     p.add_argument("--save_best_only", action="store_true",
                    help="write only best.pt / last.pt, not one checkpoint per epoch")
     p.add_argument("--save_val", action="store_true",
@@ -340,7 +353,16 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath):
 
     optimizer = optim.RMSprop(model.parameters(), lr=args.lr, weight_decay=1e-8,
                               momentum=0.999, foreach=True)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "max", patience=5)
+    # 'plateau' reacts to val/dice, so a noisy validation curve can trigger a cut
+    # that has nothing to do with real progress; 'cosine' follows a fixed path and
+    # keeps runs comparable. Both stop at --min_lr rather than decaying to nothing.
+    if args.lr_schedule == "cosine":
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.epochs, eta_min=args.min_lr)
+    else:
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, "max", factor=args.lr_factor, patience=args.lr_patience,
+            min_lr=args.min_lr)
     grad_scaler = torch.amp.GradScaler(enabled=args.amp)
     criterion = (nn.CrossEntropyLoss() if model.n_classes > 1
                  else nn.BCEWithLogitsLoss(pos_weight=torch.tensor([args.pos_w], device=device)))
@@ -479,7 +501,11 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath):
                 save_val=args.save_val, metrics_out=val_metrics,
                 loss_fn=val_loss_fn, samples_out=val_samples,
             )
-            scheduler.step(val_score)
+            # ReduceLROnPlateau steps on the metric; CosineAnnealingLR on the epoch.
+            if args.lr_schedule == "cosine":
+                scheduler.step()
+            else:
+                scheduler.step(val_score)
 
             if val_samples and "image" in val_samples:
                 try:
