@@ -21,3 +21,6 @@
 .DS_Store
 ._*
 __pycache__/
+
+# regeneration backups (JSON side-cars, timestamped)
+/backups/
