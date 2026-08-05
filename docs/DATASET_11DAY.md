@@ -98,8 +98,12 @@ Exits non-zero on any failure, so it can gate a pipeline.
   complete scene inventory across all durations, from the pre-package version
   of this project. Useful as a record of what exists; its `nonz_num` values are
   stale and it says nothing about alignability or patch coverage.
-- `deadsea_sinkholes_data/intf_coord.json` — a convenience copy for others
-  reading the shared tree. Sync it by hand after a regeneration.
+- `deadsea_sinkholes_data/intf_coord.json` — 716 entries across all durations
+  (299 of the 11-day, plus 44/77/33/22-day and longer). **Deliberately not
+  overwritten** by the 11-day regeneration: it is the shared tree's own record
+  and other people read it. It is not this dataset and must not be passed to
+  the 11-day commands — the 437-entry `assets/intf_coord.json` is the only
+  dictionary that describes the 2-stride 11-day patch tree.
 
 ## Known stale
 
