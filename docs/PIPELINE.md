@@ -196,7 +196,10 @@ suppression term inside no-data areas. Validation reports the *same* objective, 
 `.pth` per epoch unless `--save_best_only`; `interrupted.pt` on Ctrl-C), `results.csv`
 (one row per epoch), `curves.png`, `validation/preds/epoch_*.png` (input/GT/probability
 grids of the same patches every `--sample_every` epochs — a flipbook of the model
-improving), `logs/reporter.log`, the run log, and `test_dataset_<job>.pkl` — the
+improving; the `--n_samples` patches span the range of ground-truth area in the
+validation set, sparsest to densest, and are kept `--sample_min_sep` samples apart so
+the grid never shows one sinkhole through several overlapping windows),
+`logs/reporter.log`, the run log, and `test_dataset_<job>.pkl` — the
 held-out split that feeds `test-patches`. `--patience N` early-stops; `--reporter/
 --no-reporter` toggles the console table. Note `val/F1` pools every pixel (micro) while
 `val/dice` averages per batch (macro); they differ by design.

@@ -162,6 +162,10 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--sample_every", type=int, default=1,
                    help="save a validation sample grid every N epochs (0 = off)")
     p.add_argument("--n_samples", type=int, default=4)
+    p.add_argument("--sample_min_sep", type=int, default=4,
+                   help="minimum distance, in validation samples, between the patches "
+                        "shown in the sample grid (windows overlap by half a patch, so "
+                        "neighbouring indices show the same ground)")
 
 
 def build_model(args, device):
@@ -493,7 +497,8 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath):
             # Channel k_prevs is the current interferogram in a temporal stack
             # (oldest -> newest); later channels are validity maps.
             cur_channel = args.k_prevs if args.add_temporal else 0
-            val_samples = {"n": args.n_samples, "channel": cur_channel} if want_samples else None
+            val_samples = ({"n": args.n_samples, "channel": cur_channel,
+                            "min_sep": args.sample_min_sep} if want_samples else None)
 
             val_score = evaluate(
                 model, val_loader, device, args.amp,

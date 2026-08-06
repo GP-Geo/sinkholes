@@ -100,6 +100,75 @@ def object_level_evaluate(
     return ol_recall, ol_precision, batch_gt_area, feature_lists
 
 
+#: Candidate patches for the sample grid, as (sample index, positive pixels,
+#: image, ground truth, probability). Sample index is the dataset index when
+#: the loader is unshuffled, and :class:`SubsiDataset` lays patches out in grid
+#: order, so neighbouring indices are windows overlapping by half a patch.
+#: Index distance is therefore a cheap stand-in for spatial distance. It is
+#: conservative in two ways: it also separates across interferogram boundaries
+#: (harmless — a few candidates are passed over), and it cannot recognise
+#: vertical neighbours, which sit a whole grid row apart.
+
+
+def _prune_pool(pool, cap: int, min_sep: int) -> None:
+    """Trim the candidate pool back to `cap`, keeping its range of GT areas.
+
+    Dropped first is any sample crowded against another pooled one, then the
+    most redundant by area: sorted by positive-pixel count, the entry whose
+    two neighbours are closest together. Only interior entries are considered,
+    so the emptiest and fullest patches seen always survive and what remains
+    stays spread across the range.
+    """
+    while len(pool) > cap:
+        order = sorted(range(len(pool)), key=lambda k: (pool[k][1], pool[k][0]))
+
+        def redundancy(p):
+            k = order[p]
+            crowded = any(abs(pool[k][0] - pool[j][0]) < min_sep
+                          for j in range(len(pool)) if j != k)
+            return (0 if crowded else 1,
+                    pool[order[p + 1]][1] - pool[order[p - 1]][1], k)
+
+        victims = [redundancy(p) for p in range(1, len(order) - 1)]
+        pool.pop(min(victims)[2] if victims else len(pool) - 1)
+
+
+def _spread_samples(pool, n: int, min_sep: int):
+    """`n` candidates spanning the pool's positive-pixel range, sparsest first.
+
+    The targets are `n` evenly spaced ranks in the area-sorted pool — so the
+    grid runs from a patch with barely any sinkhole to the fullest one seen.
+    Each target takes the nearest-ranked candidate still `min_sep` samples
+    clear of everything already picked; separation is relaxed only to top up a
+    grid that would otherwise come out short.
+    """
+    ranked = sorted(pool, key=lambda c: (c[1], c[0]))
+    if not ranked or n <= 0:
+        return []
+    if n == 1:
+        return [ranked[len(ranked) // 2]]
+
+    used = set()
+
+    def take(target: int, sep: int) -> None:
+        for off in range(len(ranked)):
+            for p in ((target,) if off == 0 else (target - off, target + off)):
+                if 0 <= p < len(ranked) and p not in used and all(
+                    abs(ranked[p][0] - ranked[q][0]) >= sep for q in used
+                ):
+                    used.add(p)
+                    return
+
+    targets = [round(i * (len(ranked) - 1) / (n - 1)) for i in range(n)]
+    for t in targets:
+        take(t, min_sep)
+    for t in targets:
+        if len(used) >= min(n, len(ranked)):
+            break
+        take(t, 1)
+    return [ranked[p] for p in sorted(used)]
+
+
 @torch.inference_mode()
 def evaluate(
     net,
@@ -133,7 +202,11 @@ def evaluate(
     ``gt`` and ``prob`` arrays (k, H, W) for a few patches — positives
     preferred, deterministic when the loader is not shuffled. ``channel``
     selects which input channel is shown (the current frame for temporal
-    stacks).
+    stacks). The k patches are chosen to span the range of ground-truth area
+    seen during the pass, ordered sparsest to densest, and ``'min_sep'``
+    (default 4) keeps them at least that many samples apart so the grid never
+    shows the same sinkhole through overlapping windows. Empty patches are
+    used only to top up a grid the positives could not fill.
 
     ``mode='test'`` additionally reports pixel precision/recall and the
     object-level metrics above.
@@ -147,7 +220,13 @@ def evaluate(
     _tp = _fp = _fn = 0.0
     _loss_sum, _loss_n = 0.0, 0
     _n_samples = int(samples_out.get("n", 4)) if samples_out is not None else 0
+    _min_sep = max(1, int(samples_out.get("min_sep", 4))) if samples_out is not None else 1
+    # Candidates are kept as (index, positive pixels, image, gt, prob). The cap
+    # bounds what is held on the host: a few MB at 200x100, whatever the val
+    # set size, while still being wide enough to choose a spread from.
+    _pool_cap = max(6 * _n_samples, 24)
     _samp_pos, _samp_any = [], []
+    _seen = 0
     pred_batches, image_batches, true_mask_batches = [], [], []
 
     with torch.autocast(device.type if device.type != "mps" else "cpu", enabled=amp):
@@ -176,19 +255,26 @@ def evaluate(
                 mask_true_np = mask_true.squeeze(1).cpu().numpy()
                 image_np = image.squeeze(1).cpu().numpy()
 
-                if _n_samples and len(_samp_pos) < _n_samples:
+                if _n_samples:
                     _ch = samples_out.get("channel")
                     _ch = image.shape[1] - 1 if _ch is None else int(_ch)
                     _ch = min(max(_ch, 0), image.shape[1] - 1)
-                    _img_b = image[:, _ch].cpu().numpy()
-                    _prob_b = mask_prob.squeeze(1).cpu().numpy()
-                    for _i in range(_img_b.shape[0]):
-                        triple = (_img_b[_i], mask_true_np[_i], _prob_b[_i])
-                        if mask_true_np[_i].sum() > 0:
-                            if len(_samp_pos) < _n_samples:
-                                _samp_pos.append(triple)
-                        elif len(_samp_any) < _n_samples:
-                            _samp_any.append(triple)
+                    for _i in range(mask_true_np.shape[0]):
+                        # Decide from the counts already on the host, so the
+                        # extra device copies happen only for a kept candidate.
+                        _idx = _seen + _i
+                        _cnt = float(mask_true_np[_i].sum())
+                        if _cnt == 0 and (
+                            len(_samp_any) >= _n_samples
+                            or any(abs(_idx - c[0]) < _min_sep for c in _samp_any)
+                        ):
+                            continue  # empties are only ever padding
+                        _pool = _samp_pos if _cnt > 0 else _samp_any
+                        _pool.append((_idx, _cnt, image[_i, _ch].cpu().numpy(),
+                                      mask_true_np[_i], mask_prob[_i, 0].cpu().numpy()))
+                        if _cnt > 0:
+                            _prune_pool(_samp_pos, _pool_cap, _min_sep)
+                _seen += mask_true_np.shape[0]
 
                 if save_val:
                     if epoch % 2 == 0:
@@ -247,12 +333,14 @@ def evaluate(
             metrics_out["loss"] = _loss_sum / _loss_n
 
     if samples_out is not None:
-        picked = (_samp_pos + _samp_any)[:_n_samples]
+        picked = _spread_samples(_samp_pos, _n_samples, _min_sep)
+        if len(picked) < _n_samples:  # too few positives — pad with empty patches
+            picked = picked + _samp_any[:_n_samples - len(picked)]
         if picked:
-            samples_out["image"] = np.stack([p[0] for p in picked])
-            samples_out["gt"] = np.stack([p[1] for p in picked])
-            samples_out["prob"] = np.stack([p[2] for p in picked])
-            samples_out["n_positive"] = len(_samp_pos)
+            samples_out["image"] = np.stack([p[2] for p in picked])
+            samples_out["gt"] = np.stack([p[3] for p in picked])
+            samples_out["prob"] = np.stack([p[4] for p in picked])
+            samples_out["n_positive"] = sum(1 for p in picked if p[1] > 0)
 
     if mode == "test":
         results = {
