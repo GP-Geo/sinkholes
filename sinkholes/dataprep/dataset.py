@@ -6,6 +6,19 @@ or ``(2T, H, W)`` when validity channels are appended — BLOCK layout
 ``[img_t0..img_t{T-1}, V_t0..V_t{T-1}]``. The mask is ``(H, W)`` int64 class
 indices and, for temporal samples, belongs to the **newest** timestep.
 
+Both paths cover the **same patches**: a sample exists where the interferogram
+being predicted has a positive mask, so a temporal and a single-frame run over
+one partition hold the same coordinates and differ only in input depth. Only
+the target's own definition moves that set — ``--union_temporal_mask`` targets
+the union over the stack and samples the union's coordinates to match.
+
+Negatives — all-zero patches from an annulus around the positives — are added
+on top of that set by :class:`RingNegatives`, and the two kinds are kept apart
+by which split they reach. ``ring_negatives`` is the experiment's *training*
+negatives (train split only, radii and ratio swept from the CLI);
+``val_negatives`` is the fixed measurement set (val split only, configuration
+pinned by :func:`validation_negatives`).
+
 Pickle compatibility: trained runs pickle their held-out test split, and those
 pickles restore instances by attribute (``image_data``, ``mask_data``,
 ``index_map``, ``temporal``, ``mask_values``, ``n_value_channels``) without
@@ -67,6 +80,11 @@ class RingNegatives:
     Radii are in patch-grid units. Candidates must be empty at *every*
     timestep (the union grid) — a "negative" that was positive last month is
     not a negative.
+
+    The draw depends only on ``seed`` and on the candidate set, never on the
+    global RNG: :func:`numpy.random.default_rng` is built fresh per call. Two
+    runs over one partition therefore draw identical negatives whatever else
+    differs between them, which is what :func:`validation_negatives` relies on.
     """
 
     inner: int = 1
@@ -90,6 +108,34 @@ class RingNegatives:
         return [tuple(c) for c in rng.choice(candidates, size=k, replace=False).tolist()]
 
 
+#: The validation-negative configuration, fixed on purpose (--add_val_negatives).
+#:
+#: Training negatives are an experimental variable — ``--neg_ring_outer`` and
+#: ``--neg_per_pos`` are swept, and that is the point of them. Validation
+#: negatives are the opposite: they are part of the *ruler*, so they are pinned
+#: here rather than exposed as flags. Two runs on one partition and one seed are
+#: then scored on byte-identical validation samples however their training
+#: negatives were configured and whatever architecture they use, which is what
+#: makes their val/dice directly comparable.
+VAL_NEGATIVE_INNER = 1
+VAL_NEGATIVE_OUTER = 3
+VAL_NEGATIVE_PER_POS = 1.0
+
+
+def validation_negatives(seed: int) -> RingNegatives:
+    """The fixed 1:1 validation-negative sampler for a run seed.
+
+    ``seed`` is the run seed, and it is the only thing that moves: the radii
+    and the ratio are constants. The sampler is applied once, when the
+    validation dataset is built, so the negatives are drawn from the validation
+    interferograms alone and stay fixed for every epoch of the run.
+    """
+    if seed is None:
+        raise ValueError("validation negatives need a seed to be reproducible")
+    return RingNegatives(inner=VAL_NEGATIVE_INNER, outer=VAL_NEGATIVE_OUTER,
+                         per_pos=VAL_NEGATIVE_PER_POS, seed=int(seed))
+
+
 class SubsiDataset(Dataset):
     """Patches of one or more interferograms, ready for a DataLoader."""
 
@@ -110,6 +156,7 @@ class SubsiDataset(Dataset):
         add_nulls_to_train: bool = False,
         use_cleaned_patches: bool = False,
         ring_negatives: Optional[RingNegatives] = None,
+        val_negatives: Optional[RingNegatives] = None,
         spatial: bool = False,
         thresh_lat: float = 31.4,
         coord_dict: Optional[Dict[str, Any]] = None,
@@ -137,19 +184,33 @@ class SubsiDataset(Dataset):
         # can never disagree.
         self.n_value_channels: Optional[int] = None
 
+        # Which negatives, if any, this split gets. ``ring_negatives`` are the
+        # experiment's training negatives and reach the train split only;
+        # ``val_negatives`` are the fixed measurement set and reach the val
+        # split only. Resolving both to one object here means the loaders never
+        # have to know which split they are serving, and neither kind can leak
+        # into the other's set.
+        negatives = (val_negatives if self.mode == "val"
+                     else ring_negatives if self.mode == "train" else None)
+
         H, W = patch_size
         # The nonz (positive-only) files can serve directly only when nothing
-        # requires the full grids: spatial splits, temporal stacks and
-        # null-patch sampling all index into the (ny, nx, H, W) grid.
-        use_nonz_files = nonz_only and not spatial and not add_nulls_to_train and not temporal
+        # requires the full grids: spatial splits, temporal stacks, null-patch
+        # sampling and negatives all index into the (ny, nx, H, W) grid.
+        use_nonz_files = (nonz_only and not spatial and not add_nulls_to_train
+                          and not temporal and negatives is None)
 
         def path_of(kind, tid, nonz):
             d = self.image_dir if kind == "data" else self.mask_dir
             name = patch_file_name(kind, tid, H, W, stride, nonz=nonz, cleaned=use_cleaned_patches)
             return join(d, name)
 
+        # Negatives need the coordinate list too: the single-frame path
+        # normally reads the pre-extracted nonz files, which carry patches but
+        # not their (i, j) positions, and an annulus cannot be drawn without
+        # positions.
         nonz_indices: Dict[str, Any] = {}
-        if temporal:
+        if temporal or negatives is not None:
             with open(self.image_dir / "nonz_indices.json") as fh:
                 nonz_indices = json.load(fh)
 
@@ -161,13 +222,21 @@ class SubsiDataset(Dataset):
             if spatial:
                 image_data, mask_data = self._load_spatial(
                     intf_id, path_of, patch_size, thresh_lat, coord_dict,
-                    nonz_only, nonz_indices, ring_negatives,
+                    nonz_only, nonz_indices, negatives,
                     treat_nodata_regions, union_temporal_mask,
                 )
             elif temporal:
                 image_data, mask_data = self._load_temporal(
-                    intf_id, path_of, patch_size, nonz_indices, ring_negatives,
+                    intf_id, path_of, patch_size, nonz_indices, negatives,
                     treat_nodata_regions, union_temporal_mask, row_offsets=None,
+                )
+            elif negatives is not None and nonz_only:
+                # Single-frame + negatives: training negatives on the train
+                # split, validation negatives on the val split. Both use the
+                # same coordinate maths, so a single-frame val set and a
+                # temporal one hold exactly the same patches.
+                image_data, mask_data = self._load_single_ring(
+                    intf_id, path_of, patch_size, nonz_indices, negatives,
                 )
             elif use_nonz_files:
                 image_data = np.load(path_of("data", intf_id, nonz=True))
@@ -198,11 +267,22 @@ class SubsiDataset(Dataset):
         uniques = np.unique(np.concatenate([m.reshape(-1) for m in self.mask_data]))
         self.mask_values = [int(v) if float(v).is_integer() else float(v) for v in sorted(uniques.tolist())]
 
+        # Samples whose target is empty. Zero on a positives-only set; on a val
+        # set built with --add_val_negatives it is the negative count, which is
+        # what a run has to report to be readable against another.
+        self.n_negative = int(sum(int((~(m[0] > 0).any(axis=(-2, -1))).sum())
+                                  for m in self.mask_data))
+
     # -- per-interferogram loaders -----------------------------------------------------
 
     def _load_temporal(self, intf_id, path_of, patch_size, nonz_indices,
-                       ring_negatives, treat_nodata, union_mask, row_offsets):
+                       negatives, treat_nodata, union_mask, row_offsets):
         """Build (T, N, H, W) images + (N, H, W) target for one interferogram.
+
+        Samples are the positive patches of ``intf_id`` itself — the same set
+        the single-frame path loads from the nonz files — each carrying the
+        full T-frame stack as input. Coordinates absent from an earlier grid
+        are dropped: a stack needs the location to exist at every timestep.
 
         ``row_offsets`` maps tid -> rows already sliced off the top of its grid
         (spatial mode); None means the full grids are used as-is.
@@ -224,10 +304,17 @@ class SubsiDataset(Dataset):
         img_pa = [p[:ny, :nx, :H, :W] for p in img_pa]
         msk_pa = [p[:ny, :nx, :H, :W] for p in msk_pa]
 
-        # Positive coordinates: union over the whole stack, so a patch that was
-        # positive at any timestep is trained on.
+        # Sample coordinates come from whichever interferograms define the
+        # target, so every sample carries a non-empty one: the current frame
+        # by default, the whole stack only when the target is its union.
+        # Earlier timesteps are input context and never contribute
+        # coordinates of their own — a patch that was positive last month but
+        # is empty now would otherwise enter the set with an all-zero target,
+        # which the single-frame path never yields and which per-patch Dice
+        # scores 1.0 for predicting nothing.
+        coord_tids = tids if union_mask else [intf_id]
         rc, seen = [], set()
-        for tid in tids:
+        for tid in coord_tids:
             off = row_offsets[tid]
             for ij in nonz_indices.get(tid, []):
                 i, j = int(ij[0]) - off, int(ij[1])
@@ -237,13 +324,16 @@ class SubsiDataset(Dataset):
         if not rc:
             return None, None
 
-        if ring_negatives is not None and self.mode == "train":
-            # Ring negatives are checked against the union over time on
-            # purpose: a negative patch must be empty at every timestep.
+        if negatives is not None:
+            # Negatives are checked against the union over time on purpose: a
+            # negative patch must be empty at every timestep, which also makes
+            # its target — the current frame — empty. Validation negatives go
+            # through this same test, so they satisfy exactly the temporal
+            # validity a training negative does.
             union_grid = np.zeros((ny, nx), dtype=bool)
             for m in msk_pa:
                 union_grid |= (m > 0).any(axis=(-2, -1))
-            rc = rc + ring_negatives.sample(rc, union_grid)
+            rc = rc + negatives.sample(rc, union_grid)
 
         image = np.stack(
             [np.stack([p[i, j] for (i, j) in rc], axis=0) for p in img_pa], axis=0
@@ -262,8 +352,66 @@ class SubsiDataset(Dataset):
 
         return image, target
 
+    def _load_single_ring(self, intf_id, path_of, patch_size, nonz_indices, negatives):
+        """One interferogram's positive patches plus negatives, single frame.
+
+        This exists so a single-frame U-Net can be trained on the *same* data a
+        temporal run sees, minus the history — the control that separates "what
+        the negatives bought" from "what the recurrence bought". The validation
+        split reaches it too, under ``--add_val_negatives``, for the same
+        reason: a single-frame run and a temporal one must be *scored* on the
+        same patches, not merely trained on matching ones.
+
+        The coordinate maths deliberately mirrors ``_load_temporal``: same
+        positive set, same clipping to the chain's common extent, same
+        union-over-time exclusion grid, same sampler and seed. Given one
+        partition, both paths therefore draw the **same** negative patches, so
+        the pair differs in input depth and nothing else. Diverging here — for
+        instance excluding only the current frame's positives — would confound
+        the architecture with which negatives it happened to get.
+
+        Only the chain's MASK grids are read for the exclusion; its image grids
+        are not, which is what keeps this much cheaper than a temporal load.
+        ``patchify`` writes data and mask grids at the same (ny, nx), so the
+        clip agrees with the one ``_load_temporal`` computes from the images.
+        """
+        H, W = patch_size
+        img = np.load(path_of("data", intf_id, nonz=False)).astype(np.float32)
+
+        # A negative must be empty at every timestep — a patch that was positive
+        # last month is not background. Without a chain this degrades to the
+        # current frame alone, which is weaker but still correct for its own
+        # target; the log line in train.py says which applied.
+        tids = (list(self.seq_dict[intf_id]["prevs"]) + [intf_id]
+                if self.seq_dict and intf_id in self.seq_dict else [intf_id])
+        msk_pa = [np.load(path_of("mask", t, nonz=False)).astype(np.float32) for t in tids]
+
+        ny = min([p.shape[0] for p in msk_pa] + [img.shape[0]])
+        nx = min([p.shape[1] for p in msk_pa] + [img.shape[1]])
+        img = img[:ny, :nx, :H, :W]
+        msk_pa = [p[:ny, :nx, :H, :W] for p in msk_pa]
+        msk = msk_pa[-1]  # tids ends with intf_id
+
+        rc, seen = [], set()
+        for ij in nonz_indices.get(intf_id, []):
+            i, j = int(ij[0]), int(ij[1])
+            if 0 <= i < ny and 0 <= j < nx and (i, j) not in seen:
+                rc.append((i, j))
+                seen.add((i, j))
+        if not rc:
+            return None, None
+
+        union_grid = np.zeros((ny, nx), dtype=bool)
+        for m in msk_pa:
+            union_grid |= (m > 0).any(axis=(-2, -1))
+        rc = rc + negatives.sample(rc, union_grid)
+
+        image = np.stack([img[i, j] for (i, j) in rc], axis=0).astype(np.float32)
+        target = np.stack([msk[i, j] for (i, j) in rc], axis=0).astype(np.float32)
+        return image, target
+
     def _load_spatial(self, intf_id, path_of, patch_size, thresh_lat, coord_dict,
-                      nonz_only, nonz_indices, ring_negatives, treat_nodata, union_mask):
+                      nonz_only, nonz_indices, negatives, treat_nodata, union_mask):
         """Split one interferogram at a latitude line: train north of it, val/test south."""
         H, W = patch_size
         dy = coord_dict[intf_id]["dy"]
@@ -297,7 +445,7 @@ class SubsiDataset(Dataset):
                 }
             offsets["_arrays"] = (img_pa, msk_pa)
             return self._load_temporal(
-                intf_id, path_of, patch_size, nonz_indices, ring_negatives,
+                intf_id, path_of, patch_size, nonz_indices, negatives,
                 treat_nodata, union_mask, row_offsets=offsets,
             )
 
@@ -340,6 +488,7 @@ class SubsiDataset(Dataset):
         self.image_data = [np.expand_dims(image_data, axis=0)]
         self.mask_data = [np.expand_dims(mask_data, axis=0)]
         self.index_map = [[0, j] for j in range(image_data.shape[0])]
+        self.n_negative = int((~(mask_data > 0).any(axis=(-2, -1))).sum())
         uniques = np.unique(mask_data)
         self.mask_values = [int(v) if float(v).is_integer() else float(v) for v in sorted(uniques.tolist())]
         return self

@@ -255,13 +255,12 @@ def test_dataset_temporal_stack_is_chronological_with_current_last():
     ]
     ny = min(g.shape[0] for g in grids)
     nx = min(g.shape[1] for g in grids)
-    rc, seen = [], set()
-    for tid in tids:
-        for ij in nonz.get(tid, []):
-            i, j = int(ij[0]), int(ij[1])
-            if 0 <= i < ny and 0 <= j < nx and (i, j) not in seen:
-                rc.append((i, j))
-                seen.add((i, j))
+    # Coordinates come from the current interferogram alone — predecessors
+    # supply context, not patches of their own.
+    rc = [(int(i), int(j)) for i, j in nonz[current]
+          if 0 <= int(i) < ny and 0 <= int(j) < nx]
+    assert len(ds) == len(rc)
+
     from sinkholes.normalise import PATCH_RANGE_TOL, normalise_phase
 
     i0, j0 = rc[0]
