@@ -3,7 +3,7 @@
 Run after a patch regeneration to confirm the three agree. Every check is
 read-only. Exits non-zero if any check fails, so it can gate a pipeline.
 
-    python scripts/verify_dataset.py \
+    python scripts/data/verify_dataset.py \
         --intf_dict assets/intf_coord.json \
         --scene_dir /home/labs/rudich/pinkas/scenes_11day \
         --patches_root /home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/patches \

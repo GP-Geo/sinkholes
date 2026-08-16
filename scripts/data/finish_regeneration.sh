@@ -15,9 +15,9 @@
 # three sources agree.
 #
 # Requires the scene directory to hold exactly the alignable scenes:
-#   python scripts/link_scenes.py --data_dir <data> --out_dir <scenes> --clear
+#   python scripts/data/link_scenes.py --data_dir <data> --out_dir <scenes> --clear
 #
-# Submit:  bsub < scripts/finish_regeneration.sh
+# Submit:  bsub < scripts/data/finish_regeneration.sh
 
 set -o pipefail
 
@@ -38,7 +38,7 @@ echo "=== scenes: $(ls "$SCENES"/*.unw | wc -l), dictionary: $(python -c "import
 date
 
 # (1) rebuild the positive-patch index from the mask grids --------------------
-python scripts/rebuild_nonz_indices.py \
+python scripts/data/rebuild_nonz_indices.py \
   --patches_root "$OUT" \
   --patch_size 200 100 \
   --strides_per_patch 2 \
@@ -52,7 +52,7 @@ python -m sinkholes count-positives \
   --out_path "$DICT"
 
 # (3) verify: dictionary <-> headers <-> patch tree ---------------------------
-python scripts/verify_dataset.py \
+python scripts/data/verify_dataset.py \
   --intf_dict "$DICT" \
   --scene_dir "$SCENES" \
   --patches_root "$OUT" \

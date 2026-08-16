@@ -7,7 +7,7 @@ that dies partway leaves regenerated arrays beside a stale index — and
 redoing patch generation: the coordinates are recomputed from the mask grids,
 and each interferogram is cross-checked against the length of its nonz array.
 
-    python scripts/rebuild_nonz_indices.py \
+    python scripts/data/rebuild_nonz_indices.py \
         --patches_root /home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/patches \
         --days_diff 11 --strides_per_patch 2
 """

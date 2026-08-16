@@ -10,7 +10,7 @@ file per interferogram.
 This symlinks the chosen variant of the chosen duration into ``--out_dir``
 (nothing is copied; re-running is idempotent).
 
-    python scripts/link_scenes.py \
+    python scripts/data/link_scenes.py \
         --data_dir /home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data \
         --out_dir /home/labs/rudich/pinkas/scenes_11day \
         --days_diff 11 --variant int

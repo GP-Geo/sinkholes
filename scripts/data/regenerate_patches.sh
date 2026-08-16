@@ -9,10 +9,10 @@
 # Regenerate the 11-day, 2-stride patch tree IN PLACE from the current ground
 # truth, refill the positive-patch counts, and verify the result.
 #
-# Assumes scripts/link_scenes.py has already built the scene directory:
-#   python scripts/link_scenes.py --data_dir <data> --out_dir <scenes> --days_diff 11 --variant int --clear
+# Assumes scripts/data/link_scenes.py has already built the scene directory:
+#   python scripts/data/link_scenes.py --data_dir <data> --out_dir <scenes> --days_diff 11 --variant int --clear
 #
-# Submit:  bsub < scripts/regenerate_patches.sh   (from /home/labs/rudich/pinkas/sinkholes)
+# Submit:  bsub < scripts/data/regenerate_patches.sh   (from /home/labs/rudich/pinkas/sinkholes)
 #
 # Scheduler stdout/stderr land in logs/regen_patches_<jobid>.{out,err}.
 #
@@ -76,7 +76,7 @@ python -m sinkholes count-positives \
   --out_path "$DICT"
 
 # (3) verify: dictionary <-> headers <-> patch tree ---------------------------
-python scripts/verify_dataset.py \
+python scripts/data/verify_dataset.py \
   --intf_dict "$DICT" \
   --scene_dir "$SCENES" \
   --patches_root "$OUT" \
