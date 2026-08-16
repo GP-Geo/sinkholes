@@ -27,15 +27,16 @@ import torch
 import torch.nn as nn
 
 from .parts import DoubleConv, Down, OutConv, Up
+from .temporal import (
+    SUPPORTED_CHANNELS_PER_TIMESTEP,  # re-exported; callers still import it from here
+    at_latest_timestep,
+    check_channels_per_timestep,
+    to_sequence,
+)
 
 #: Key under which a ConvLSTMUNet checkpoint carries the config needed to
 #: rebuild the model. Stored alongside 'mask_values' and popped the same way.
 CONFIG_KEY = "convlstm_unet_config"
-
-#: Channels a single interferogram contributes: 1 = phase only, 2 = phase +
-#: validity (--treat_nodata_regions). Anything else would make the flat
-#: [B, C*T, H, W] form ambiguous.
-SUPPORTED_CHANNELS_PER_TIMESTEP = (1, 2)
 
 #: Hidden width of the ConvLSTM when nothing is specified. Deliberately *not*
 #: the bottleneck width: at a 200x100 patch the bottleneck grid is only ~13x7,
@@ -158,6 +159,10 @@ class ConvLSTMUNet(nn.Module):
     Anything else raises ``ValueError``.
     """
 
+    #: Checkpoint key this model's ``config_dict()`` is stored under, exposed on
+    #: the class so the trainer can write it without an isinstance chain.
+    CONFIG_KEY = CONFIG_KEY
+
     def __init__(
         self,
         n_channels_per_timestep: int = 1,
@@ -167,13 +172,7 @@ class ConvLSTMUNet(nn.Module):
         convlstm_kernel_size: int = 3,
     ):
         super().__init__()
-        if n_channels_per_timestep not in SUPPORTED_CHANNELS_PER_TIMESTEP:
-            raise ValueError(
-                f"n_channels_per_timestep must be one of {SUPPORTED_CHANNELS_PER_TIMESTEP} "
-                f"(1 = phase only, 2 = phase + validity); got {n_channels_per_timestep!r}."
-            )
-
-        self.n_channels_per_timestep = int(n_channels_per_timestep)
+        self.n_channels_per_timestep = check_channels_per_timestep(n_channels_per_timestep)
         self.n_channels = self.n_channels_per_timestep
         self.n_classes = int(n_classes)
         self.bilinear = bool(bilinear)
@@ -218,56 +217,14 @@ class ConvLSTMUNet(nn.Module):
 
     # -- input handling ----------------------------------------------------------------
 
-    def _shape_error(self, x: torch.Tensor, detail: str) -> ValueError:
-        c = self.n_channels_per_timestep
-        hint = ""
-        if x.dim() == 4 and x.shape[1] % c != 0:
-            hint = (
-                " If this is a non-temporal batch then the temporal dimension is "
-                "missing — pass --add_temporal (and --k_prevs N) when training."
-            )
-        elif x.dim() == 3:
-            hint = (
-                " A 3D tensor has no batch or temporal dimension. Note that batch "
-                "size 1 is common here, so never squeeze() the batch dim away."
-            )
-        return ValueError(
-            f"ConvLSTMUNet expects [B, T, H, W] (n_channels_per_timestep=1), "
-            f"[B, 2T, H, W] (n_channels_per_timestep=2, block layout "
-            f"[imgs..., validity...]) or the explicit [B, T, C, H, W]. "
-            f"Got shape {tuple(x.shape)} with n_channels_per_timestep={c}. {detail}{hint}"
-        )
-
     def _to_sequence(self, x: torch.Tensor) -> torch.Tensor:
         """Normalise any accepted input to [B, T, C, H, W], oldest -> newest."""
-        c = self.n_channels_per_timestep
-
-        if x.dim() == 5:
-            if x.shape[2] != c:
-                raise self._shape_error(
-                    x, f"5D input has {x.shape[2]} channels per timestep, expected {c}."
-                )
-            return x
-        if x.dim() != 4:
-            raise self._shape_error(x, f"Expected a 4D or 5D tensor, got {x.dim()}D.")
-
-        b, c_flat, h, w = x.shape
-        if c_flat % c != 0:
-            raise self._shape_error(x, f"{c_flat} channels is not divisible by {c}.")
-        t = c_flat // c
-
-        if c == 1:
-            return x.unsqueeze(2)
-
-        # Two channels per timestep arrive BLOCK-laid-out ([imgs..., validity...]),
-        # so un-flattening must go (B, C, T, H, W) then permute — a bare
-        # reshape(B, T, C, H, W) would pair each image with the wrong validity map.
-        return x.reshape(b, c, t, h, w).permute(0, 2, 1, 3, 4)
+        return to_sequence(x, self.n_channels_per_timestep, model_name="ConvLSTMUNet")
 
     @staticmethod
     def _at_latest_timestep(feat: torch.Tensor, b: int, t: int) -> torch.Tensor:
         """(B*T, C, H, W) -> (B, C, H, W) for the newest timestep (index T-1)."""
-        return feat.reshape(b, t, *feat.shape[1:])[:, t - 1]
+        return at_latest_timestep(feat, b, t)
 
     # -- forward -----------------------------------------------------------------------
 

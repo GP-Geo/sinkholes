@@ -166,8 +166,13 @@ def test_unet_channels_inferred_when_no_hint_given():
 
 
 def test_strip_non_parameters_removes_exactly_the_known_keys():
-    sd = checkpoint_for(UNet(n_channels=3, n_classes=1, bilinear=False),
-                        extra={CONFIG_KEY: dict(CONVLSTM_CONFIG)})
+    # Seeded from NON_PARAMETER_KEYS itself rather than a hand-listed pair, so a
+    # new architecture's config blob is covered the moment it is declared. A key
+    # left behind here fails load_state_dict at the end of a training run.
+    extra = {key: {"placeholder": True}
+             for key in NON_PARAMETER_KEYS if key != "mask_values"}
+    extra[CONFIG_KEY] = dict(CONVLSTM_CONFIG)
+    sd = checkpoint_for(UNet(n_channels=3, n_classes=1, bilinear=False), extra=extra)
     n_before = len(sd)
     removed = strip_non_parameters(sd)
     assert set(removed) == set(NON_PARAMETER_KEYS)

@@ -3,6 +3,9 @@
 A checkpoint already describes itself:
 
   - a ConvLSTM U-Net has ``convlstm.*`` weights (and a ``convlstm_unet_config`` blob),
+  - a temporal-attention U-Net has ``temporal_attn.*`` weights (and a
+    ``tattn_unet_config`` blob); its optional recurrent stage is named
+    ``recurrence.*`` precisely so it cannot be mistaken for the ConvLSTM above,
   - ``UNet(add_attn=True)`` has ``attn.*`` weights,
   - ``AttentionUNet`` has a deeper ``DoubleConv`` (``...double_conv.5.*``),
   - the input channel count is ``inc.double_conv.0.weight.shape[1]``.
@@ -26,13 +29,15 @@ import torch.nn as nn
 from .attention_unet import AttentionUNet
 from .convlstm_unet import CONFIG_KEY as CONVLSTM_CONFIG_KEY
 from .convlstm_unet import build_convlstm_unet
+from .tattn_unet import CONFIG_KEY as TATTN_CONFIG_KEY
+from .tattn_unet import build_tattn_unet
 from .unet import UNet
 
 logger = logging.getLogger(__name__)
 
 #: Keys a checkpoint carries that are not model parameters and must be removed
 #: before ``load_state_dict``.
-NON_PARAMETER_KEYS: Tuple[str, ...] = ("mask_values", CONVLSTM_CONFIG_KEY)
+NON_PARAMETER_KEYS: Tuple[str, ...] = ("mask_values", CONVLSTM_CONFIG_KEY, TATTN_CONFIG_KEY)
 
 #: First encoder convolution, shared by every architecture here. Its shape[1]
 #: is the input channel count the checkpoint was trained with.
@@ -45,6 +50,18 @@ ATTENTION_UNET_MARKER = "down1.maxpool_conv.1.double_conv.5.weight"
 #: The ConvLSTM's packed gate convolution. Its output axis is 4 * hidden, which
 #: makes the hidden width recoverable from the weights alone.
 CONVLSTM_GATE_WEIGHT = "convlstm.conv.weight"
+
+#: TemporalAttentionUNet's attention stage. The prefix identifies the
+#: architecture; the input projection's shape gives its width and tells us
+#: whether a recurrent stage feeds it.
+TATTN_PREFIX = "temporal_attn."
+TATTN_IN_PROJ_WEIGHT = "temporal_attn.in_proj.weight"
+
+#: Architectures whose ``n_channels`` counts channels **per timestep** rather
+#: than the flat batch channel count, so ``infer_input_channels`` on their
+#: weights must not be compared against the loader's T*C. Callers that warn on a
+#: channel mismatch have to skip these.
+PER_TIMESTEP_ARCHITECTURES: Tuple[str, ...] = ("convlstm_unet", "tattn_unet")
 
 
 @dataclass(frozen=True)
@@ -114,6 +131,23 @@ def infer_convlstm_hidden(state_dict: Mapping[str, Any]) -> Optional[int]:
     return int(weight.shape[0]) // 4
 
 
+def infer_tattn_dim(state_dict: Mapping[str, Any]) -> Optional[int]:
+    """Attention width read off the input projection, or None.
+
+    ``temporal_attn.in_proj`` is a 1x1 conv ``(dim, C_in, 1, 1)``, so ``dim`` is
+    ``shape[0]``. Same purpose as :func:`infer_convlstm_hidden`: a checkpoint
+    written before ``CONFIG_KEY`` still rebuilds at its own width rather than at
+    whatever the current default happens to be. The head count is *not*
+    recoverable this way — heads only change how the width is viewed, never a
+    parameter shape — so it falls back to the constructor default and a
+    checkpoint carrying the config blob is the only fully self-describing one.
+    """
+    weight = state_dict.get(TATTN_IN_PROJ_WEIGHT)
+    if weight is None or getattr(weight, "ndim", 0) != 4:
+        return None
+    return int(weight.shape[0])
+
+
 def strip_non_parameters(state_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Pop non-parameter keys **in place**; return what was removed.
 
@@ -143,6 +177,22 @@ def _build_convlstm(state_dict, *, n_channels_per_timestep=None, treat_nodata_re
     )
 
 
+def _build_tattn(state_dict, *, n_channels_per_timestep=None, treat_nodata_regions=False,
+                 n_classes=1, bilinear=False, **_):
+    # As with the ConvLSTM: heads, layers, recurrence and fusion depth come from
+    # the config the trainer embedded; the width is recovered from the weights so
+    # an older file still rebuilds correctly.
+    if n_channels_per_timestep is None:
+        n_channels_per_timestep = 2 if treat_nodata_regions else 1
+    return build_tattn_unet(
+        state_dict,
+        n_channels_per_timestep=n_channels_per_timestep,
+        n_classes=n_classes,
+        bilinear=bilinear,
+        tattn_dim=infer_tattn_dim(state_dict),
+    )
+
+
 def _build_unet(state_dict, *, n_channels=None, n_classes=1, bilinear=False,
                 add_attn=False, **_):
     n = n_channels if n_channels is not None else infer_input_channels(state_dict)
@@ -167,6 +217,20 @@ def _build_attention_unet(state_dict, *, n_channels=None, n_classes=1, bilinear=
 
 
 # -- registry — most specific first, plain U-Net last as the catch-all -----------------
+
+# Ahead of convlstm_unet deliberately. The hybrid (tattn_recurrence="convlstm")
+# contains a ConvLSTM cell, so if the ConvLSTM entry matched first a hybrid
+# checkpoint would rebuild as the wrong architecture. The cell is also named
+# 'recurrence.' rather than 'convlstm.' so neither guard alone is load-bearing.
+register(Architecture(
+    name="tattn_unet",
+    detect=lambda sd: (
+        TATTN_CONFIG_KEY in sd or any(k.startswith(TATTN_PREFIX) for k in sd)
+    ),
+    build=_build_tattn,
+    cli_flag="--tattn_unet",
+    description="U-Net with causal attention over the bottleneck sequence.",
+))
 
 register(Architecture(
     name="convlstm_unet",
@@ -237,6 +301,7 @@ def architecture_from_flags(**flags: bool) -> Optional[str]:
         )
     return {
         "convlstm_unet": "convlstm_unet",
+        "tattn_unet": "tattn_unet",
         "add_attn": "unet_add_attn",
         "attn_unet": "attention_unet",
     }[selected[0]]
