@@ -14,7 +14,7 @@
 # locally downloaded patches and the train-ready tree derived from them
 /data/
 
-# LSF scheduler stdout/stderr from scripts/ (the directory itself stays tracked)
+# LSF scheduler stdout/stderr from the scripts/ jobs (the directory itself stays tracked)
 /logs/*
 !/logs/.gitkeep
 
@@ -24,3 +24,6 @@ __pycache__/
 
 # regeneration backups (JSON side-cars, timestamped)
 /backups/
+
+# Claude Code local state (worktrees, session settings)
+/.claude/

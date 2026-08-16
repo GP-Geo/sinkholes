@@ -35,3 +35,6 @@ namespaces = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: exercises a real (tiny) training loop rather than one function",
+]
