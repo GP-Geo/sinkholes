@@ -61,7 +61,11 @@ Ids missing any predecessor are dropped from training; at evaluation time
 current frame. The stack is always **chronological, oldest → newest, current frame
 last** — in the dataset, inside the ConvLSTM, and through scene reconstruction. The
 training target is the **newest timestep's mask** (`--union_temporal_mask` restores the
-legacy union-over-stack target).
+legacy union-over-stack target). Samples are the **positive patches of the interferogram
+being predicted** — the same set a single-frame run sees, so the two differ only in input
+depth and their metrics are directly comparable. Predecessors supply context, never
+patches of their own; a location missing from any grid in the chain is dropped, since a
+stack needs it at every timestep.
 
 **Validity channels.** `--treat_nodata_regions` appends one validity map per timestep in
 **block layout** `[img_t0..img_tT-1, V_t0..V_tT-1]`, doubling the channel count, and
@@ -74,13 +78,16 @@ its `lidar_mask` source id) — **of the current frame AND every predecessor**.
 
 **Checkpoints describe themselves.** Every evaluation command builds its network through
 `sinkholes.models.build_from_checkpoint`, which detects the architecture from the
-weights (ConvLSTM: `convlstm.*` keys + an embedded config blob carrying hidden
-size/kernel; `--add_attn`: `attn.*` keys; AttentionUNet: its deeper `DoubleConv`
-indices; else plain UNet) and reads the input channel count off the first convolution.
-ConvLSTM channel counts are **per timestep**, not per stack. The architecture flags
-remain as explicit overrides; one that contradicts the weights is an error. Adding a
-fifth architecture is one `register()` entry in `sinkholes/models/factory.py` — no
-command changes (`sinkholes architectures` prints the registry).
+weights (temporal attention: `temporal_attn.*` keys + a config blob; ConvLSTM:
+`convlstm.*` keys + a blob carrying hidden size/kernel; `--add_attn`: `attn.*` keys;
+AttentionUNet: its deeper `DoubleConv` indices; else plain UNet) and reads the input
+channel count off the first convolution. Sequence-model channel counts are **per
+timestep**, not per stack. The architecture flags remain as explicit overrides; one
+that contradicts the weights is an error. Adding an architecture is one `register()`
+entry in `sinkholes/models/factory.py` — no command changes (`sinkholes architectures`
+prints the registry). **Registration order is match order**: the temporal-attention
+entry sits ahead of the ConvLSTM one because its hybrid variant contains a ConvLSTM
+cell, which would otherwise match the wrong detector first.
 
 ---
 
@@ -158,12 +165,37 @@ sinkholes train --epochs 30 --partition_mode random_by_intf \
 | `--add_attn` | `UNet` + channel self-attention at the bottleneck | as above |
 | `--attn_unet` | `AttentionUNet` (gates on every skip) | as above |
 | `--convlstm_unet` | `ConvLSTMUNet` | shared encoder per timestep, ConvLSTM over the bottleneck sequence |
+| `--tattn_unet` | `TemporalAttentionUNet` | shared encoder per timestep, causal attention over the bottleneck sequence |
 
-`--convlstm_unet` requires `--add_temporal`; `--convlstm_hidden` (0 = match the 1024
-bottleneck) dominates its parameter count and `--convlstm_kernel` must be odd. Hidden
-size and kernel are stored **inside the checkpoint**, so they are never re-specified at
-evaluation time. On the runs to date the ConvLSTM at batch 16 is the best model — see
-`TRAINING_RUNS.md`, including the caveat that each run drew a different split.
+Both sequence models require `--add_temporal` and count channels **per timestep**.
+
+`--convlstm_hidden` (0 = match the 1024 bottleneck) dominates the ConvLSTM's parameter
+count and `--convlstm_kernel` must be odd. Hidden size and kernel are stored **inside
+the checkpoint**, so they are never re-specified at evaluation time. On the runs to
+date the ConvLSTM is the best model — see `MODEL_RUNS.md`.
+
+`--tattn_unet` makes the *current* interferogram query its predecessors at each of the
+72 bottleneck locations, rather than compressing them into one recurrent state. It is
+past-only by construction: a sample is the current frame plus its immediate
+predecessors, so there is no future frame in the tensor to leak from. Its knobs:
+
+- `--tattn_dim` (0 = 256) and `--tattn_heads` — the head count also sets how many
+  channel groups a fused skip is split into, so it must divide 64/128/256/512.
+- `--tattn_layers` — 1 is a single present-queries-past readout. Above 1, the extra
+  layers are causal self-attention over the whole sequence, and the lower-triangular
+  mask starts to matter (at one layer it is a no-op: the only query is already the
+  last position).
+- `--tattn_recurrence convlstm` — the hybrid. A ConvLSTM runs first and attention reads
+  over **all** its hidden states instead of only the last.
+- `--tattn_fuse_skips 0..4` — how many skips are collapsed over time by the attention
+  weights, coarsest first, instead of taken from the latest frame. 0 reproduces the
+  ConvLSTM's skip contract exactly; 4 also fuses the 200×100 level, where the 12×6
+  attention field is upsampled 16×.
+
+**T is not architectural** for either model: the encoder is shared, the ConvLSTM is
+unrolled dynamically, and the attention's positional encoding is a parameter-free
+function of the offset from the present. A model trained at `--k_prevs 5` runs at
+`--k_prevs 10`, which is what `--fallback_replicate` relies on at evaluation time.
 
 **Partition modes** (`--partition_mode`):
 
@@ -182,6 +214,25 @@ interferograms); `--nonoverlap_tr_tst` (patch-level split with a spatial gap);
 patches sampled in an annulus around positives — candidates must be empty at *every*
 timestep); `--nonz_only/--no-nonz_only`; `--add_nulls_to_train`;
 `--train_with_nonz_th --nonz_th N S` (per-region positive-count threshold).
+
+**Negative validation patches (`--add_val_negatives`).** `--add_ring_negatives` reaches
+the *train* split only, so `val/dice` over a positives-only val set cannot see the false
+positives it exists to suppress — the 2026-08-10 batch moved object F1 by +0.096 while
+dice sat inside the noise floor. `--add_val_negatives` adds negatives to the
+**validation** set as well, drawn by the same annulus rule and subject to the same
+"empty at every timestep" test, so a false positive on background costs dice. It is
+independent of `--add_ring_negatives`; either may be used alone.
+
+Its configuration is *fixed in the code* (`dataset.py`: ring 1..3, 1:1) rather than
+exposed as flags, because it is the ruler and not the experiment: the set is drawn once
+from the validation interferograms using `--seed`, stays identical for every epoch, and
+depends on nothing but partition and seed. Two runs sharing those are scored on
+byte-identical samples whatever their architecture or training-negative settings. It
+requires `--seed`, is part of the resume fingerprint, and adds no new metrics —
+`val/dice` (and with it the LR schedule, early stopping and `best.pt`) is simply now
+computed over positives *and* negatives. The test split is untouched: it is scored at
+scene scale by `scripts/eval/run_eval.sh`, where the background is all there already.
+**Runs with and without it are not on the same scale**; compare like with like.
 
 **Loss.** Default: `BCEWithLogits(pos_weight=--pos_w) + soft Dice`. With
 `--treat_nodata_regions`: masked BCE (pos_weight fixed at 8.0, deliberately independent
@@ -203,6 +254,24 @@ the grid never shows one sinkhole through several overlapping windows),
 held-out split that feeds `test-patches`. `--patience N` early-stops; `--reporter/
 --no-reporter` toggles the console table. Note `val/F1` pools every pixel (micro) while
 `val/dice` averages per batch (macro); they differ by design.
+
+**Resuming a preempted job (`--resume auto`).** WEXAC preempts a job with SIGINT/SIGTERM
+and later reruns it under the *same* LSF job id. With `--resume auto` the run directory
+is `outputs/<job_name>_<timestamp>_lsf_$LSB_JOBID`, where the timestamp is the *first*
+execution's: a requeued execution does not recompute that name, it finds the directory
+by the job id (unique, and unchanged by a requeue), so `outputs/` still reads by date
+while the location stays reproducible. Every completed epoch atomically writes
+`checkpoints/resume.pt`: model, optimizer, LR scheduler, AMP scaler, best/early-stopping
+state, global step and the Python/NumPy/Torch/CUDA RNG streams. The rerun restores all
+of it, continues at the next epoch (with `--epochs` as the *total* target), and appends
+to the existing `results.csv`. Settings that define the experiment (architecture,
+`k_prevs`, ConvLSTM hidden size, partition, batch size, seed, patch geometry) are
+checked against the checkpoint and an incompatible resume is refused. `--resume <dir>`
+and `--resume <file.pt>` do the same for an explicit location; an explicitly given
+legacy `last.pt` loads *weights only*, with a warning that it is not a resume. Without
+`--resume` nothing changes: a fresh `outputs/<job>_<ts>/`. The recovery point is the
+last fully completed epoch, so an epoch interrupted part-way is repeated, not resumed
+mid-stream. `best.pt` and `last.pt` keep their model-only format.
 
 ## (3a) Patch-level test
 

@@ -58,13 +58,13 @@ it shifts every patch grid and every exported polygon.
 D=/home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data
 
 # 1. one directory, one file per interferogram (skips unalignable scenes)
-python scripts/link_scenes.py --data_dir $D --out_dir ../scenes_11day --clear
+python scripts/data/link_scenes.py --data_dir $D --out_dir ../scenes_11day --clear
 
 # 2. the dictionary
 python -m sinkholes prepare-metadata --intf_dir ../scenes_11day --out_path assets/intf_coord.json
 
 # 3. patches (hours; submit it)
-bsub < scripts/regenerate_patches.sh
+bsub < scripts/data/regenerate_patches.sh
 ```
 
 `regenerate_patches.sh` refuses to start unless the dictionary matches the
@@ -76,13 +76,13 @@ If `prepare-patches` dies after writing arrays but before
 without redoing patch generation:
 
 ```bash
-bsub < scripts/finish_regeneration.sh
+bsub < scripts/data/finish_regeneration.sh
 ```
 
 ## Verifying
 
 ```bash
-python scripts/verify_dataset.py --intf_dict assets/intf_coord.json \
+python scripts/data/verify_dataset.py --intf_dict assets/intf_coord.json \
   --scene_dir ../scenes_11day --patches_root $D/patches \
   --days_diff 11 --gt_polygon_file_path $D/sub_20260701.shp
 ```
