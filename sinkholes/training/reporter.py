@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import csv
 import logging
+import shutil
 import sys
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Iterable, Mapping, Optional
@@ -153,15 +155,74 @@ class EpochTable:
         self._rows += 1
 
 
-class ResultsCSV:
-    """Append-per-epoch CSV, flushed each row so a killed run keeps its history."""
+def _epoch_number(cell) -> Optional[int]:
+    """The epoch an 'N' or 'N/total' cell refers to, or None if unreadable."""
+    try:
+        return int(str(cell).split("/")[0].strip())
+    except (TypeError, ValueError):
+        return None
 
-    def __init__(self, path: Path, columns: Iterable[str]):
+
+class ResultsCSV:
+    """Append-per-epoch CSV, flushed each row so a killed run keeps its history.
+
+    ``keep_through`` makes it resumable: instead of truncating, the file keeps
+    the rows for epochs 1..N and the run appends N+1 onwards. Rows beyond N —
+    an epoch that was logged but whose checkpoint never landed, so it is about
+    to be repeated — are dropped rather than duplicated, and the original is
+    copied aside first so nothing is destroyed silently.
+    """
+
+    def __init__(self, path: Path, columns: Iterable[str],
+                 keep_through: Optional[int] = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.columns = list(columns)
+        self.kept = 0
+        self.backup: Optional[Path] = None
+        if keep_through is None:
+            self._write_header()
+        else:
+            self._truncate_to(int(keep_through))
+
+    def _write_header(self) -> None:
         with self.path.open("w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(self.columns)
+
+    def _truncate_to(self, epoch: int) -> None:
+        if not self.path.exists():
+            self._write_header()
+            return
+        with self.path.open(newline="", encoding="utf-8") as f:
+            rows = list(csv.reader(f))
+        header = rows[0] if rows else []
+        body = rows[1:]
+        if "epoch" in header:
+            index = header.index("epoch")
+            kept = [r for r in body
+                    if len(r) > index and (_epoch_number(r[index]) or 0) <= epoch
+                    and _epoch_number(r[index]) is not None]
+        else:  # an unreadable file: keep nothing, but never delete it
+            kept = []
+
+        if header != self.columns or len(kept) != len(body):
+            self.backup = self.path.with_name(
+                f"{self.path.stem}.bak-{time.strftime('%Y%m%d-%H%M%S')}{self.path.suffix}")
+            shutil.copy2(self.path, self.backup)
+
+        with self.path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(self.columns)
+            for row in kept:
+                writer.writerow(self._realign(row, header))
+        self.kept = len(kept)
+
+    def _realign(self, row, header) -> list:
+        """Re-order a row read under `header` into this writer's columns."""
+        if header == self.columns:
+            return row
+        as_map = dict(zip(header, row))
+        return [as_map.get(c, "") for c in self.columns]
 
     def append(self, values: Mapping) -> None:
         with self.path.open("a", newline="", encoding="utf-8") as f:
@@ -194,6 +255,27 @@ class BestTracker:
     @property
     def should_stop(self) -> bool:
         return bool(self.patience) and self._since >= self.patience
+
+    def state_dict(self) -> dict:
+        return {
+            "metric": self.metric,
+            "mode": self.mode,
+            "patience": self.patience,
+            "best": self.best,
+            "best_epoch": self.best_epoch,
+            "since": self._since,
+        }
+
+    def load_state_dict(self, state: Mapping) -> "BestTracker":
+        """Restore the best value and the early-stopping counter.
+
+        ``patience`` deliberately stays as configured now rather than as saved:
+        it is a policy knob, and raising it on a resume should take effect.
+        """
+        self.best = float(state.get("best", self.best))
+        self.best_epoch = int(state.get("best_epoch", self.best_epoch))
+        self._since = int(state.get("since", self._since))
+        return self
 
 
 # -- run figures ------------------------------------------------------------------------
