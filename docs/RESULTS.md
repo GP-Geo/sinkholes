@@ -90,6 +90,15 @@ mostly outside the val set. Dice cannot see the thing that changed.
 **Consequence: never promote or kill a model on dice again.** Dice is now only
 a training-health signal (is it learning at all, is it diverging).
 
+**The measurement, not the metric, was the problem.** `--add_val_negatives`
+puts a fixed 1:1 negative set into validation — same ring 1..3 the training
+negatives use, drawn once from the validation interferograms with the run seed,
+identical across architectures and training-negative ratios — so a false
+positive on background now costs dice. The five geo_k5 arms are being retrained
+under it (`bash scripts/submit_all.sh valneg --submit`; settings in
+`scripts/train/PRESETS.md`). Whether that closes the dice/object-F1 disagreement
+above is the question those runs answer; until they land, the rule stands.
+
 ### ③ Temporal context helps much less than we thought: +0.012, not +0.046
 
 The old "+0.046 dice from temporal context" was mostly **optimizer settings**,
