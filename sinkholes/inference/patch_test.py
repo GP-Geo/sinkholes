@@ -24,6 +24,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--attn_unet", action="store_true")
     p.add_argument("--add_attn", action="store_true")
     p.add_argument("--convlstm_unet", action="store_true")
+    p.add_argument("--tattn_unet", action="store_true")
     p.add_argument("--treat_nodata_regions", action="store_true")
 
 
@@ -46,7 +47,8 @@ def main(args) -> None:
     loaded = build_from_checkpoint(
         state_dict,
         arch=architecture_from_flags(
-            convlstm_unet=args.convlstm_unet, attn_unet=args.attn_unet, add_attn=args.add_attn
+            convlstm_unet=args.convlstm_unet, tattn_unet=args.tattn_unet,
+            attn_unet=args.attn_unet, add_attn=args.add_attn,
         ),
         n_channels=args.k_prevs + 1,
         n_classes=1,

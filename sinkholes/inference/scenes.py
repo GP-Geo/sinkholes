@@ -71,6 +71,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--attn_unet", action="store_true")
     p.add_argument("--add_attn", action="store_true")
     p.add_argument("--convlstm_unet", action="store_true")
+    p.add_argument("--tattn_unet", action="store_true")
 
     p.add_argument("--job_name", type=str, default="job")
     p.add_argument("--output_dir", type=str, default=DEFAULT_PREDICTIONS_DIR)
@@ -112,13 +113,18 @@ def resolve_intf_list(args, data_dir) -> list:
 def load_model(args, device):
     import torch
 
-    from ..models.factory import architecture_from_flags, build_from_checkpoint
+    from ..models.factory import (
+        PER_TIMESTEP_ARCHITECTURES,
+        architecture_from_flags,
+        build_from_checkpoint,
+    )
 
     state_dict = torch.load(args.model, map_location=device)
     loaded = build_from_checkpoint(
         state_dict,
         arch=architecture_from_flags(
-            attn_unet=args.attn_unet, add_attn=args.add_attn, convlstm_unet=args.convlstm_unet
+            attn_unet=args.attn_unet, add_attn=args.add_attn,
+            convlstm_unet=args.convlstm_unet, tattn_unet=args.tattn_unet,
         ),
         n_classes=1,
         bilinear=False,
@@ -126,7 +132,10 @@ def load_model(args, device):
     )
     logging.info(f"architecture {loaded.architecture} ({loaded.n_channels} in-channels)")
     num_c = (args.k_prevs + 1) * (2 if args.treat_nodata_regions else 1)
-    if loaded.architecture != "convlstm_unet" and loaded.n_channels not in (None, num_c):
+    # Skipped for the sequence models: their n_channels counts one timestep, so
+    # comparing it against the flat T*C the loader produces always disagrees.
+    if (loaded.architecture not in PER_TIMESTEP_ARCHITECTURES
+            and loaded.n_channels not in (None, num_c)):
         logging.warning(
             f"checkpoint expects {loaded.n_channels} input channels but --k_prevs "
             f"{args.k_prevs} produces {num_c}; set --k_prevs "

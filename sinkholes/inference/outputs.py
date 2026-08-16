@@ -19,13 +19,18 @@ import numpy as np
 from ..geo import aligned_origin
 from ..meta import INTF_ID_RE, intf_meta
 
-#: Operating points the confidence map is re-thresholded at.
-THRESHOLDS = (0.125, 0.25, 0.5)
+#: Operating points the confidence map is re-thresholded at. The upper end
+#: matters: models trained with --nonz_only (the default) never see a
+#: background-only patch, so they over-predict at scene scale and the useful
+#: operating point sits well above the 0.25 that eval-scenes thresholds at.
+THRESHOLDS = (0.125, 0.25, 0.5, 0.7, 0.9)
 
 
 def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--path", type=str, required=True,
                    help="an eval-scenes output directory (holds <intf>_*.npy)")
+    p.add_argument("--thresholds", type=float, nargs="+", default=list(THRESHOLDS),
+                   metavar="T", help="confidence operating points to score at")
     p.add_argument("--th", type=float, default=0.7, help="object-level overlap threshold")
     p.add_argument("--buffer", type=int, default=5, help="object-matching buffer, pixels")
     p.add_argument("--skip_ol_metrics", action="store_true")
@@ -93,25 +98,51 @@ def main(args) -> None:
         meta = intf_meta(intf, args.intf_dict_path)
         x0a, y0a = aligned_origin(meta.frame)
 
-        image = np.load(os.path.join(path, f"{intf}_image.npy"), allow_pickle=True)
         confidence = np.load(os.path.join(path, f"{intf}_pred.npy"), allow_pickle=True)
         gt = np.load(os.path.join(path, f"{intf}_gt.npy"), allow_pickle=True)
-        preds = {th: np.where(confidence > th, 1, 0) for th in THRESHOLDS}
+
+        # _image.npy is the (T, H, W) input stack -- ~3.7 GB per scene and by
+        # far the largest thing eval-scenes writes (78% of an eval directory).
+        # The METRICS NEVER READ IT: object_level_evaluate touches `image` only
+        # to build per-object features, and this caller passes features=(), so
+        # image=None produces byte-identical numbers. It is therefore loaded
+        # only for --save_figures.
+        #
+        # That is what makes an archived eval directory prunable: drop the
+        # input stacks and rescore.sh still re-thresholds in minutes, where
+        # rebuilding them costs a 3 h run_eval.sh. See docs/OUTPUTS.md.
+        image = None
+        if args.save_figures:
+            image_path = os.path.join(path, f"{intf}_image.npy")
+            if not os.path.exists(image_path):
+                raise SystemExit(
+                    f"--save_figures needs {image_path}, which is not there.\n"
+                    "Pruned eval directories keep their metrics and confidence "
+                    "maps but not the input stacks. Either drop --save_figures "
+                    "(metrics do not need it) or rebuild with run_eval.sh."
+                )
+            image = np.load(image_path, mmap_mode="r")
+
+        preds = {th: np.where(confidence > th, 1, 0) for th in args.thresholds}
 
         # The southern half of the South frame is open water/desert with no
         # LiDAR coverage; metrics run on the populated northern half only.
+        # The crop extent comes from the confidence map, which carries the
+        # scene's (H, W) exactly as gt and every frame of the input stack do --
+        # previously this was read off `image`, which is no longer loaded.
         if meta.frame == "South":
-            half = (image.shape[1] if image.ndim == 3 else image.shape[0]) // 2
-            image = image[:, :half] if image.ndim == 3 else image[:half]
+            half = confidence.shape[0] // 2
             confidence = confidence[:half]
             gt = gt[:half]
             preds = {th: p[:half] for th, p in preds.items()}
+            if image is not None:
+                image = image[:, :half] if image.ndim == 3 else image[:half]
 
         results = {}
         if not args.skip_ol_metrics:
             for th, pred in preds.items():
                 r, p, _, _ = object_level_evaluate(
-                    gt[None], pred[None], image[None] if image.ndim == 2 else image[0][None],
+                    gt[None], pred[None], None,
                     features=(), th=args.th, buffer=args.buffer,
                 )
                 results[str(th)] = {"recall": r, "precision": p}
@@ -127,7 +158,7 @@ def main(args) -> None:
 
     summary = {}
     if not args.skip_ol_metrics:
-        for th in THRESHOLDS:
+        for th in args.thresholds:
             rs = [v[str(th)]["recall"] for v in per_intf.values() if str(th) in v]
             ps = [v[str(th)]["precision"] for v in per_intf.values() if str(th) in v]
             summary[str(th)] = {

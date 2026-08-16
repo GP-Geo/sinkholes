@@ -43,6 +43,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--attn_unet", action="store_true")
     p.add_argument("--add_attn", action="store_true")
     p.add_argument("--convlstm_unet", action="store_true")
+    p.add_argument("--tattn_unet", action="store_true")
     p.add_argument("--output_polygs_dir", type=str, default="out_polygs")
     p.add_argument("--intf_dict_path", type=str, default=None)
     p.add_argument("--add_gt_polygs", action="store_true",
@@ -131,7 +132,11 @@ def main(args) -> None:
     import torch
 
     from ..device import get_device
-    from ..models.factory import architecture_from_flags, build_from_checkpoint
+    from ..models.factory import (
+        PER_TIMESTEP_ARCHITECTURES,
+        architecture_from_flags,
+        build_from_checkpoint,
+    )
 
     logging.basicConfig(level=logging.INFO)
     patch_h, patch_w = args.patch_size
@@ -154,7 +159,8 @@ def main(args) -> None:
     loaded = build_from_checkpoint(
         state_dict,
         arch=architecture_from_flags(
-            attn_unet=args.attn_unet, add_attn=args.add_attn, convlstm_unet=args.convlstm_unet
+            attn_unet=args.attn_unet, add_attn=args.add_attn,
+            convlstm_unet=args.convlstm_unet, tattn_unet=args.tattn_unet,
         ),
         n_classes=1,
         bilinear=False,
@@ -166,7 +172,10 @@ def main(args) -> None:
     net.eval()
     logging.info(f"architecture {loaded.architecture} ({loaded.n_channels} in-channels) on {device}")
     num_c = args.k_prevs + 1
-    if loaded.architecture != "convlstm_unet" and loaded.n_channels not in (None, num_c):
+    # Skipped for the sequence models: their n_channels counts one timestep, so
+    # comparing it against the flat T*C the loader produces always disagrees.
+    if (loaded.architecture not in PER_TIMESTEP_ARCHITECTURES
+            and loaded.n_channels not in (None, num_c)):
         logging.warning(f"checkpoint expects {loaded.n_channels} input channels but "
                         f"--k_prevs {args.k_prevs} produces {num_c}; "
                         f"set --k_prevs {loaded.n_channels - 1}.")
