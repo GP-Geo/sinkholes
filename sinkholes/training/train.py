@@ -15,6 +15,7 @@ starting over. See :mod:`sinkholes.training.resume`.
 """
 
 import argparse
+import json
 import logging
 import math
 import os
@@ -42,12 +43,13 @@ from ..dataprep.dataset import (
 from ..dataprep.partition import (
     discover_intf_ids,
     filter_by_nonz_count,
+    load_partition_window,
     load_preset_partition,
     split_nonoverlap_patches,
     split_preset_21,
     split_random_by_intf,
 )
-from ..dataprep.patchify import patch_dir_name, patch_file_name
+from ..dataprep.patchify import patch_file_name, resolve_patch_dirs
 from ..device import get_device, memory_format_for
 from ..meta import find_11day_sequences, load_coord_dict
 from ..models.attention_unet import AttentionUNet
@@ -63,7 +65,6 @@ from ..models.tattn_unet import (
     TemporalAttentionUNet,
 )
 from ..models.unet import UNet
-from ..paths import asset
 from .evaluate import evaluate
 from .losses import segmentation_loss
 from .reporter import (
@@ -145,7 +146,10 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--partition_mode", type=str, default="random_by_patch",
                    choices=["random_by_patch", "random_by_intf", "spatial", "preset_by_intf"])
     p.add_argument("--partition_file", type=str, default=None,
-                   help="preset partition JSON (default: the committed asset)")
+                   help="preset partition JSON; required by --partition_mode preset_by_intf. "
+                        "There is deliberately no default: assets/ holds three generations of "
+                        "partition (see assets/PARTITIONS.md) and picking one implicitly is how "
+                        "a clean-data run silently trains on the 2019-2026 noisy lists.")
     p.add_argument("--preset_test_val_21", action="store_true",
                    help="fixed 2021 temporal hold-out for val+test")
     p.add_argument("--nonoverlap_tr_tst", action="store_true",
@@ -220,6 +224,17 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                         f"ConvLSTM's 'latest timestep only' skips; {MAX_FUSED_SKIPS} "
                         f"fuses every level, including the 200x100 one where the "
                         f"12x6 attention field is upsampled 16x")
+    p.add_argument("--tattn_contrast", action=argparse.BooleanOptionalAction, default=True,
+                   help="form queries and keys from token - mean_over_time(token), so "
+                        "attention selects on how frames DIFFER. Without it the shared "
+                        "component swamps the frame-to-frame signal (0.09% of the token "
+                        "magnitude at init) and the softmax is uniform before training "
+                        "even starts -- see docs/ATTENTION_COLLAPSE.md")
+    p.add_argument("--tattn_qk_norm", action=argparse.BooleanOptionalAction, default=True,
+                   help="unit-norm queries and keys and scale the logits by one learned "
+                        "temperature, so selectivity stops depending on projection "
+                        "magnitude. --no-tattn_contrast --no-tattn_qk_norm reproduces "
+                        "every run trained before 2026-08-19")
 
     p.add_argument("--reporter", action=argparse.BooleanOptionalAction, default=True,
                    help="per-epoch table + results.csv + curves.png")
@@ -294,6 +309,8 @@ def build_model(args, device):
             tattn_layers=args.tattn_layers,
             tattn_recurrence=args.tattn_recurrence,
             tattn_fuse_skips=args.tattn_fuse_skips,
+            tattn_contrast=args.tattn_contrast,
+            tattn_qk_norm=args.tattn_qk_norm,
             # Only read when --tattn_recurrence convlstm.
             convlstm_hidden_channels=args.convlstm_hidden,
             convlstm_kernel_size=args.convlstm_kernel,
@@ -335,14 +352,9 @@ def build_datasets(args, rep):
     """Interferogram discovery, filtering, partitioning -> (train, val, test) sets."""
     H, W = args.patch_size
     days = 11 if args.train_on_11d_diff else None
-    image_dir = os.path.join(args.patches_dir, patch_dir_name("data", H, W, args.stride, days))
-    mask_dir = os.path.join(args.patches_dir, patch_dir_name("mask", H, W, args.stride, days))
-    if args.use_cleaned_patches:
-        image_dir = os.path.join(image_dir, "cleaned")
-        mask_dir = os.path.join(mask_dir, "cleaned")
+    image_dir, mask_dir = resolve_patch_dirs(args.patches_dir, (H, W), args.stride,
+                                             days_diff=days, cleaned=args.use_cleaned_patches)
     logging.info(f"patch directories: {image_dir} | {mask_dir}")
-    if not (os.path.isdir(image_dir) and os.path.isdir(mask_dir)):
-        raise SystemExit(f"patch directories not found: {image_dir} — prepare patches first")
 
     spatial = args.partition_mode == "spatial"
     coord_dict = load_coord_dict(args.intf_dict_path)
@@ -472,9 +484,13 @@ def build_datasets(args, rep):
             )
         mode = "random_by_intf"
     elif args.partition_mode == "preset_by_intf":
-        train_list, val_list = load_preset_partition(
-            args.partition_file or asset("partition_20_05_13h45.json")
-        )
+        if not args.partition_file:
+            raise SystemExit(
+                "--partition_mode preset_by_intf needs an explicit --partition_file. "
+                "assets/ holds three generations of partition; see assets/PARTITIONS.md "
+                "and pass the one this run is meant to use."
+            )
+        train_list, val_list = load_preset_partition(args.partition_file)
         test_list = []
         mode = "preset_by_intf"
     else:
@@ -486,19 +502,59 @@ def build_datasets(args, rep):
             | (set(val_list) & set(test_list))
         if overlap:
             raise SystemExit(f"interferograms appear in more than one split: {sorted(overlap)}")
+
+        # `crossview` (plan section 5b) deliberately shares interferograms with
+        # train -- it is the geo memorisation probe, scored on the band below
+        # the 31.4 deg cut. Training never reads it: load_preset_partition takes
+        # only train/val, so it cannot reach a dataset from here. Said out loud
+        # because it is the one split whose overlap with train is intended, and
+        # a future change that starts loading it would silently void the geo
+        # result.
+        if args.partition_file:
+            try:
+                with open(args.partition_file) as _fh:
+                    _cv = json.load(_fh).get("crossview")
+            except (OSError, ValueError):
+                _cv = None
+            if _cv:
+                logging.info(f"partition carries a crossview list of {len(_cv)} interferograms; "
+                             f"it is evaluation-only and is NOT loaded for training")
         logging.info(f"train intfs ({len(train_list)}): {sorted(train_list)}")
         logging.info(f"val intfs ({len(val_list)}): {sorted(val_list)}")
         logging.info(f"test intfs ({len(test_list)}): {sorted(test_list)}")
 
+        # The AOI window travels per split inside the partition file, so train
+        # and val can be restricted to different ground -- which is exactly what
+        # the geo axis does. Reading it here, from the same file that gave the
+        # interferogram lists, is what keeps training on the same ground the
+        # evaluation commands score.
+        windows = {}
+        if args.partition_file:
+            for split in ("train", "val"):
+                w = load_partition_window(args.partition_file, split)
+                if w is not None:
+                    windows[split] = w
+                    logging.info(f"{split} AOI window: lat {w[0]}-{w[1]}, lon {w[2]}-{w[3]}")
+            if not windows:
+                logging.info(f"{args.partition_file} carries no aoi_window; "
+                             f"training on the whole canvas")
+
         train_set = SubsiDataset(image_dir, mask_dir, train_list, mode="train",
-                                 ring_negatives=ring, **dataset_kwargs)
+                                 ring_negatives=ring,
+                                 aoi_window=windows.get("train"),
+                                 coord_dict=coord_dict, **dataset_kwargs)
         val_set = SubsiDataset(image_dir, mask_dir, val_list, mode="val",
-                               val_negatives=val_ring, **dataset_kwargs)
+                               val_negatives=val_ring,
+                               aoi_window=windows.get("val"),
+                               coord_dict=coord_dict, **dataset_kwargs)
         # The test split stays positives-only: it is scored by
         # scripts/eval/run_eval.sh at scene scale, where the background is
         # already all there and sampling a slice of it would only bias the
         # number.
-        test_set = (SubsiDataset(image_dir, mask_dir, test_list, mode="test", **dataset_kwargs)
+        test_set = (SubsiDataset(image_dir, mask_dir, test_list, mode="test",
+                                 aoi_window=(load_partition_window(args.partition_file, "test")
+                                             if args.partition_file else None),
+                                 coord_dict=coord_dict, **dataset_kwargs)
                     if test_list else None)
         _log_val_composition(val_set, val_ring)
         return train_set, val_set, test_set, mode
@@ -647,7 +703,9 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                 f"{model.n_channels_per_timestep} ch/timestep x T={args.k_prevs + 1} "
                 f"/ {model.n_classes} out (attn dim={model.tattn_dim}, "
                 f"heads={model.tattn_heads}, layers={model.tattn_layers}, "
-                f"fused skips={model.tattn_fuse_skips}/{MAX_FUSED_SKIPS}{recurrence})"
+                f"fused skips={model.tattn_fuse_skips}/{MAX_FUSED_SKIPS}, "
+                f"select={'contrast' if model.tattn_contrast else 'raw'}"
+                f"+{'qk_norm' if model.tattn_qk_norm else 'dot'}{recurrence})"
             )
         else:
             channels = (

@@ -45,7 +45,10 @@ set -euo pipefail
 # lives: convlstm_temporal_k5_h256_posw4_60e is the same-everything-else
 # reference, group T has two k5 ConvLSTM runs bracketing the +-0.006 noise
 # floor, and k5 carries 34% more training data than k10 for the same score.
-PARTITION="${PARTITION:-assets/partition_temporal_k5.json}"  # geo_k5|geo_k10|temporal_k5|temporal_k10
+# No default on purpose: assets/ holds three generations of partition
+# (assets/PARTITIONS.md). Defaulting to one is how a clean-data run silently
+# trains on the 2019-2026 noisy lists, so set it explicitly every time.
+PARTITION="${PARTITION:?set PARTITION=assets/partition_<axis>_k<k>[_clean].json -- see assets/PARTITIONS.md}"
 K_PREVS="${K_PREVS:-5}"                   # temporal depth; MUST match the partition's k
 POS_W="${POS_W:-4}"                       # BCE positive weight (code default is 1)
 SEED="${SEED:-42}"
@@ -75,6 +78,24 @@ HIDDEN="${HIDDEN:-256}"                   # ConvLSTM hidden width, RECURRENCE=co
 #      object boundaries, which is the opposite of what we want from precision.
 #      Run 0 and 2 before spending a slot on 4.
 FUSE_SKIPS="${FUSE_SKIPS:-0}"             # 0..4
+
+# --- frame selection --------------------------------------------------------
+# Before 2026-08-19 the attention in every run here was DEAD: the weights came
+# out at exactly 1/T, so the model averaged its history instead of choosing from
+# it (docs/ATTENTION_COLLAPSE.md, 15 of 15 checkpoints). The cause was visible at
+# initialisation -- the frame-to-frame differences are 0.09% of the token the
+# queries and keys are built from, so the softmax had nothing to separate.
+#
+# CONTRAST builds q/k from token - mean_over_time(token), so selection runs on
+# how the frames DIFFER. QK_NORM unit-norms q/k and puts the logit scale on one
+# learned temperature, so selectivity stops riding on projection magnitude --
+# without it the same block goes uniform at LR=1e-6 and one-hot at LR=1e-5.
+# Neither alone is enough; together they take effective frames used from
+# 10.97/11 to 4.43/11 at init and hold it through training.
+#
+# Set BOTH to no to reproduce a pre-2026-08-19 run exactly.
+CONTRAST="${CONTRAST:-yes}"               # yes | no
+QK_NORM="${QK_NORM:-yes}"                 # yes | no
 
 # --- negative sampling ------------------------------------------------------
 # Positives-only training (--nonz_only, the code default) fits the model on the
@@ -119,9 +140,16 @@ RESUME="${RESUME:-auto}"                  # auto | <run dir> | <checkpoint file>
 # interferograms with 5-previous chains, _k10 only those with 10. Mixing them
 # silently trains on a smaller set than you think.
 case "$PARTITION" in
-  *_k5.json)  [ "$K_PREVS" = 5 ]  || { echo "K_PREVS=$K_PREVS with a _k5 partition"  >&2; exit 1; } ;;
-  *_k10.json) [ "$K_PREVS" = 10 ] || { echo "K_PREVS=$K_PREVS with a _k10 partition" >&2; exit 1; } ;;
+  *_k5.json|*_k5_*.json)  [ "$K_PREVS" = 5 ]  || { echo "K_PREVS=$K_PREVS with a _k5 partition"  >&2; exit 1; } ;;
+  *_k10.json|*_k10_*.json) [ "$K_PREVS" = 10 ] || { echo "K_PREVS=$K_PREVS with a _k10 partition" >&2; exit 1; } ;;
 esac
+
+for v in CONTRAST QK_NORM; do
+  case "${!v}" in
+    yes|no) ;;
+    *) echo "$v must be 'yes' or 'no', got '${!v}'" >&2; exit 1 ;;
+  esac
+done
 
 case "$RECURRENCE" in
   none|convlstm) ;;
@@ -184,6 +212,8 @@ python -m sinkholes train \
   --tattn_layers "$LAYERS" \
   --tattn_recurrence "$RECURRENCE" \
   --tattn_fuse_skips "$FUSE_SKIPS" \
+  ${CONTRAST:+$([ "$CONTRAST" = yes ] && echo --tattn_contrast || echo --no-tattn_contrast)} \
+  ${QK_NORM:+$([ "$QK_NORM" = yes ] && echo --tattn_qk_norm || echo --no-tattn_qk_norm)} \
   --convlstm_hidden "$HIDDEN" \
   ${NEG_FLAGS[@]+"${NEG_FLAGS[@]}"} \
   --amp \

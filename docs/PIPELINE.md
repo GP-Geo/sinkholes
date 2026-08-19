@@ -286,6 +286,21 @@ covered fraction exceeds `--th`). Test pickles from before the rewrite still loa
 `--k_prevs` must match training — a mismatch is reported against the checkpoint's real
 channel count.
 
+Runs trained with `--partition_mode preset_by_intf` pickle no test split (the whole
+`geo_*` / `temporal_*` family), so point the command at the partition instead and it
+builds the split in place:
+
+```bash
+sinkholes test-patches --partition_file assets/partition_geo_k10.json --split test \
+  --patches_dir <patches root> --model outputs/<run>/checkpoints/best.pt \
+  --add_temporal --k_prevs 10 --convlstm_unet --patch_size 200 100 --stride 2
+```
+
+`--split` is `val`, `test` or `train`; the dataset flags mirror `train.py`'s names so they
+can be pasted out of a run's log header. Either way the set is positives-only — see
+[POSITIVES_ONLY_EVAL.md](POSITIVES_ONLY_EVAL.md) for what that number may and may not be
+compared against.
+
 ## (3b) Full-scene evaluation
 
 ```bash
@@ -302,7 +317,9 @@ thresholded at `--recon_th` and polygonised. `--intf_source` is one of `intf_lis
 (+`--intf_list id1,id2`), `test_dataset`, `preset` (+`--valset_from_partition`), or
 `all` (+`--year_range`). `--unioned_mask` unions the GT over the temporal stack;
 `--replicate_input` feeds the current frame in every temporal slot;
-`--no-add_lidar_mask` disables gating.
+`--no-add_lidar_mask` disables gating. `--positives_only` restricts prediction to tiles
+whose ground truth is non-empty — the benchmark paper's protocol, off by default, and not
+comparable with a full-scene number ([POSITIVES_ONLY_EVAL.md](POSITIVES_ONLY_EVAL.md)).
 
 Outputs under `<output_dir>/<model>/<job>_<ts>/` (default root `outputs/predictions`):
 `polygs/<intf>_predicted_polygs.shp` (EPSG:4326), `<intf>_image.npy` (`(C, H, W)`,

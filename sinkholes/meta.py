@@ -146,6 +146,107 @@ def find_11day_sequences(
     return chains, valid
 
 
+#: A dense lookback: every 11-day slot from 1 to ``lookback``. The spelling
+#: ``find_11day_sequences`` implies, and the schedule a probe should use when
+#: the question is *where* attention lands rather than how cheaply to get there.
+DENSE_SCHEDULE = "dense"
+
+
+def parse_history_schedule(spec: str, lookback: int) -> List[int]:
+    """Candidate offsets, in 11-day slots, newest first (never including 0).
+
+    ``spec`` is ``"dense"`` — every slot out to ``lookback`` — or a comma-listed
+    ``step:until`` grammar, e.g. ``"1:6,2:12,4:40"``: every slot out to 6, then
+    every second out to 12, then every fourth out to 40. Thinning the old end
+    is what lets a lookback reach back a year without paying for a frame at
+    every slot; the shared encoder costs are linear in the number of frames, so
+    ``"1:6,2:12,4:40"`` is 16 frames where dense-40 is 40.
+
+    This is only meaningful because the positional encoding takes real offsets
+    (``models/temporal_attention.py``). Once it does, a deliberately skipped
+    slot and a missing acquisition are the same thing to the model, which is
+    the whole reason one mechanism can serve both.
+    """
+    if spec == DENSE_SCHEDULE:
+        return list(range(1, int(lookback) + 1))
+
+    offsets: List[int] = []
+    cursor = 1
+    for part in spec.split(","):
+        try:
+            step_s, until_s = part.split(":")
+            step, until = int(step_s), int(until_s)
+        except ValueError:
+            raise ValueError(
+                f"bad history schedule segment {part!r} in {spec!r}; expected "
+                f"'step:until' (e.g. '1:6,2:12,4:40') or '{DENSE_SCHEDULE}'."
+            ) from None
+        if step < 1:
+            raise ValueError(f"history schedule step must be >= 1; got {step} in {spec!r}.")
+        until = min(until, int(lookback))
+        while cursor <= until:
+            offsets.append(cursor)
+            cursor += step
+    if not offsets:
+        raise ValueError(f"history schedule {spec!r} selects no offsets at lookback {lookback}.")
+    return offsets
+
+
+def frame_groups_of(meta: Dict[str, Dict[str, Any]]) -> Dict[str, set]:
+    """{'North': {ids...}, 'South': {ids...}} — built once, reused per lookup."""
+    groups: Dict[str, set] = {"North": set(), "South": set()}
+    for key, info in meta.items():
+        if info.get("frame") in groups:
+            groups[info["frame"]].add(key)
+    return groups
+
+
+def select_history(
+    intf_id: str,
+    meta: Dict[str, Dict[str, Any]],
+    *,
+    lookback: int = 10,
+    schedule: str = DENSE_SCHEDULE,
+    step_days: int = 11,
+    groups: Optional[Dict[str, set]] = None,
+) -> Tuple[List[str], List[int]]:
+    """The available history of one interferogram, holes permitted.
+
+    Where :func:`find_11day_sequences` demands an unbroken run of ``k``
+    predecessors and drops the interferogram otherwise, this keeps whatever the
+    archive actually holds and reports each frame's real age alongside it. That
+    difference is the whole cost of strictness: the archive is missing 12
+    acquisition slots on the North frame and 33 on South, so at a 40-slot
+    lookback the strict rule leaves 20 usable interferograms out of 273, while
+    this leaves all 273 with a mean of 31 frames each.
+
+    Returns ``(ids, offsets)`` oldest first, with the current interferogram last
+    at offset 0 — the same chronological convention as ``seq_dict[id]['prevs']
+    + [id]``, so a caller that already builds stacks that way only has to carry
+    the offsets alongside. Offsets are in slot units, not days.
+    """
+    info = meta.get(intf_id)
+    if info is None or info.get("frame") not in ("North", "South"):
+        raise KeyError(f"{intf_id} has no usable frame in the coordinate dictionary")
+    group = (groups or frame_groups_of(meta))[info["frame"]]
+
+    start, end, _ = parse_intf_id(intf_id)
+    ids: List[str] = []
+    offsets: List[int] = []
+    # Oldest first, so walk the candidate offsets from the far end inwards.
+    for offset in sorted(parse_history_schedule(schedule, lookback), reverse=True):
+        shift = timedelta(days=offset * step_days)
+        key = (start - shift).strftime("%Y%m%d") + "_" + (end - shift).strftime("%Y%m%d")
+        # Same frame, and itself an 11-day interferogram — the two conditions
+        # find_11day_sequences applies. Only the "no gaps" rule is dropped.
+        if key in group and parse_intf_id(key)[2] == step_days:
+            ids.append(key)
+            offsets.append(offset)
+    ids.append(intf_id)
+    offsets.append(0)
+    return ids, offsets
+
+
 def lidar_source_for(intf_id: str, mapping_path: Optional[str] = None) -> str:
     """LiDAR mask source for an id, from the fixed-column lidar_intf_mask.txt.
 

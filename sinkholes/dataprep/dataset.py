@@ -39,6 +39,7 @@ import torch
 from scipy.ndimage import binary_dilation
 from torch.utils.data import Dataset
 
+from ..geo import FRAME_ORIGINS, grid_window
 from ..normalise import PATCH_RANGE_TOL, normalise_channels
 from .patchify import patch_file_name
 
@@ -92,7 +93,14 @@ class RingNegatives:
     per_pos: float = 1.0
     seed: Optional[int] = None
 
-    def sample(self, positives, union_grid) -> List[Tuple[int, int]]:
+    def sample(self, positives, union_grid, allowed=None) -> List[Tuple[int, int]]:
+        """Negatives around ``positives``, optionally confined to ``allowed``.
+
+        ``allowed`` is a boolean grid of cells the split may use — the AOI
+        window. Without it a negative could be drawn outside the split's own
+        ground, which on the geo axis means drawing training background out of
+        the hold-out band.
+        """
         pos_grid = np.zeros_like(union_grid, dtype=bool)
         for (i, j) in positives:
             pos_grid[i, j] = True
@@ -102,7 +110,10 @@ class RingNegatives:
         ring = binary_dilation(pos_grid, structure=k_outer)
         ring &= ~(binary_dilation(pos_grid, structure=k_inner) if self.inner > 0 else pos_grid)
 
-        candidates = list(zip(*np.where(ring & ~union_grid)))
+        usable = ring & ~union_grid
+        if allowed is not None:
+            usable &= allowed
+        candidates = list(zip(*np.where(usable)))
         rng = np.random.default_rng(self.seed)
         k = min(len(candidates), int(self.per_pos * len(positives)))
         return [tuple(c) for c in rng.choice(candidates, size=k, replace=False).tolist()]
@@ -160,6 +171,7 @@ class SubsiDataset(Dataset):
         spatial: bool = False,
         thresh_lat: float = 31.4,
         coord_dict: Optional[Dict[str, Any]] = None,
+        aoi_window: Optional[Tuple[float, float, float, float]] = None,
     ):
         super().__init__()
         self.image_dir = Path(image_dir)
@@ -174,6 +186,27 @@ class SubsiDataset(Dataset):
             raise ValueError("temporal datasets need seq_dict (the 11-day chains)")
         if spatial and coord_dict is None:
             raise ValueError("spatial partitioning needs coord_dict for the latitude line")
+        if aoi_window is not None and spatial:
+            raise ValueError(
+                "aoi_window and spatial= are two different ways to restrict ground and "
+                "cannot be combined: the spatial path slices the grids by latitude, so a "
+                "window applied afterwards would be interpreted in post-slice rows and "
+                "land on the wrong ground. Use a partition file carrying aoi_window."
+            )
+        if aoi_window is not None:
+            if coord_dict is None:
+                raise ValueError(
+                    "aoi_window needs coord_dict: the window is per frame, and only "
+                    "the coordinate dictionary says which frame an interferogram is on"
+                )
+            if len(aoi_window) != 4:
+                raise ValueError(
+                    f"aoi_window must be (lat_min, lat_max, lon_min, lon_max), got {aoi_window!r}"
+                )
+        self.aoi_window = tuple(aoi_window) if aoi_window is not None else None
+        self.coord_dict = coord_dict
+        self.patch_size = tuple(patch_size)
+        self._grid_stride = (patch_size[0] // stride, patch_size[1] // stride)
 
         self.ids = list(intf_ids)
         self.mode = mode
@@ -275,6 +308,36 @@ class SubsiDataset(Dataset):
 
     # -- per-interferogram loaders -----------------------------------------------------
 
+    def _window_for(self, intf_id, ny, nx):
+        """The split's grid window for one interferogram, clamped to (ny, nx).
+
+        ``None`` means unrestricted. The window is per *frame*, because the two
+        frames have different aligned origins, so the same lat/lon box lands on
+        different grid rows in each.
+        """
+        if self.aoi_window is None:
+            return None
+        meta = self.coord_dict.get(intf_id)
+        if meta is None or meta.get("frame") not in FRAME_ORIGINS:
+            raise KeyError(
+                f"{intf_id} has no usable frame in the coordinate dictionary, "
+                f"so its AOI window cannot be resolved"
+            )
+        r0, r1, c0, c1 = grid_window(
+            meta["frame"], *self.aoi_window,
+            patch_size=self.patch_size, stride=self._grid_stride,
+        )
+        return r0, min(r1, ny), c0, min(c1, nx)
+
+    def _allowed_grid(self, window, ny, nx):
+        """Boolean (ny, nx) of cells the split may draw negatives from."""
+        if window is None:
+            return None
+        allowed = np.zeros((ny, nx), dtype=bool)
+        r0, r1, c0, c1 = window
+        allowed[r0:r1, c0:c1] = True
+        return allowed
+
     def _load_temporal(self, intf_id, path_of, patch_size, nonz_indices,
                        negatives, treat_nodata, union_mask, row_offsets):
         """Build (T, N, H, W) images + (N, H, W) target for one interferogram.
@@ -313,14 +376,23 @@ class SubsiDataset(Dataset):
         # which the single-frame path never yields and which per-patch Dice
         # scores 1.0 for predicting nothing.
         coord_tids = tids if union_mask else [intf_id]
+        # The split's AOI window, in post-slice grid coordinates. Applied to the
+        # sample coordinates rather than to the loaded grids so the arrays stay
+        # whole -- _load_spatial's row offsets and the negative sampler both
+        # index the full grid.
+        window = self._window_for(intf_id, ny, nx)
         rc, seen = [], set()
         for tid in coord_tids:
             off = row_offsets[tid]
             for ij in nonz_indices.get(tid, []):
                 i, j = int(ij[0]) - off, int(ij[1])
-                if 0 <= i < ny and 0 <= j < nx and (i, j) not in seen:
-                    rc.append((i, j))
-                    seen.add((i, j))
+                if not (0 <= i < ny and 0 <= j < nx) or (i, j) in seen:
+                    continue
+                if window is not None and not (window[0] <= i < window[1]
+                                               and window[2] <= j < window[3]):
+                    continue
+                rc.append((i, j))
+                seen.add((i, j))
         if not rc:
             return None, None
 
@@ -333,7 +405,8 @@ class SubsiDataset(Dataset):
             union_grid = np.zeros((ny, nx), dtype=bool)
             for m in msk_pa:
                 union_grid |= (m > 0).any(axis=(-2, -1))
-            rc = rc + negatives.sample(rc, union_grid)
+            rc = rc + negatives.sample(rc, union_grid,
+                                       allowed=self._allowed_grid(window, ny, nx))
 
         image = np.stack(
             [np.stack([p[i, j] for (i, j) in rc], axis=0) for p in img_pa], axis=0
@@ -392,19 +465,29 @@ class SubsiDataset(Dataset):
         msk_pa = [p[:ny, :nx, :H, :W] for p in msk_pa]
         msk = msk_pa[-1]  # tids ends with intf_id
 
+        # Mirrors _load_temporal's window handling exactly: the single-frame
+        # control must be scored on the same patches as the temporal run, so a
+        # difference in which cells the window admits would confound the
+        # architecture comparison this path exists to make.
+        window = self._window_for(intf_id, ny, nx)
         rc, seen = [], set()
         for ij in nonz_indices.get(intf_id, []):
             i, j = int(ij[0]), int(ij[1])
-            if 0 <= i < ny and 0 <= j < nx and (i, j) not in seen:
-                rc.append((i, j))
-                seen.add((i, j))
+            if not (0 <= i < ny and 0 <= j < nx) or (i, j) in seen:
+                continue
+            if window is not None and not (window[0] <= i < window[1]
+                                           and window[2] <= j < window[3]):
+                continue
+            rc.append((i, j))
+            seen.add((i, j))
         if not rc:
             return None, None
 
         union_grid = np.zeros((ny, nx), dtype=bool)
         for m in msk_pa:
             union_grid |= (m > 0).any(axis=(-2, -1))
-        rc = rc + negatives.sample(rc, union_grid)
+        rc = rc + negatives.sample(rc, union_grid,
+                                   allowed=self._allowed_grid(window, ny, nx))
 
         image = np.stack([img[i, j] for (i, j) in rc], axis=0).astype(np.float32)
         target = np.stack([msk[i, j] for (i, j) in rc], axis=0).astype(np.float32)
@@ -412,21 +495,39 @@ class SubsiDataset(Dataset):
 
     def _load_spatial(self, intf_id, path_of, patch_size, thresh_lat, coord_dict,
                       nonz_only, nonz_indices, negatives, treat_nodata, union_mask):
-        """Split one interferogram at a latitude line: train north of it, val/test south."""
+        """Split one interferogram at a latitude line: train north of it, val/test south.
+
+        The threshold row comes from :func:`grid_window`, i.e. from the frame's
+        **aligned** origin. It used to be computed from the scene's raw
+        ``north``, which is wrong: every grid on disk was cropped to
+        ``FRAME_ORIGINS`` first, and the two differ by up to ~700 pixel rows —
+        so the line landed far from the requested latitude and train/val were
+        not actually split where they claimed to be.
+
+        Patches straddling the line belong to neither side. The old arithmetic
+        assigned every row to one side or the other, which let a patch spanning
+        the line sit in both.
+        """
         H, W = patch_size
-        dy = coord_dict[intf_id]["dy"]
-        # One grid row advances the top-left by Sy = H // 2 pixels southward.
-        stride_deg = (H // 2) * dy
-        thresh_line = int(np.floor((coord_dict[intf_id]["north"] - thresh_lat) / stride_deg))
+        meta = coord_dict.get(intf_id)
+        if meta is None or meta.get("frame") not in FRAME_ORIGINS:
+            raise KeyError(f"{intf_id} has no usable frame; cannot place the spatial split line")
 
         ref = np.load(path_of("data", intf_id, nonz=False), mmap_mode="r")
-        thresh_line = max(0, min(thresh_line, ref.shape[0]))
-        train_split = self.mode == "train"
-
+        ny = ref.shape[0]
+        is_train = self.mode == "train"
+        # Above the line for train, below it for val/test; the straddling rows
+        # fall out of both windows and are dropped.
+        side = (thresh_lat, 90.0) if is_train else (-90.0, thresh_lat)
+        r0, r1, _, _ = grid_window(
+            meta["frame"], side[0], side[1],
+            patch_size=(H, W), stride=(H // 2, W // 2),
+        )
+        r0, r1 = max(0, r0), min(r1, ny)
         def load_sliced(kind, tid):
             arr = np.load(path_of(kind, tid, nonz=False)).astype(np.float32)
-            tl = min(thresh_line, arr.shape[0])
-            return arr[:tl] if train_split else arr[tl:]
+            lo, hi = min(r0, arr.shape[0]), min(r1, arr.shape[0])
+            return arr[lo:hi]
 
         image_data = load_sliced("data", intf_id)
         mask_data = load_sliced("mask", intf_id)
@@ -435,14 +536,13 @@ class SubsiDataset(Dataset):
             tids = list(self.seq_dict[intf_id]["prevs"]) + [intf_id]
             img_pa = [load_sliced("data", tid) for tid in tids]
             msk_pa = [load_sliced("mask", tid) for tid in tids]
-            if train_split:
-                offsets = {tid: 0 for tid in tids}
-            else:
-                # nonz_indices hold pre-slice grid rows; convert to post-slice.
-                offsets = {
-                    tid: min(thresh_line, np.load(path_of("data", tid, nonz=False), mmap_mode="r").shape[0])
-                    for tid in tids
-                }
+            # nonz_indices hold pre-slice grid rows; convert to post-slice.
+            # Both sides now slice from r0, so the offset is r0 for train too —
+            # it just happens to be 0 whenever the window starts at the top.
+            offsets = {
+                tid: min(r0, np.load(path_of("data", tid, nonz=False), mmap_mode="r").shape[0])
+                for tid in tids
+            }
             offsets["_arrays"] = (img_pa, msk_pa)
             return self._load_temporal(
                 intf_id, path_of, patch_size, nonz_indices, negatives,

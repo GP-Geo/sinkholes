@@ -168,3 +168,150 @@ def test_rejects_unknown_average_mode():
     with pytest.raises(ValueError, match="average"):
         reconstruct_scene([grid_of(0.3)], ConstantNet(), (4, 4), 2, 0.4,
                           device=DEVICE, average="mean")
+
+
+# ---- the paper's Confidence Factor (average='vote') --------------------------
+# Remote Sens. 2026, 18, 211 sec. 3.6.2: "a Confidence Factor as the fraction of
+# overlapping patches that assign a positive (1) label to a given pixel, taking
+# values in {0, 0.0625, ..., 1}". Thresholding it with RTh gives the binary
+# reconstruction; RTh 0.125/0.25/0.5 = at least 2/4/8 of 16 tiles.
+
+
+class HalfPositiveNet(torch.nn.Module):
+    """Positive logit on the top half of each tile, negative on the bottom."""
+
+    n_classes = 1
+
+    def forward(self, x):
+        h = x.shape[-2]
+        out = torch.full((x.shape[0], 1, *x.shape[-2:]), -10.0)
+        out[..., : h // 2, :] = 10.0
+        return out
+
+
+class ProbabilityNet(torch.nn.Module):
+    """Emits a fixed probability everywhere, via its logit."""
+
+    n_classes = 1
+
+    def __init__(self, prob):
+        super().__init__()
+        self.logit = float(np.log(prob / (1 - prob)))
+
+    def forward(self, x):
+        return torch.full((x.shape[0], 1, *x.shape[-2:]), self.logit)
+
+
+def test_vote_is_a_tile_fraction_not_a_mean_probability():
+    """The distinguishing property: a confident-but-outvoted tile counts once.
+
+    Every tile here predicts 0.9, well above the 0.5 vote threshold, so the
+    Confidence Factor is 1.0 at every predicted pixel -- where 'coverage'
+    would report the mean probability 0.9. The two modes must not agree.
+    """
+    net = ProbabilityNet(0.9)
+    vote = reconstruct_scene([grid_of(0.3)], net, (4, 4), 2, threshold=0.25,
+                             device=DEVICE, average="vote")
+    coverage = reconstruct_scene([grid_of(0.3)], net, (4, 4), 2, threshold=0.25,
+                                 device=DEVICE, average="coverage")
+    assert vote.confidence[4, 4] == pytest.approx(1.0)
+    assert coverage.confidence[4, 4] == pytest.approx(0.9)
+
+
+def test_vote_below_threshold_scores_zero_however_close():
+    """0.49 everywhere is 0 votes, not 0.49 confidence."""
+    net = ProbabilityNet(0.49)
+    result = reconstruct_scene([grid_of(0.3)], net, (4, 4), 2, threshold=0.125,
+                               device=DEVICE, average="vote")
+    assert result.confidence.max() == pytest.approx(0.0)
+    assert result.thresholded.max() == 0.0
+
+
+def test_vote_fraction_lands_on_the_papers_quantised_values():
+    """At stride 4 a FULLY interior pixel sees 16 tiles, so values are k/16.
+
+    The paper's {0, 0.0625, ..., 1} holds for interior pixels specifically --
+    "each interior pixel being included in UP TO sixteen overlapping patches".
+    Edge pixels are covered by fewer and are checked in the next test; here the
+    grid is chosen so a 6x6 block of pixels reaches the full 16.
+    """
+    net = HalfPositiveNet()
+    grid = grid_of(0.3, ny=6, nx=6, h=8, w=8)
+    result = reconstruct_scene([grid], net, (8, 8), 4, threshold=0.25,
+                               device=DEVICE, average="vote")
+
+    # Rows/cols 6..11 of the 20x20 canvas are the fully-covered block.
+    interior = result.confidence[6:12, 6:12]
+    assert interior.size == 36
+    sixteenths = np.round(interior * 16) / 16
+    assert np.allclose(interior, sixteenths, atol=1e-6), \
+        f"interior confidence must be a multiple of 1/16, got {np.unique(interior)}"
+    assert 0.0 <= interior.min() and interior.max() <= 1.0
+
+
+def test_vote_denominator_is_per_pixel_coverage_not_a_fixed_sixteen():
+    """An edge pixel is scored on the tiles that reached it, not out of 16.
+
+    A unanimous model must read 1.0 everywhere it predicted -- including
+    corners covered by a single tile. Dividing by a fixed 16 would report
+    0.0625 there and manufacture a recall cliff at every scene boundary.
+    """
+    net = ProbabilityNet(0.9)
+    result = reconstruct_scene([grid_of(0.3, ny=6, nx=6, h=8, w=8)], net,
+                               (8, 8), 4, threshold=0.25, device=DEVICE,
+                               average="vote")
+    predicted = result.confidence[result.confidence > 0]
+    assert np.allclose(predicted, 1.0), \
+        "unanimous votes are 1.0 at every coverage depth, corners included"
+    assert result.confidence[0, 0] == pytest.approx(1.0)
+
+
+def test_vote_denominator_is_tiles_that_actually_voted():
+    """Gated-out tiles lower the denominator instead of voting zero.
+
+    The paper's 'up to sixteen overlapping patches' -- a pixel at a mask edge
+    is scored on the tiles that reached it, so a fully-positive model still
+    reads 1.0 there rather than a fraction.
+    """
+    net = ProbabilityNet(0.9)
+    stack = [grid_of(0.3)]
+    out_shape = canvas_shape(3, 3, (4, 4), 2)  # 10x10; tiles span rows 0-4, 2-6, 4-8
+    gates = np.ones((1, *out_shape), dtype=np.uint8)
+    gates[0, :1, :] = 0  # only row 0 -> gates out the i=0 tile row, i=1/i=2 survive
+
+    result = reconstruct_scene(stack, net, (4, 4), 2, 0.25, device=DEVICE,
+                               lidar_gates=gates, average="vote")
+    predicted = result.confidence[result.confidence > 0]
+    assert predicted.size > 0, "some tiles must survive the gate"
+    assert np.allclose(predicted, 1.0), \
+        "surviving pixels are unanimous, so the fraction is 1.0 regardless of coverage"
+    # Rows 0-1 were reachable only by the gated-out tile row: no tile voted.
+    assert result.confidence[0, :].max() == 0.0
+
+
+def test_vote_rth_thresholds_mean_at_least_k_of_n_tiles():
+    """RTh 0.5 keeps a pixel only when at least half its tiles voted yes."""
+    net = HalfPositiveNet()
+    grid = grid_of(0.3, ny=6, nx=6, h=8, w=8)
+    low = reconstruct_scene([grid], net, (8, 8), 4, threshold=0.125,
+                            device=DEVICE, average="vote")
+    high = reconstruct_scene([grid], net, (8, 8), 4, threshold=0.5,
+                             device=DEVICE, average="vote")
+    # Same confidence map, different cut: RTh is monotone in what it keeps.
+    assert np.array_equal(low.confidence, high.confidence)
+    assert high.thresholded.sum() < low.thresholded.sum()
+    assert np.all(high.thresholded[low.thresholded == 0] == 0)
+
+
+def test_vote_rejects_hann_blending():
+    net = ProbabilityNet(0.9)
+    with pytest.raises(ValueError, match="unweighted tile votes"):
+        reconstruct_scene([grid_of(0.3)], net, (4, 4), 2, 0.25, device=DEVICE,
+                          average="vote", blend="hann")
+
+
+def test_unknown_average_mode_is_rejected():
+    net = ProbabilityNet(0.9)
+    with pytest.raises(ValueError, match="uniform"):
+        reconstruct_scene([grid_of(0.3)], net, (4, 4), 2, 0.25, device=DEVICE,
+                          average="majority")

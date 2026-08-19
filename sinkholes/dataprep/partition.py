@@ -107,6 +107,79 @@ def load_preset_partition(path) -> Tuple[List[str], List[str]]:
     return data["train"], data["val"]
 
 
+#: Keys a partition JSON may hold as interferogram lists. Everything else in
+#: the file is provenance (``derived_from``, ``val_samples``, ...).
+#:
+#: ``crossview`` is the geo memorisation probe of the plan's section 5b: the
+#: North band below the 31.4 deg cut, the same ground the South hold-out
+#: covers, seen from the other frame. It shares most of its interferograms
+#: with ``train`` -- the one deliberate breach of one-interferogram-one-split
+#: in the benchmark -- so it is EVALUATION ONLY. Training must never load it,
+#: it must never select a checkpoint, and it must never be averaged into test.
+PARTITION_SPLITS = ("train", "val", "test", "crossview")
+
+#: Splits a model may be trained or checkpoint-selected on.
+TRAINABLE_SPLITS = ("train", "val")
+
+#: Key holding the per-split lat/lon box, when the partition carries one.
+AOI_WINDOW_KEY = "aoi_window"
+
+
+def load_partition_split(path, split: str = "val") -> List[str]:
+    """One named interferogram list from a partition JSON.
+
+    Training reads only train/val (:func:`load_preset_partition`) and drops the
+    ``test`` list, so evaluation is where it is finally read. A missing key is
+    an error rather than an empty list: the ``*_testeval.json`` variants hold a
+    parent's test list under ``"val"`` and have no ``"test"`` of their own, and
+    scoring the wrong ground silently is exactly what must not happen.
+    """
+    if split not in PARTITION_SPLITS:
+        raise SystemExit(f"unknown split {split!r}; expected one of {', '.join(PARTITION_SPLITS)}")
+    with open(path) as fh:
+        data = json.load(fh)
+    if split not in data:
+        available = [k for k in PARTITION_SPLITS if k in data]
+        raise SystemExit(f"{path} has no '{split}' list (it holds: {', '.join(available)}). "
+                         f"The _testeval partitions carry their parent's test list as 'val'.")
+    return list(data[split])
+
+
+def load_partition_window(path, split: str = "val"):
+    """The (lat_min, lat_max, lon_min, lon_max) box a split is restricted to.
+
+    Returns ``None`` when the partition carries no window — the pre-AOI
+    generations, which are scored on the whole canvas. Callers must treat
+    ``None`` as "no restriction" rather than substituting a default, so an old
+    partition keeps reproducing its old numbers.
+
+    The box travels inside the partition file on purpose: the three consumers
+    that must agree on it (``dataprep/dataset.py``, ``inference/scenes.py``,
+    ``inference/outputs.py``) then read it from one source instead of each
+    taking a flag that could be passed inconsistently.
+    """
+    if split not in PARTITION_SPLITS:
+        raise SystemExit(f"unknown split {split!r}; expected one of {', '.join(PARTITION_SPLITS)}")
+    with open(path) as fh:
+        data = json.load(fh)
+    windows = data.get(AOI_WINDOW_KEY)
+    if not windows:
+        return None
+    if split not in windows:
+        raise SystemExit(
+            f"{path} has an '{AOI_WINDOW_KEY}' but no entry for split {split!r} "
+            f"(it holds: {', '.join(sorted(windows))}). Scoring a split on the wrong "
+            f"ground is exactly what this key exists to prevent, so this is an error."
+        )
+    box = windows[split]
+    if len(box) != 4:
+        raise SystemExit(
+            f"{path}: {AOI_WINDOW_KEY}[{split!r}] must be "
+            f"[lat_min, lat_max, lon_min, lon_max], got {box!r}"
+        )
+    return tuple(float(v) for v in box)
+
+
 def add_make_partition_arguments(p) -> None:
     p.add_argument("--patches_dir", type=str, required=True,
                    help="root holding the data_patches_* tree")

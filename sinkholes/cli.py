@@ -26,6 +26,9 @@ _COMMANDS = {
     "make-partition": ("sinkholes.dataprep.partition", "add_make_partition_arguments",
                        "make_partition_main",
                        "write a reproducible train/val partition JSON"),
+    "make-benchmark-partitions": ("sinkholes.dataprep.benchmark_partitions", "add_arguments",
+                                  "main",
+                                  "write the geo/temporal benchmark partitions (AOI + cut)"),
     "prepare-local-subset": ("sinkholes.dataprep.local_subset", "add_arguments", "main",
                              "derive nonz files + corrected metadata for a partial download"),
     # training
@@ -33,7 +36,7 @@ _COMMANDS = {
               "train a segmentation model"),
     # evaluation / inference
     "test-patches": ("sinkholes.inference.patch_test", "add_arguments", "main",
-                     "patch-level metrics on a pickled test split"),
+                     "patch-level metrics on a pickled split or a partition JSON"),
     "eval-scenes": ("sinkholes.inference.scenes", "add_arguments", "main",
                     "full-scene reconstruction, polygons and saved arrays"),
     "eval-outputs": ("sinkholes.inference.outputs", "add_arguments", "main",
@@ -42,6 +45,8 @@ _COMMANDS = {
                 "predict polygons on new raw .unw scenes (no ground truth)"),
     "inspect-run": ("sinkholes.inference.inspect_run", "add_arguments", "main",
                     "learning curve + threshold sweep for a finished run"),
+    "attention-probe": ("sinkholes.inference.attention_probe", "add_arguments", "main",
+                        "where a tattn_unet's attention lands when given a long, gappy history"),
     "curves": (None, None, None, "regenerate curves.png for a finished run"),
     "architectures": (None, None, None, "list the registered model architectures"),
 }

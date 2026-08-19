@@ -1,7 +1,14 @@
 # Results — the short version
 
 *Last updated 2026-08-12. For the exhaustive per-run registry see
-[MODEL_RUNS.md](MODEL_RUNS.md); this file is the readable summary.*
+[MODEL_RUNS.md](MODEL_RUNS.md); for the evaluation outputs, both full-scene and
+positives-only, see [PREDICTIONS.md](PREDICTIONS.md). This file is the readable
+summary.*
+
+> **Run directories were renamed on 2026-08-17** to
+> `<partition>_<arch>[_<variant>]`, and the names in this file follow the new
+> scheme. Anything without a `posw*` suffix is `pos_w` 4. See
+> `outputs/README.md`.
 
 We detect sinkhole subsidence in 11-day InSAR interferograms over the Dead Sea.
 A model sees the current interferogram plus *k* previous ones and predicts which
@@ -147,23 +154,23 @@ comparable, including across k5 and k10:
 
 | Model | dice | Best F1 | at conf. | R / P there |
 |---|---|---|---|---|
-| `geo_k5` ring3 **3:1** `_96439` | 0.6386 | **0.724** | 0.9 | 0.773 / 0.681 |
-| `geo_k5` ring3 **1:1** `_96436` | 0.6541 | **0.712** | 0.7 | 0.784 / 0.652 |
-| `geo_k5` baseline `_82459` | 0.6558 | 0.667 | 0.9 | 0.657 / 0.677 |
-| `geo_k10` ring3 1:1 `_96441` | 0.6596 | 0.666 | 0.7 | 0.785 / 0.578 |
-| `geo_k5` old `_207929` | 0.6539 | 0.647 | 0.9 | 0.696 / 0.605 |
-| `geo_k10` old `_206375` | 0.6583 | 0.456 | 0.5 | 0.893 / 0.306 |
+| `geo_k5_convlstm_ring3_3x` | 0.6386 | **0.724** | 0.9 | 0.773 / 0.681 |
+| `geo_k5_convlstm_ring3` | 0.6541 | **0.712** | 0.7 | 0.784 / 0.652 |
+| `geo_k5_convlstm_base` | 0.6558 | 0.667 | 0.9 | 0.657 / 0.677 |
+| `geo_k10_convlstm_ring3` | 0.6596 | 0.666 | 0.7 | 0.785 / 0.578 |
+| `geo_k5_convlstm_posw8` | 0.6539 | 0.647 | 0.9 | 0.696 / 0.605 |
+| `geo_k10_convlstm_posw8` | 0.6583 | 0.456 | 0.5 | 0.893 / 0.306 |
 
 **Temporal** — all scored on the same 20 scenes:
 
 | Model | dice | Best F1 | at conf. | R / P there |
 |---|---|---|---|---|
-| `temporal_k5` **ring10** `_96432` | 0.6432 | **0.698** | 0.25 | 0.673 / 0.726 |
-| `temporal_k5` tattn ring3 `_96445` | 0.6459 | 0.642 | 0.25 | 0.663 / 0.621 |
-| `temporal_k5` hybrid ring3 `_96449` | 0.6468 | 0.639 | 0.25 | 0.667 / 0.613 |
-| `temporal_k5` convlstm ring3 `_96429` | 0.6460 | 0.626 | 0.25 | 0.664 / 0.591 |
-| `temporal_k5` baseline `_82458` | 0.6391 | 0.612 | 0.5 | 0.609 / 0.616 |
-| `temporal_k5` single-frame | 0.5966 | 0.581 | 0.5 | 0.676 / 0.509 |
+| `temporal_k5_convlstm_ring10` | 0.6432 | **0.698** | 0.25 | 0.673 / 0.726 |
+| `temporal_k5_tattn_ring3` | 0.6459 | 0.642 | 0.25 | 0.663 / 0.621 |
+| `temporal_k5_tattn_hybrid_ring3` | 0.6468 | 0.639 | 0.25 | 0.667 / 0.613 |
+| `temporal_k5_convlstm_ring3` | 0.6460 | 0.626 | 0.25 | 0.664 / 0.591 |
+| `temporal_k5_convlstm_base` | 0.6391 | 0.612 | 0.5 | 0.609 / 0.616 |
+| `temporal_k5_single_b64` | 0.5966 | 0.581 | 0.5 | 0.676 / 0.509 |
 
 **The best threshold moved.** Older notes quoted everything at 0.25. With ring
 negatives, geo models now peak at **0.7–0.9** and temporal at **0.25**. Quoting
@@ -178,10 +185,10 @@ so by finding ②, none of these dice numbers should be read as a ranking:
 
 | Run | dice | epochs |
 |---|---|---|
-| `tattn_geo_k5` hybrid ring3 `_493315` | 0.6487 | best @22, stopped @42 |
-| `unet_single_geo_k5` baseline `_501433` | 0.6434 | best @54, ran all 60 |
-| `tattn_geo_k5` fuse0 ring3 `_493314` | 0.6433 | best @16, stopped @36 |
-| `unet_single_geo_k5` ring3 `_501434` | 0.6341 | best @20, stopped @40 |
+| `tattn_geo_k5` hybrid ring3 `geo_k5_tattn_hybrid_ring3` | 0.6487 | best @22, stopped @42 |
+| `unet_single_geo_k5` baseline `geo_k5_single_base` | 0.6434 | best @54, ran all 60 |
+| `tattn_geo_k5` fuse0 ring3 `geo_k5_tattn_ring3` | 0.6433 | best @16, stopped @36 |
+| `unet_single_geo_k5` ring3 `geo_k5_single_ring3` | 0.6341 | best @20, stopped @40 |
 
 These are what finding ③ is built on, and they add the attention arm to geo.
 **Scoring them is the top priority.**
@@ -230,15 +237,15 @@ what deployment requires.
 1. **Score the four 2026-08-11 `geo_k5` runs on scenes.** They have `best.pt`
    and no object-level number. Until they are scored we cannot say whether
    attention beats recurrence on geo, and finding ④ rests only on temporal.
-2. **Score `geo_k5` ring10 `_96437`.** It is the one missing cell in the
+2. **Score `geo_k5` ring10 `geo_k5_convlstm_ring10`.** It is the one missing cell in the
    negatives grid. Far-field negatives were the *biggest* temporal win
    (F1 0.698) and nobody has tried them on geo. This is the highest
    expected-value single job available.
 3. **Settle 1:1 vs 3:1 negatives on geo.** 3:1 has the best peak F1 (0.724) and
    holds recall at high confidence, but costs 12.5 h against 7.6 h. The earlier
    "3:1 is a settled negative" verdict came from dice and **is now withdrawn.**
-4. **Clear the object-level backlog:** `geo-k10_convlstm-h256_posw4_lsf594076`
-   (highest dice in the project) and `geo-k10_unet-single_lsf594074` have never
+4. **Clear the object-level backlog:** `geo_k10_convlstm_posw4`
+   (highest dice in the project) and `geo_k10_single` have never
    been scored on scenes.
 
 ### Then
