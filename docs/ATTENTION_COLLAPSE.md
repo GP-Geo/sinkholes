@@ -156,6 +156,30 @@ instead of list positions, and a padding mask, so a gappy 40-slot lookback keeps
 all 273 interferograms where the strict chain rule keeps 20 (`meta.select_history`).
 What was missing was a mechanism able to use it.
 
+### Trained fresh at a 41-slot depth
+
+Both variants trained from scratch on full 41/41 hole-tolerant histories (10 train
+and 6 val interferograms chosen for having a complete 40-slot history, 76/48
+patches, 500 steps, lr 1e-5) — so neither is being run outside the regime it was
+trained in, which is the confound that made the probe's depth sweep suggestive
+rather than conclusive:
+
+| variant | val dice | precision | recall | effective frames |
+|---|---|---|---|---|
+| fixed | 0.5524 | 0.584 | 0.524 | **9.08 / 41** |
+| baseline | 0.5249 | 0.650 | 0.440 | **1.05 / 41** |
+
+The mechanism claim is clean: at 41 frames the unfixed block degenerates to a
+single frame (1.05/41 — at this learning rate it saturates rather than averages),
+while the fixed one spreads over ~9 of 41 with structured weighting — offsets 2-4
+and a peak near offset 20, with the far tail suppressed.
+
+**The accuracy claim is not clean and should not be quoted.** 500 steps on 76
+patches leaves both models far from converged (the fixed one was still at dice
+0.07 at step 250), so the 0.5524 vs 0.5249 gap ranks nothing. What this run
+establishes is that a long, gappy history is expressible end to end and that the
+fixed attention stays selective at that length. Ranking depths needs a cluster run.
+
 ## What to run next
 
 **1. Retrain the tattn family with the fix.** This is a drop-in change — same

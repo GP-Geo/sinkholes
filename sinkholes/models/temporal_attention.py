@@ -119,6 +119,29 @@ def temporal_mean(x: torch.Tensor, valid: Optional[torch.Tensor] = None) -> torc
     return (x * m).sum(dim=2, keepdim=True) / m.sum(dim=2, keepdim=True).clamp_min(1.0)
 
 
+def causal_temporal_mean(x: torch.Tensor, valid: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Prefix mean over time: row ``t`` averages frames ``0..t`` only.
+
+    :func:`temporal_mean` is correct for the readout, whose single query is the
+    present — there, "all frames" and "all frames at or before the query" are the
+    same set. It is **not** correct inside causal self-attention: centring
+    position ``t`` on a mean that includes ``t+1..T-1`` makes its query and key
+    depend on frames it is forbidden to see, and the lower-triangular mask cannot
+    undo that because the leak is already baked into the vectors it multiplies.
+
+    With a prefix mean, ``score[q][k]`` for ``k <= q`` depends only on frames up
+    to ``q``, so causality survives the contrast exactly rather than
+    approximately. Row 0 centres on itself and is therefore zero — harmless,
+    since position 0 may only attend to itself in any case.
+    """
+    b, _, t, _ = x.shape
+    if valid is None:
+        counts = torch.arange(1, t + 1, device=x.device, dtype=x.dtype).view(1, 1, t, 1)
+        return x.cumsum(dim=2) / counts
+    m = valid.view(b, 1, t, 1).to(x.dtype)
+    return (x * m).cumsum(dim=2) / m.cumsum(dim=2).clamp_min(1.0)
+
+
 def temporal_position_encoding(t: int, dim: int, *, offsets=None, device=None,
                                dtype=torch.float32) -> torch.Tensor:
     """Sinusoidal encoding of "steps before the present".
@@ -250,7 +273,9 @@ class _CausalSelfAttentionBlock(nn.Module):
         b, p, t, _ = x.shape
         normed = self.norm1(x)
         # Same split as the readout: select on the differences, carry the content.
-        selector = (self.contrast_norm(normed - temporal_mean(normed, valid))
+        # The mean is a PREFIX mean here, not the whole-sequence one — see
+        # causal_temporal_mean for why the readout's version would leak.
+        selector = (self.contrast_norm(normed - causal_temporal_mean(normed, valid))
                     if self.contrast else normed)
         q = self._heads(self.q_proj(selector))
         k = self._heads(self.k_proj(selector))

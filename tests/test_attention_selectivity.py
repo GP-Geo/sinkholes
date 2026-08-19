@@ -24,7 +24,12 @@ from sinkholes.models.tattn_unet import (
     build_tattn_unet,
     infer_attention_variant,
 )
-from sinkholes.models.temporal_attention import DEFAULT_LOGIT_SCALE, temporal_mean
+from sinkholes.models.temporal_attention import (
+    DEFAULT_LOGIT_SCALE,
+    _CausalSelfAttentionBlock,
+    causal_temporal_mean,
+    temporal_mean,
+)
 
 T = 11
 
@@ -161,6 +166,54 @@ def test_attention_still_responds_to_content():
     # Not merely "different" — different by far more than the 1e-5 the broken
     # block managed, which is what let the old test pass on a dead mechanism.
     assert (a - b).abs().mean() > 1e-3
+
+
+# -- causality is not sacrificed to the contrast ------------------------------------------
+
+@pytest.mark.parametrize("contrast", [True, False])
+def test_contrast_does_not_leak_future_frames_into_self_attention(contrast):
+    """Centring on the whole-sequence mean would make every position depend on
+    the ones after it, and the lower-triangular mask cannot undo that — the leak
+    is already inside the vectors it multiplies.
+
+    Asserted as EXACT equality on purpose. The whole-sequence mean leaked 2.4e-7
+    here, which slipped under the 1e-6 tolerance of the causality test in
+    test_tattn_unet.py: it passed by magnitude, not by correctness.
+    """
+    torch.manual_seed(0)
+    block = _CausalSelfAttentionBlock(dim=8, heads=2, contrast=contrast,
+                                      qk_norm=True).eval()
+    x = torch.randn(1, 4, 5, 8)
+    perturbed = x.clone()
+    perturbed[:, :, 3:] += 10.0
+    with torch.no_grad():
+        before, after = block(x), block(perturbed)
+    assert torch.equal(before[:, :, :3], after[:, :, :3]), (
+        "an earlier position moved when a later one changed — attention is "
+        "reading forwards in time"
+    )
+    assert not torch.allclose(before[:, :, 3:], after[:, :, 3:], atol=1e-6)
+
+
+def test_causal_mean_is_a_prefix_mean():
+    x = torch.arange(12, dtype=torch.float32).view(1, 1, 4, 3)
+    got = causal_temporal_mean(x)
+    for t in range(4):
+        assert torch.allclose(got[0, 0, t], x[0, 0, :t + 1].mean(dim=0), atol=1e-6)
+
+
+def test_causal_mean_skips_padded_frames():
+    x = torch.arange(12, dtype=torch.float32).view(1, 1, 4, 3)
+    valid = torch.tensor([[False, True, True, True]])
+    got = causal_temporal_mean(x, valid)
+    assert torch.allclose(got[0, 0, 3], x[0, 0, 1:4].mean(dim=0), atol=1e-6)
+
+
+def test_the_readout_may_use_the_whole_sequence_mean():
+    """No leak there: its only query is the present, so "all frames" and "all
+    frames at or before the query" are the same set."""
+    x = torch.randn(2, 3, 5, 8)
+    assert torch.allclose(temporal_mean(x)[:, :, 0], x.mean(dim=2), atol=1e-6)
 
 
 # -- long sequences -----------------------------------------------------------------------
