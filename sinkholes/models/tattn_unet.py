@@ -57,6 +57,10 @@ from .temporal_attention import (
 #: to rebuild the model. Stored alongside 'mask_values' and popped the same way.
 CONFIG_KEY = "tattn_unet_config"
 
+#: Submodule prefix the attention weights live under; used to read a
+#: checkpoint's attention variant straight off its keys.
+TATTN_PREFIX = "temporal_attn."
+
 #: What sits between the encoder and the attention.
 RECURRENCE_CHOICES = ("none", "convlstm")
 
@@ -100,6 +104,8 @@ class TemporalAttentionUNet(nn.Module):
         tattn_layers: int = 1,
         tattn_recurrence: str = "none",
         tattn_fuse_skips: int = MAX_FUSED_SKIPS,
+        tattn_contrast: bool = True,
+        tattn_qk_norm: bool = True,
         convlstm_hidden_channels: Optional[int] = None,
         convlstm_kernel_size: int = 3,
     ):
@@ -121,6 +127,11 @@ class TemporalAttentionUNet(nn.Module):
             )
         self.tattn_recurrence = tattn_recurrence
         self.tattn_fuse_skips = int(tattn_fuse_skips)
+        # The two halves of the attention-collapse fix (docs/ATTENTION_COLLAPSE.md).
+        # Default on for new models; the checkpoint builder turns them off for any
+        # weights that predate them, since they add parameters.
+        self.tattn_contrast = bool(tattn_contrast)
+        self.tattn_qk_norm = bool(tattn_qk_norm)
 
         # 0 is the CLI's spelling of "unset", as with --convlstm_hidden.
         self.tattn_dim = DEFAULT_TATTN_DIM if tattn_dim in (None, 0) else int(tattn_dim)
@@ -179,6 +190,8 @@ class TemporalAttentionUNet(nn.Module):
             dim=self.tattn_dim,
             heads=self.tattn_heads,
             layers=self.tattn_layers,
+            contrast=self.tattn_contrast,
+            qk_norm=self.tattn_qk_norm,
         )
         # A narrower recurrent state still has to enter up1 at the bottleneck width.
         self.recurrence_proj: nn.Module = (
@@ -312,6 +325,8 @@ class TemporalAttentionUNet(nn.Module):
             "tattn_layers": self.tattn_layers,
             "tattn_recurrence": self.tattn_recurrence,
             "tattn_fuse_skips": self.tattn_fuse_skips,
+            "tattn_contrast": self.tattn_contrast,
+            "tattn_qk_norm": self.tattn_qk_norm,
             "convlstm_hidden_channels": self.convlstm_hidden_channels,
             "convlstm_kernel_size": self.convlstm_kernel_size,
         }
@@ -333,6 +348,27 @@ def pop_model_config(state_dict: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def infer_attention_variant(state_dict: Any) -> Optional[Tuple[bool, bool]]:
+    """``(contrast, qk_norm)`` as the *weights* show them, or None if unreadable.
+
+    Both options add parameters — ``contrast_norm`` and ``logit_scale`` — so the
+    weights say unambiguously which variant a checkpoint is. That is what keeps
+    every run trained before the collapse fix loadable: its config blob predates
+    these keys, and guessing the current default would rebuild an architecture
+    the file cannot fill.
+
+    Returns None when the state dict carries no attention weights at all (a
+    fresh build from CLI flags), where the caller's own defaults should stand.
+    """
+    if not isinstance(state_dict, dict):
+        return None
+    keys = [k for k in state_dict if isinstance(k, str) and k.startswith(TATTN_PREFIX)]
+    if not keys:
+        return None
+    return (any(".contrast_norm." in k for k in keys),
+            any(k.endswith(".logit_scale") for k in keys))
+
+
 def build_tattn_unet(state_dict: Any = None, **fallback: Any) -> TemporalAttentionUNet:
     """Build a TemporalAttentionUNet, preferring the config stored in `state_dict`.
 
@@ -340,9 +376,18 @@ def build_tattn_unet(state_dict: Any = None, **fallback: Any) -> TemporalAttenti
     the exact architecture without the user re-specifying heads, width or
     fusion mode; ``fallback`` covers checkpoints saved without it. The config
     key is popped, so the returned model can load the state dict directly.
+
+    The attention variant is read from the weights before the config is applied,
+    so a pre-fix checkpoint rebuilds as the model it actually is rather than as
+    whatever the current default happens to be. A config blob naming the variant
+    still wins — a new checkpoint's blob and its weights agree, and a
+    disagreement should fail loudly at ``load_state_dict`` rather than quietly.
     """
     cfg = pop_model_config(state_dict)
     merged: Dict[str, Any] = dict(fallback)
+    variant = infer_attention_variant(state_dict)
+    if variant is not None:
+        merged["tattn_contrast"], merged["tattn_qk_norm"] = variant
     if cfg:
         merged.update(cfg)
     return TemporalAttentionUNet(**merged)

@@ -224,6 +224,17 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                         f"ConvLSTM's 'latest timestep only' skips; {MAX_FUSED_SKIPS} "
                         f"fuses every level, including the 200x100 one where the "
                         f"12x6 attention field is upsampled 16x")
+    p.add_argument("--tattn_contrast", action=argparse.BooleanOptionalAction, default=True,
+                   help="form queries and keys from token - mean_over_time(token), so "
+                        "attention selects on how frames DIFFER. Without it the shared "
+                        "component swamps the frame-to-frame signal (0.09% of the token "
+                        "magnitude at init) and the softmax is uniform before training "
+                        "even starts -- see docs/ATTENTION_COLLAPSE.md")
+    p.add_argument("--tattn_qk_norm", action=argparse.BooleanOptionalAction, default=True,
+                   help="unit-norm queries and keys and scale the logits by one learned "
+                        "temperature, so selectivity stops depending on projection "
+                        "magnitude. --no-tattn_contrast --no-tattn_qk_norm reproduces "
+                        "every run trained before 2026-08-19")
 
     p.add_argument("--reporter", action=argparse.BooleanOptionalAction, default=True,
                    help="per-epoch table + results.csv + curves.png")
@@ -298,6 +309,8 @@ def build_model(args, device):
             tattn_layers=args.tattn_layers,
             tattn_recurrence=args.tattn_recurrence,
             tattn_fuse_skips=args.tattn_fuse_skips,
+            tattn_contrast=args.tattn_contrast,
+            tattn_qk_norm=args.tattn_qk_norm,
             # Only read when --tattn_recurrence convlstm.
             convlstm_hidden_channels=args.convlstm_hidden,
             convlstm_kernel_size=args.convlstm_kernel,
@@ -690,7 +703,9 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                 f"{model.n_channels_per_timestep} ch/timestep x T={args.k_prevs + 1} "
                 f"/ {model.n_classes} out (attn dim={model.tattn_dim}, "
                 f"heads={model.tattn_heads}, layers={model.tattn_layers}, "
-                f"fused skips={model.tattn_fuse_skips}/{MAX_FUSED_SKIPS}{recurrence})"
+                f"fused skips={model.tattn_fuse_skips}/{MAX_FUSED_SKIPS}, "
+                f"select={'contrast' if model.tattn_contrast else 'raw'}"
+                f"+{'qk_norm' if model.tattn_qk_norm else 'dot'}{recurrence})"
             )
         else:
             channels = (

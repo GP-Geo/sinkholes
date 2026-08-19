@@ -66,6 +66,8 @@ STRICT_CONFIG_KEYS: Sequence[str] = (
     "tattn_layers",
     "tattn_recurrence",
     "tattn_fuse_skips",
+    "tattn_contrast",
+    "tattn_qk_norm",
     "bilinear",
     "patch_size",
     "stride",
@@ -184,6 +186,10 @@ def run_config(args) -> Dict[str, Any]:
         "tattn_layers": int(args.tattn_layers) if tattn else None,
         "tattn_recurrence": args.tattn_recurrence if tattn else None,
         "tattn_fuse_skips": int(args.tattn_fuse_skips) if tattn else None,
+        # Both change what the attention block IS, so resuming across a flip
+        # would splice two different architectures into one run.
+        "tattn_contrast": bool(args.tattn_contrast) if tattn else None,
+        "tattn_qk_norm": bool(args.tattn_qk_norm) if tattn else None,
         "bilinear": bool(args.bilinear),
         "patch_size": f"{H}x{W}",
         "stride": int(args.stride),

@@ -45,6 +45,33 @@ entry points therefore take two optional arguments:
 Both default to None, which reproduces the gap-free behaviour exactly — the
 encoding carries no parameters, so every existing checkpoint keeps its numbers
 and can be run on a gappy sequence without retraining.
+
+**Why the queries and keys are built from a contrast.** Measured at the
+bottleneck, the attention tokens are dominated by a component shared across the
+whole sequence: at initialisation the frame-to-frame differences are 0.09% of
+the token magnitude and consecutive frames have cosine similarity 1.0000. The
+softmax is therefore uniform before a single gradient step, the gradient
+reaching q/k is ~10x weaker than the one reaching the value path, and the
+projections decay to zero long before the encoder learns to separate the frames
+(it eventually does — the ratio reaches 0.50 by the end of training, far too
+late). All fifteen checkpoints trained before this was found average their
+history instead of selecting from it; ``docs/ATTENTION_COLLAPSE.md`` has the
+measurements.
+
+Two changes fix it, and neither is sufficient alone:
+
+- ``contrast`` — form queries and keys from ``token - mean_over_time(token)``,
+  renormalised, so attention selects on *how frames differ* rather than on what
+  they share. The value path still sees the whole token.
+- ``qk_norm`` — unit-norm queries and keys and scale the logits by one learned
+  temperature, so the softmax's sharpness stops depending on the magnitude of
+  the projections. Without it the same block collapses to uniform at lr 1e-6
+  and saturates to one-hot at lr 1e-4.
+
+Together they take effective frames used from 10.97/11 to 4.43/11 at init, and
+hold it there through training where the unfixed block degenerates. Both are on
+by default for new models and off for any checkpoint that predates them — the
+extra parameters exist only when enabled, so old weights load untouched.
 """
 
 from __future__ import annotations
@@ -68,6 +95,51 @@ DEFAULT_TATTN_HEADS = 8
 
 #: Hidden expansion of the per-block feed-forward layer.
 FFN_RATIO = 2
+
+#: Starting temperature for QK-normalised logits, and the ceiling it may reach.
+#: With unit-norm queries and keys a raw score lives in [-1, 1], so this
+#: multiplier is what decides whether the softmax can be selective at all. 10
+#: puts the initial logit range at about +-10 across T; the clamp is CLIP's, and
+#: stops a runaway temperature driving the softmax one-hot.
+DEFAULT_LOGIT_SCALE = 10.0
+MAX_LOGIT_SCALE = 100.0
+
+
+def temporal_mean(x: torch.Tensor, valid: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Mean over the time axis of ``(B, P, T, d)``, ignoring padded frames.
+
+    Averaging padded slots in would fold the replicated filler into the very
+    baseline the contrast is measured against — worst for exactly the long,
+    gappy sequences the mask exists to serve.
+    """
+    if valid is None:
+        return x.mean(dim=2, keepdim=True)
+    b, _, t, _ = x.shape
+    m = valid.view(b, 1, t, 1).to(x.dtype)
+    return (x * m).sum(dim=2, keepdim=True) / m.sum(dim=2, keepdim=True).clamp_min(1.0)
+
+
+def causal_temporal_mean(x: torch.Tensor, valid: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Prefix mean over time: row ``t`` averages frames ``0..t`` only.
+
+    :func:`temporal_mean` is correct for the readout, whose single query is the
+    present — there, "all frames" and "all frames at or before the query" are the
+    same set. It is **not** correct inside causal self-attention: centring
+    position ``t`` on a mean that includes ``t+1..T-1`` makes its query and key
+    depend on frames it is forbidden to see, and the lower-triangular mask cannot
+    undo that because the leak is already baked into the vectors it multiplies.
+
+    With a prefix mean, ``score[q][k]`` for ``k <= q`` depends only on frames up
+    to ``q``, so causality survives the contrast exactly rather than
+    approximately. Row 0 centres on itself and is therefore zero — harmless,
+    since position 0 may only attend to itself in any case.
+    """
+    b, _, t, _ = x.shape
+    if valid is None:
+        counts = torch.arange(1, t + 1, device=x.device, dtype=x.dtype).view(1, 1, t, 1)
+        return x.cumsum(dim=2) / counts
+    m = valid.view(b, 1, t, 1).to(x.dtype)
+    return (x * m).cumsum(dim=2) / m.cumsum(dim=2).clamp_min(1.0)
 
 
 def temporal_position_encoding(t: int, dim: int, *, offsets=None, device=None,
@@ -169,14 +241,23 @@ class _CausalSelfAttentionBlock(nn.Module):
     newer. Only reachable with ``layers > 1``.
     """
 
-    def __init__(self, dim: int, heads: int):
+    def __init__(self, dim: int, heads: int, contrast: bool = True,
+                 qk_norm: bool = True):
         super().__init__()
         self.dim = int(dim)
         self.heads = int(heads)
         self.head_dim = self.dim // self.heads
         self.scale = self.head_dim ** -0.5
+        self.contrast = bool(contrast)
+        self.qk_norm = bool(qk_norm)
 
         self.norm1 = nn.LayerNorm(self.dim)
+        if self.contrast:
+            self.contrast_norm = nn.LayerNorm(self.dim)
+        if self.qk_norm:
+            self.logit_scale = nn.Parameter(
+                torch.tensor(math.log(DEFAULT_LOGIT_SCALE), dtype=torch.float32)
+            )
         self.q_proj = nn.Linear(self.dim, self.dim)
         self.k_proj = nn.Linear(self.dim, self.dim)
         self.v_proj = nn.Linear(self.dim, self.dim)
@@ -191,11 +272,22 @@ class _CausalSelfAttentionBlock(nn.Module):
     def forward(self, x: torch.Tensor, valid: Optional[torch.Tensor] = None) -> torch.Tensor:
         b, p, t, _ = x.shape
         normed = self.norm1(x)
-        q = self._heads(self.q_proj(normed))
-        k = self._heads(self.k_proj(normed))
+        # Same split as the readout: select on the differences, carry the content.
+        # The mean is a PREFIX mean here, not the whole-sequence one — see
+        # causal_temporal_mean for why the readout's version would leak.
+        selector = (self.contrast_norm(normed - causal_temporal_mean(normed, valid))
+                    if self.contrast else normed)
+        q = self._heads(self.q_proj(selector))
+        k = self._heads(self.k_proj(selector))
         v = self._heads(self.v_proj(normed))
 
-        scores = torch.einsum("bpqhd,bpkhd->bphqk", q, k) * self.scale
+        if self.qk_norm:
+            q = F.normalize(q, dim=-1, eps=1e-6)
+            k = F.normalize(k, dim=-1, eps=1e-6)
+            scores = (torch.einsum("bpqhd,bpkhd->bphqk", q, k)
+                      * self.logit_scale.exp().clamp(max=MAX_LOGIT_SCALE))
+        else:
+            scores = torch.einsum("bpqhd,bpkhd->bphqk", q, k) * self.scale
         causal = torch.ones(t, t, device=x.device, dtype=torch.bool).tril()
         allowed = causal.view(1, 1, 1, t, t)
         if valid is not None:
@@ -221,16 +313,31 @@ class _TemporalReadoutBlock(nn.Module):
 
     ``(B, P, T, d) -> ((B, P, d), weights (B, P, heads, T))``. The weights are
     returned because the skip fusion reuses them; they sum to 1 over T.
+
+    ``contrast`` and ``qk_norm`` are the two halves of the fix for the collapse
+    documented in ``docs/ATTENTION_COLLAPSE.md``; see :class:`CausalTemporalAttention`
+    for what each does and why neither works alone.
     """
 
-    def __init__(self, dim: int, heads: int):
+    def __init__(self, dim: int, heads: int, contrast: bool = True,
+                 qk_norm: bool = True):
         super().__init__()
         self.dim = int(dim)
         self.heads = int(heads)
         self.head_dim = self.dim // self.heads
         self.scale = self.head_dim ** -0.5
+        self.contrast = bool(contrast)
+        self.qk_norm = bool(qk_norm)
 
         self.norm1 = nn.LayerNorm(self.dim)
+        # Registered only when enabled, so a checkpoint trained without them
+        # loads with no unexpected keys and keeps its exact behaviour.
+        if self.contrast:
+            self.contrast_norm = nn.LayerNorm(self.dim)
+        if self.qk_norm:
+            self.logit_scale = nn.Parameter(
+                torch.tensor(math.log(DEFAULT_LOGIT_SCALE), dtype=torch.float32)
+            )
         self.q_proj = nn.Linear(self.dim, self.dim)
         self.k_proj = nn.Linear(self.dim, self.dim)
         self.v_proj = nn.Linear(self.dim, self.dim)
@@ -242,13 +349,32 @@ class _TemporalReadoutBlock(nn.Module):
                 valid: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         b, p, t, _ = x.shape
         normed = self.norm1(x)
-        present = normed[:, :, -1]  # index T-1 is the current interferogram
+
+        # Queries and keys are formed from what makes the frames DIFFER; the
+        # value path keeps the whole token, because the answer still has to
+        # carry the content, not just the deviation.
+        if self.contrast:
+            selector = self.contrast_norm(normed - temporal_mean(normed, valid))
+        else:
+            selector = normed
+        present = selector[:, :, -1]  # index T-1 is the current interferogram
 
         q = self.q_proj(present).view(b, p, self.heads, self.head_dim)
-        k = self.k_proj(normed).view(b, p, t, self.heads, self.head_dim)
+        k = self.k_proj(selector).view(b, p, t, self.heads, self.head_dim)
         v = self.v_proj(normed).view(b, p, t, self.heads, self.head_dim)
 
-        scores = torch.einsum("bphd,bpkhd->bphk", q, k) * self.scale
+        if self.qk_norm:
+            # Unit-norm q and k, so the logit range is set by one learned number
+            # instead of drifting with q/k magnitude. That decoupling is what
+            # keeps the softmax selective at any T and under any learning rate:
+            # without it the same block goes uniform at lr 1e-6 and one-hot at
+            # lr 1e-4, purely through the scale of the projections.
+            q = F.normalize(q, dim=-1, eps=1e-6)
+            k = F.normalize(k, dim=-1, eps=1e-6)
+            scores = (torch.einsum("bphd,bpkhd->bphk", q, k)
+                      * self.logit_scale.exp().clamp(max=MAX_LOGIT_SCALE))
+        else:
+            scores = torch.einsum("bphd,bpkhd->bphk", q, k) * self.scale
         if valid is not None:
             # Padded frames get exactly zero weight, which is also what makes
             # fuse_over_time need no change at all: the skip fusion is a convex
@@ -275,7 +401,8 @@ class CausalTemporalAttention(nn.Module):
     """
 
     def __init__(self, in_channels: int, dim: int = DEFAULT_TATTN_DIM,
-                 heads: int = DEFAULT_TATTN_HEADS, layers: int = 1):
+                 heads: int = DEFAULT_TATTN_HEADS, layers: int = 1,
+                 contrast: bool = True, qk_norm: bool = True):
         super().__init__()
         dim, heads, layers = int(dim), int(heads), int(layers)
         if dim % heads != 0:
@@ -291,6 +418,8 @@ class CausalTemporalAttention(nn.Module):
         self.dim = dim
         self.heads = heads
         self.layers = layers
+        self.contrast = bool(contrast)
+        self.qk_norm = bool(qk_norm)
 
         self.in_proj = nn.Conv2d(self.in_channels, dim, kernel_size=1)
         # Normalising the projected tokens *before* the positional encoding is
@@ -303,9 +432,12 @@ class CausalTemporalAttention(nn.Module):
         # All but the last layer transform the whole sequence; the last one is
         # the present-query readout that collapses it.
         self.self_blocks = nn.ModuleList(
-            _CausalSelfAttentionBlock(dim, heads) for _ in range(layers - 1)
+            _CausalSelfAttentionBlock(dim, heads, contrast=self.contrast,
+                                      qk_norm=self.qk_norm)
+            for _ in range(layers - 1)
         )
-        self.readout = _TemporalReadoutBlock(dim, heads)
+        self.readout = _TemporalReadoutBlock(dim, heads, contrast=self.contrast,
+                                             qk_norm=self.qk_norm)
         self.norm = nn.LayerNorm(dim)
         self.out_proj = nn.Conv2d(dim, self.in_channels, kernel_size=1)
 

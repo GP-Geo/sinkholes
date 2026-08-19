@@ -27,3 +27,7 @@ __pycache__/
 
 # Claude Code local state (worktrees, session settings)
 /.claude/
+
+# Local safety copies made before large edits; not version-controlled.
+*.bak
+*.bak[0-9]
