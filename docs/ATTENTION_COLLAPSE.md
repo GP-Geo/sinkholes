@@ -115,12 +115,16 @@ At initialisation, on real patches:
 
 And through training, where the unfixed block degenerates in both directions:
 
-| lr | variant | eff@0 | eff@200 | eff@400 | loss@400 |
-|---|---|---|---|---|---|
-| 1e-6 | baseline | 10.97 | 8.94 | 7.62 | 0.6169 |
-| 1e-6 | **fixed** | 4.43 | 3.01 | **2.85** | 0.6167 |
-| 1e-5 | baseline | 10.97 | 1.51 | 1.13 | 0.4751 |
-| 1e-5 | **fixed** | 4.43 | 3.53 | **3.58** | 0.5656 |
+| lr | baseline eff@400 | fixed eff@400 | baseline failure mode |
+|---|---|---|---|
+| 1e-6 (production) | 7.62 | **2.85** | drifting to uniform |
+| 1e-5 | 1.13 | **3.58** | saturated one-hot |
+| 1e-4 | 1.00 | **4.64** | saturated one-hot |
+
+The baseline degenerates at **every** learning rate — it merely picks a different
+degenerate state depending on how fast the projections grow. The fixed block stays
+in a healthy 2.85–4.64 range across a 100x span of learning rate, which is exactly
+what decoupling the logit scale from projection magnitude is supposed to buy.
 
 At the production learning rate the fixed block *sharpens* to ~3 of 11 frames while
 reaching the same loss as the averaging baseline (0.6167 vs 0.6169). It is
@@ -151,6 +155,42 @@ of fixing this first. The long-history machinery is already in place — real of
 instead of list positions, and a padding mask, so a gappy 40-slot lookback keeps
 all 273 interferograms where the strict chain rule keeps 20 (`meta.select_history`).
 What was missing was a mechanism able to use it.
+
+## What to run next
+
+**1. Retrain the tattn family with the fix.** This is a drop-in change — same
+partitions, same data layer, same flags, and `CONTRAST`/`QK_NORM` default to `yes`:
+
+```bash
+PARTITION=assets/partition_geo_k10_clean.json K_PREVS=10 RING_NEGS=yes \
+  bsub -J tattn_geo_k10_fixed_ring3 < scripts/train/train_tattn.sh
+```
+
+The comparison that matters is against the pre-fix twin at the same depth, since
+that isolates "what did working selection buy" from every other difference. To
+train the old architecture deliberately, set `CONTRAST=no QK_NORM=no`.
+
+**2. Check the result actually selects**, rather than assuming it:
+
+```bash
+sinkholes attention-probe --model outputs/<run>/checkpoints/best.pt \
+  --partition assets/partition_geo_k10_clean.json --split val \
+  --patches_dir "$DATA/patches" --control_lookback 10 --require_selectivity 0.9
+```
+
+`--require_selectivity` exits non-zero if the attention is at or above 90% of
+uniform. Worth wiring into the eval scripts: this is the check that would have
+caught the original collapse, and it can only be made against a *trained*
+checkpoint — a fresh model passes every content-sensitivity test and still dies.
+
+**3. Only then, the long-history work.** `select_history()` and the mask make a
+40-slot gappy lookback expressible, and the model now has a mechanism that can use
+it, but the *data layer* still materialises `(T, N, H, W)` per interferogram
+(`dataprep/dataset.py:411`) and reloads each grid once per referencing current.
+That is ~31 GB of host RAM at T=6 and linear in T, so a dense long lookback needs
+the deduplicated frame store first: resolve every sample's coordinates, load each
+distinct grid once, and have samples point at rows. Memory then stops growing with
+depth, because sinkholes sit still and the per-frame coordinate union saturates.
 
 ## Running it
 
