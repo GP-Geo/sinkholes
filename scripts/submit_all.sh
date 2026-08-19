@@ -10,6 +10,9 @@
 #    scripts/submit_all.sh clean22 --submit  # THE CLEAN BENCHMARK: six runs, all with
 #                                            # ring negatives + negative validation
 #    scripts/submit_all.sh valpos  --submit  # six of the clean22 runs again, with the
+#    scripts/submit_all.sh attnfix --submit  # THE ATTENTION FIX: the clean22 tattn arms
+#                                            # re-run with attention that actually
+#                                            # selects, plus the paired pre-fix control
 #                                            # negatives in TRAINING ONLY (VAL_NEGS off)
 #    scripts/submit_all.sh eval4   --submit  # the 2026-08-11 evals (DONE 2026-08-12)
 #    scripts/submit_all.sh eval5   --submit  # THE CLEAN BENCHMARK EVALS: 8 of the 14
@@ -847,6 +850,70 @@ job clean22 clean_temporal_k10_tattn_ring3 \
     scripts/train/train_tattn.sh "$C_TATTN_T10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_T10" \
     "attention at k=10 under the year shift -- the longest history against the 2025+ test set"
 
+# ---- training: the attention that actually selects (kind: attnfix) ----------
+# Every tattn run above this line trained a DEAD attention. Measured on all 15
+# checkpoints: the weights came out at exactly 1/T, so the model averaged its
+# history instead of choosing from it, and the ~1M attention parameters were
+# decoration. docs/ATTENTION_COLLAPSE.md carries the measurements; the short
+# version is that the collapse is present before the first gradient step, not
+# grown during training -- at init the frame-to-frame differences are 0.09% of
+# the token the queries and keys are built from, so the softmax has nothing to
+# separate, and RMSprop's normalised steps then grind q/k to zero.
+#
+# Two fixes, both ON BY DEFAULT in train_tattn.sh, neither sufficient alone:
+#   CONTRAST=yes  queries/keys from token - mean_over_time(token), so selection
+#                 runs on how frames DIFFER rather than on what they share
+#   QK_NORM=yes   unit-norm q/k with one learned temperature, so selectivity
+#                 stops riding on projection magnitude -- without it the same
+#                 block goes uniform at LR=1e-6 and one-hot at LR=1e-5
+#
+# WHAT THIS BATCH IS FOR. The clean22 tattn numbers (obj F1 0.7378 geo_k10
+# hybrid, 0.7271 geo_k10 plain) are real, but they measure temporal AVERAGING,
+# not attention. This batch re-runs the same arms with selection working, so
+# the comparison is like for like: same partitions, same negatives, same
+# hyper-parameters, same val protocol as clean22. Only the attention differs.
+#
+# THE PAIRED CONTROL IS NOT OPTIONAL. clean_geo_k10_tattn_prefix_ring3 trains
+# the OLD architecture from this same code (CONTRAST=no QK_NORM=no). Without
+# it the comparison is against numbers produced by a different commit on
+# checkpoints that no longer exist, which confounds the fix with everything
+# else that changed. It is one extra run and it is the whole experiment.
+#
+# CHECK THE RESULT SELECTED, do not assume it. After each run:
+#     sinkholes attention-probe --model outputs/<run>/checkpoints/best.pt \
+#       --partition assets/partition_geo_k10_clean.json --split val \
+#       --patches_dir "$DATA/patches" --control_lookback 10 \
+#       --require_selectivity 0.9
+# which exits non-zero if the attention is at or above 90% of uniform. That is
+# the check that would have caught the original collapse, and it can only be
+# made against a trained checkpoint -- a fresh model passes every
+# content-sensitivity test and still dies in training.
+#
+# Resources are copied from the clean22 arms unchanged: the fix adds one
+# LayerNorm and one scalar per attention block (~66k parameters on a 32M model),
+# so neither VRAM nor epoch time moves measurably.
+C_FIX_G5="$C_TATTN_G5 CONTRAST=yes QK_NORM=yes"
+C_FIX_G10="$C_TATTN_G10 CONTRAST=yes QK_NORM=yes"
+C_FIX_HYBRID_G10="$C_HYBRID_G10 CONTRAST=yes QK_NORM=yes"
+C_FIX_T5="$C_TATTN_T5 CONTRAST=yes QK_NORM=yes"
+C_PREFIX_G10="$C_TATTN_G10 CONTRAST=no QK_NORM=no"
+
+job attnfix clean_geo_k10_tattn_fixed_ring3 \
+    scripts/train/train_tattn.sh "$C_FIX_G10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_G10" \
+    "the headline: does attention that SELECTS beat the averaging it was doing, at the depth where it should matter most"
+job attnfix clean_geo_k10_tattn_prefix_ring3 \
+    scripts/train/train_tattn.sh "$C_PREFIX_G10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_G10" \
+    "the paired control: the OLD dead-attention architecture from THIS code, so the pair differs in the fix and nothing else"
+job attnfix clean_geo_k5_tattn_fixed_ring3 \
+    scripts/train/train_tattn.sh "$C_FIX_G5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_G5" \
+    "k5 with selection: k10 beat k5 while merely averaging, so the depth ordering may not survive the fix"
+job attnfix clean_geo_k10_tattn_hybrid_fixed_ring3 \
+    scripts/train/train_tattn.sh "$C_FIX_HYBRID_G10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_HYBRID_G10" \
+    "the best clean22 arm (0.7378), re-run with working selection"
+job attnfix clean_temporal_k5_tattn_fixed_ring3 \
+    scripts/train/train_tattn.sh "$C_FIX_T5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_T5" \
+    "the artefact-suppression claim on the axis that stresses it -- and the claim was always about selecting frames, never averaging them"
+
 # ---- training: negatives in TRAIN ONLY (kind: valpos) -----------------------
 # Six of the fourteen clean22 runs, resubmitted with ONE change: $VALNEG is
 # dropped, so RING_NEGS=yes still puts background patches in TRAINING and the
@@ -1410,7 +1477,7 @@ job posonly posonly_t5_ring10 \
 WANT=all; SUBMIT=no; ONLY=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    train|tattn|control|valneg|clean22|valpos|training|eval|eval2|eval3|eval4|eval5|posonly|blend|rescore|all) WANT="$1" ;;
+    train|tattn|control|valneg|clean22|valpos|attnfix|training|eval|eval2|eval3|eval4|eval5|posonly|blend|rescore|all) WANT="$1" ;;
     --submit)       SUBMIT=yes ;;
     --only)         shift; [ $# -gt 0 ] || { echo "--only needs a value" >&2; exit 1; }
                     ONLY+=("$1") ;;
