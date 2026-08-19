@@ -1,6 +1,7 @@
 """Cutting aligned scenes into overlapping patch grids, and the naming scheme
 that ties the grids on disk to the code that reads them back."""
 
+import os
 from typing import Optional, Tuple
 
 import numpy as np
@@ -33,6 +34,35 @@ def patch_strides(patch_size: Tuple[int, int], strides_per_patch: int) -> Tuple[
     """(Sy, Sx) pixel steps; strides_per_patch=2 means a 50% overlap step."""
     h, w = patch_size
     return h // strides_per_patch, w // strides_per_patch
+
+
+def resolve_patch_dirs(
+    patches_dir,
+    patch_size: Tuple[int, int],
+    strides_per_patch: int,
+    *,
+    days_diff: Optional[int] = 11,
+    cleaned: bool = False,
+) -> Tuple[str, str]:
+    """(image_dir, mask_dir) of one patch tree under ``patches_dir``.
+
+    The single place the naming scheme above is turned into the pair of
+    directories a dataset is read from: training and evaluation must resolve
+    them identically or an evaluation silently reads a different tree from the
+    one the checkpoint was trained on. Missing directories are an error here
+    rather than a confusing per-file FileNotFoundError later.
+    """
+    H, W = patch_size
+    image_dir = os.path.join(patches_dir, patch_dir_name("data", H, W, strides_per_patch, days_diff))
+    mask_dir = os.path.join(patches_dir, patch_dir_name("mask", H, W, strides_per_patch, days_diff))
+    if cleaned:
+        image_dir = os.path.join(image_dir, "cleaned")
+        mask_dir = os.path.join(mask_dir, "cleaned")
+    missing = [d for d in (image_dir, mask_dir) if not os.path.isdir(d)]
+    if missing:
+        raise SystemExit(f"patch directories not found: {' | '.join(missing)} — "
+                         f"prepare patches first, or check --patch_size/--stride")
+    return image_dir, mask_dir
 
 
 def patchify(

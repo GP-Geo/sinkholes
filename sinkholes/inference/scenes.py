@@ -22,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..geo import aligned_origin
+from ..geo import aligned_origin, grid_window
 from ..meta import INTF_ID_RE, find_11day_sequences, intf_meta, load_coord_dict
 from ..normalise import SCENE_RANGE_TOL, normalise_phase
 from ..paths import DEFAULT_PREDICTIONS_DIR
@@ -64,6 +64,34 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
 
     p.add_argument("--add_lidar_mask", action=argparse.BooleanOptionalAction, default=True,
                    help="predict only tiles inside the LiDAR coverage of every timestep")
+    p.add_argument("--aoi_window", nargs=4, type=float, default=None,
+                   metavar=("LAT_MIN", "LAT_MAX", "LON_MIN", "LON_MAX"),
+                   help="predict only tiles wholly inside this box. Normally left unset and "
+                        "taken from the partition file's aoi_window for --split, which is what "
+                        "keeps this command, the dataset and eval-outputs on the same ground; "
+                        "pass it explicitly only to score a scene outside any partition")
+    p.add_argument("--aoi_from_partition", type=str, default=None,
+                   help="partition JSON to read the AOI window from")
+    p.add_argument("--aoi_split", type=str, default="test",
+                   help="which split's window to read from --aoi_from_partition")
+    p.add_argument("--positives_only", action="store_true",
+                   help="predict only tiles whose ground truth is non-empty — the "
+                        "benchmark paper's protocol ('delineate subsidence where it is "
+                        "known to be'). ANDs with the LiDAR gate, honours --unioned_mask, "
+                        "and produces numbers that are NOT comparable with full-scene "
+                        "ones and must never be used to select a model")
+    p.add_argument("--recon_average", type=str, default="uniform",
+                   choices=["uniform", "coverage", "vote"],
+                   help="how overlapping tile predictions are combined. 'uniform' divides "
+                        "the summed probability by stride^2 (every full-scene number before "
+                        "2026-08-19). 'coverage' divides by the per-pixel tile count. "
+                        "'vote' is the PAPER'S CONFIDENCE FACTOR: each tile is binarised at "
+                        "--vote_threshold and the value is the fraction of overlapping tiles "
+                        "voting positive, so --recon_th becomes the paper's RTh. Use it with "
+                        "--data_stride 4 for the paper's 16-tiles-per-pixel geometry")
+    p.add_argument("--vote_threshold", type=float, default=0.5,
+                   help="probability at which a tile casts a positive vote; --recon_average "
+                        "vote only. 0.5 is the paper's 'positive (1) label'")
     p.add_argument("--blend_type", type=str, default=None, choices=["hann"],
                    help="Hann-window blending of overlapping predictions")
     p.add_argument("--window_gamma", type=float, default=1.0)
@@ -148,6 +176,28 @@ def load_model(args, device):
     return net
 
 
+def resolve_aoi_window(args):
+    """The lat/lon box to restrict prediction to, or None.
+
+    Prefers an explicit ``--aoi_window``; otherwise reads the partition file's
+    window for ``--aoi_split``. Both being set is an error rather than a
+    precedence rule — silently ignoring one of two conflicting windows is how a
+    model ends up scored on ground it trained on.
+    """
+    from ..dataprep.partition import load_partition_window
+
+    explicit = tuple(args.aoi_window) if getattr(args, "aoi_window", None) else None
+    from_file = None
+    if getattr(args, "aoi_from_partition", None):
+        from_file = load_partition_window(args.aoi_from_partition, args.aoi_split)
+    if explicit is not None and from_file is not None and explicit != from_file:
+        raise SystemExit(
+            f"--aoi_window {explicit} conflicts with {args.aoi_from_partition} "
+            f"[{args.aoi_split}] = {from_file}. Pass one, not both."
+        )
+    return explicit if explicit is not None else from_file
+
+
 def main(args) -> None:
     import geopandas as gpd
     import pandas as pd
@@ -173,6 +223,10 @@ def main(args) -> None:
                             patch_dir_name("mask", patch_h, patch_w, args.data_stride, args.days_diff))
 
     intf_list = resolve_intf_list(args, data_dir)
+    aoi = resolve_aoi_window(args)
+    if aoi is not None:
+        logging.info(f"AOI window lat {aoi[0]}-{aoi[1]}, lon {aoi[2]}-{aoi[3]}: "
+                     f"tiles outside it are not predicted and eval-outputs must crop to it")
 
     device = get_device()
     logging.info(f"loading model on {device}")
@@ -257,13 +311,50 @@ def main(args) -> None:
                 canvas_shape(ny, nx, (patch_h, patch_w), args.data_stride),
             )
 
+        # -- positives-only gate ---------------------------------------------------------
+        # Derived from gt_grid itself rather than from nonz_indices.json: it is
+        # the same set by construction (both are "this tile's mask has a
+        # positive pixel", on the same grid), it needs no extra file, and it
+        # follows --unioned_mask for free — which matters, because a ground
+        # truth unioned over the chain can be positive in a tile the current
+        # frame's nonz list does not hold, and that object would then be
+        # scored as a miss.
+        positive_tiles = None
+        if args.positives_only:
+            positive_tiles = {(int(i), int(j))
+                              for i, j in zip(*np.where((gt_grid > 0).any(axis=(-2, -1))))}
+            logging.info(f"{intf}: positives-only — {len(positive_tiles)} of {ny * nx} tiles "
+                         f"({100 * len(positive_tiles) / (ny * nx):.1f}%) hold ground truth; "
+                         f"these numbers are not comparable with full-scene ones")
+            if not positive_tiles:
+                logging.warning(f"{intf}: no positive tiles, nothing to predict — skipped")
+                continue
+
+        # The AOI in this scene's grid coordinates. Derived per frame from the
+        # aligned origin, never from the scene's raw north -- see geo.grid_window.
+        tile_window = None
+        if aoi is not None:
+            r0, r1, c0, c1 = grid_window(
+                meta.frame, *aoi,
+                patch_size=(patch_h, patch_w),
+                stride=(patch_h // args.data_stride, patch_w // args.data_stride),
+            )
+            tile_window = (r0, min(r1, ny), c0, min(c1, nx))
+            if tile_window[0] >= tile_window[1] or tile_window[2] >= tile_window[3]:
+                logging.warning(f"{intf}: no tile lies inside the AOI window — skipped")
+                continue
+            logging.info(f"{intf}: AOI tiles rows {tile_window[0]}:{tile_window[1]}, "
+                         f"cols {tile_window[2]}:{tile_window[3]} of {ny}x{nx}")
+
         logging.info(f"{intf}: grid {ny}x{nx}, T={len(stack)}")
         result = reconstruct_scene(
             stack, net, (patch_h, patch_w), args.data_stride, args.recon_th,
             device=device, gt_grid=gt_grid, lidar_gates=lidar_gates,
+            positive_tiles=positive_tiles, tile_window=tile_window,
             treat_nodata_regions=args.treat_nodata_regions,
             blend=args.blend_type, window_gamma=args.window_gamma,
-            average="uniform", log_progress=True,
+            average=args.recon_average, vote_threshold=args.vote_threshold,
+            log_progress=True,
         )
 
         polygons = pixel_polygons_to_lonlat(

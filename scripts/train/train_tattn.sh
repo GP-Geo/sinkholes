@@ -45,7 +45,10 @@ set -euo pipefail
 # lives: convlstm_temporal_k5_h256_posw4_60e is the same-everything-else
 # reference, group T has two k5 ConvLSTM runs bracketing the +-0.006 noise
 # floor, and k5 carries 34% more training data than k10 for the same score.
-PARTITION="${PARTITION:-assets/partition_temporal_k5.json}"  # geo_k5|geo_k10|temporal_k5|temporal_k10
+# No default on purpose: assets/ holds three generations of partition
+# (assets/PARTITIONS.md). Defaulting to one is how a clean-data run silently
+# trains on the 2019-2026 noisy lists, so set it explicitly every time.
+PARTITION="${PARTITION:?set PARTITION=assets/partition_<axis>_k<k>[_clean].json -- see assets/PARTITIONS.md}"
 K_PREVS="${K_PREVS:-5}"                   # temporal depth; MUST match the partition's k
 POS_W="${POS_W:-4}"                       # BCE positive weight (code default is 1)
 SEED="${SEED:-42}"
@@ -119,8 +122,8 @@ RESUME="${RESUME:-auto}"                  # auto | <run dir> | <checkpoint file>
 # interferograms with 5-previous chains, _k10 only those with 10. Mixing them
 # silently trains on a smaller set than you think.
 case "$PARTITION" in
-  *_k5.json)  [ "$K_PREVS" = 5 ]  || { echo "K_PREVS=$K_PREVS with a _k5 partition"  >&2; exit 1; } ;;
-  *_k10.json) [ "$K_PREVS" = 10 ] || { echo "K_PREVS=$K_PREVS with a _k10 partition" >&2; exit 1; } ;;
+  *_k5.json|*_k5_*.json)  [ "$K_PREVS" = 5 ]  || { echo "K_PREVS=$K_PREVS with a _k5 partition"  >&2; exit 1; } ;;
+  *_k10.json|*_k10_*.json) [ "$K_PREVS" = 10 ] || { echo "K_PREVS=$K_PREVS with a _k10 partition" >&2; exit 1; } ;;
 esac
 
 case "$RECURRENCE" in

@@ -49,6 +49,7 @@ from .temporal_attention import (
     DEFAULT_TATTN_DIM,
     DEFAULT_TATTN_HEADS,
     CausalTemporalAttention,
+    check_valid_mask,
     fuse_over_time,
 )
 
@@ -202,15 +203,34 @@ class TemporalAttentionUNet(nn.Module):
 
     # -- forward -----------------------------------------------------------------------
 
-    def forward_with_attention(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward_with_attention(
+        self,
+        x: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+        valid: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Logits plus the temporal attention weights ``(B, heads, T, Hb, Wb)``.
 
         The weights answer "which past interferogram did this pixel rely on",
         which is the diagnostic that separates a model actually using its
         history from one that has collapsed onto the latest frame.
+
+        ``offsets`` ``(T,)`` or ``(B, T)`` gives each frame's age in 11-day slot
+        units, and ``valid`` ``(B, T)`` says which slots hold a real frame; both
+        default to "gap-free chain, nothing padded", which is bit-identical to
+        the behaviour before they existed. See ``temporal_attention`` for why a
+        gappy sequence needs the first and a length-padded batch the second.
+
+        Padded frames still run through the shared encoder, and ``DoubleConv``
+        normalises over the folded ``B*T`` batch — so BatchNorm mixes them into
+        the statistics *before* ``valid`` can hide them. Pad by replicating a
+        real frame rather than with zeros, as ``scenes.py --fallback_replicate``
+        already does; an all-zero pad would quietly skew the encoder.
         """
         seq = self._to_sequence(x)
         b, t, c, h, w = seq.shape
+        if valid is not None:
+            valid = check_valid_mask(valid, b, t).to(seq.device)
 
         # Fold time into the batch dim so the SHARED encoder runs once over all
         # timesteps; BatchNorm then sees B*T samples instead of B, which matters
@@ -227,10 +247,24 @@ class TemporalAttentionUNet(nn.Module):
         bottleneck_seq = unfold_time(bottleneck, b, t)
 
         if self.recurrence is not None:
-            state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+            # Started explicitly rather than letting the cell default it, so the
+            # "hold the state over a padded step" branch below has something to
+            # hold from step 0 onwards.
+            state: Tuple[torch.Tensor, torch.Tensor] = self.recurrence.init_state(
+                bottleneck_seq[:, 0]
+            )
             hidden: List[torch.Tensor] = []
             for step in range(t):  # unroll chronologically, oldest -> newest
-                state = self.recurrence(bottleneck_seq[:, step], state)
+                h_next, c_next = self.recurrence(bottleneck_seq[:, step], state)
+                if valid is not None:
+                    # Masking the attention is not enough here: the recurrence
+                    # carries a padded frame forward into every later state, so
+                    # it has to skip the step outright. Per-sample, because
+                    # samples in one batch have different holes.
+                    keep = valid[:, step].to(h_next.dtype).view(b, 1, 1, 1)
+                    h_next = keep * h_next + (1 - keep) * state[0]
+                    c_next = keep * c_next + (1 - keep) * state[1]
+                state = (h_next, c_next)
                 hidden.append(state[0])
             # Every hidden state is kept, not just the last: the attention is
             # what decides which of them the present frame needs.
@@ -238,7 +272,7 @@ class TemporalAttentionUNet(nn.Module):
         else:
             attn_input = bottleneck_seq
 
-        decoded, weights = self.temporal_attn(attn_input)
+        decoded, weights = self.temporal_attn(attn_input, offsets, valid)
         decoded = self.recurrence_proj(decoded)
 
         # Coarsest first: level 1 is s4, whose 25x12 grid is only a 2x upsample of
@@ -260,8 +294,9 @@ class TemporalAttentionUNet(nn.Module):
         decoded = self.up4(decoded, skip1)
         return self.outc(decoded), weights
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        logits, _ = self.forward_with_attention(x)
+    def forward(self, x: torch.Tensor, offsets: Optional[torch.Tensor] = None,
+                valid: Optional[torch.Tensor] = None) -> torch.Tensor:
+        logits, _ = self.forward_with_attention(x, offsets, valid)
         return logits
 
     # -- checkpoint interface ----------------------------------------------------------

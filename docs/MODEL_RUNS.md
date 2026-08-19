@@ -9,7 +9,9 @@ Every training run under `outputs/`, its result, and what was kept on disk.
 
 Written 2026-08-09, when the run directories were pruned; extended 2026-08-11
 with the 13-run 2026-08-10 batch; extended 2026-08-12 with the four-run
-2026-08-11 batch and **the object-level scores for all 17 evaluated models**.
+2026-08-11 batch and **the object-level scores for all 17 evaluated models**;
+extended 2026-08-19 with the 14-run clean benchmark (`clean22`), the first batch
+on generation-3 partitions.
 The point of this file is that **the metrics outlive the weights**:
 `results.csv`, the training log and `curves.png` are kept for every run listed
 here, so a deleted checkpoint costs a retrain (~2.5 h GPU) but never costs the
@@ -19,13 +21,16 @@ evidence.
 
 `val/dice` is patch-level pixel Dice at a fixed 0.5 threshold, averaged over
 batches (`sinkholes/training/evaluate.py:252`). It is **not** the object-level
-metric that `eval-outputs` reports.
+metric that `eval-outputs` reports, and it is **not** `val/F1` either: dice is
+the **macro** per-image mean, F1 the **micro** pooled-pixel score
+(`evaluate.py:190`). They diverge whenever the mix of easy and hard patches
+changes — which is exactly what happened on 2026-08-18.
 
 > ### ⚠️ Do not rank models by `val/dice`
 >
 > The 2026-08-11 evaluations settled this. Dice does not merely fail to
 > discriminate between the leading models — on the negatives batch it ranks them
-> **backwards**. `convlstm_geo_k5_..._neg3x_ring3_..._96439` is **last on dice**
+> **backwards**. `geo_k5_convlstm_ring3_3x` is **last on dice**
 > in group G5 (0.6386, −0.0172 from anchor) and **first on scenes**
 > (object F1 0.724). The mechanism is known and structural: ring negatives reach
 > the **train** split only (`train.py:327/337/362`), so validation stays
@@ -35,6 +40,14 @@ metric that `eval-outputs` reports.
 > Dice is now a **training-health signal only** — is the run learning, is it
 > diverging, when did it peak. Every promote/kill decision belongs to the
 > object-level column.
+>
+> **Partly repaired 2026-08-18, and a new trap opened.** The 14-run clean batch
+> passes `--add_val_negatives`, so validation is half empty background patches
+> and dice can finally see a false positive. That fixes the blindness above —
+> but it makes `val/dice` **incomparable across the boundary**: half the new
+> score is a negative-patch-cleanliness term that the old number does not
+> contain at all. Never read a pre-2026-08-18 dice against a post- one. See
+> [The 2026-08-18 batch](#the-2026-08-18-batch--the-clean-benchmark-14-runs).
 
 ### Object-level scores
 
@@ -80,15 +93,15 @@ the patch-level values at the best dice epoch.
 
 | Run | dice | obj F1 | P | R | Verdict | Kept |
 |---|---|---|---|---|---|---|
-| `convlstm_temporal_k10_h256_..._posw4_60e_..._209866` | 0.6437 | 0.601 @0.5 | 0.671 | 0.803 | top dice scorer; `pos_w` 8→4 bought precision | `best.pt` |
-| `convlstm_temporal_k10_h256_b128_lr1e6_60e_lsf_202343` | 0.6427 | 0.581 @0.5 | 0.659 | 0.815 | group-T reference point | `best.pt` |
-| `convlstm_temporal_k5_h256_..._15h58_lsf_208207` | 0.6420 | 0.576 @0.5 | 0.674 | 0.793 | **k5 champion** — ties k10 on 34% more data | `best.pt` |
-| `convlstm_temporal_k10_h512_..._209863` | 0.6401 | — | 0.656 | 0.818 | capacity is saturated; no gain over h256 | metrics only |
-| `convlstm_temporal_k5_h256_..._13h51` | 0.6376 | — | 0.667 | 0.791 | first of the duplicate pair; noise probe | metrics only |
-| `convlstm_temporal_k10_h256_..._seed7_..._209867` | 0.6368 | — | 0.622 | 0.872 | seed probe; defines the ±0.006 floor | metrics only |
-| `convlstm_temporal_k10_h1024_..._202344` | 0.6296 | — | 0.618 | 0.864 | **worse**; early-stopped @36, undertrained | metrics only |
-| `unet_stack_temporal_k10_..._209864` | 0.6284 | 0.562 @0.5 | 0.662 | 0.804 | channel-stacking control — loses to ConvLSTM by 0.0143 | `best.pt` |
-| `convlstm_temporal_k10_h256_..._lr5e6_cosine_..._209865` | 0.6179 | — | 0.614 | 0.843 | **worst ConvLSTM**; early-stop @34, 5× the jitter | metrics only |
+| `temporal_k10_convlstm_posw4` | 0.6437 | 0.601 @0.5 | 0.671 | 0.803 | top dice scorer; `pos_w` 8→4 bought precision | `best.pt` |
+| `temporal_k10_convlstm_posw8` | 0.6427 | 0.581 @0.5 | 0.659 | 0.815 | group-T reference point | `best.pt` |
+| `temporal_k5_convlstm_run2` | 0.6420 | 0.576 @0.5 | 0.674 | 0.793 | **k5 champion** — ties k10 on 34% more data | `best.pt` |
+| `temporal_k10_convlstm_h512` | 0.6401 | — | 0.656 | 0.818 | capacity is saturated; no gain over h256 | metrics only |
+| `temporal_k5_convlstm_run1` | 0.6376 | — | 0.667 | 0.791 | first of the duplicate pair; noise probe | metrics only |
+| `temporal_k10_convlstm_seed7` | 0.6368 | — | 0.622 | 0.872 | seed probe; defines the ±0.006 floor | metrics only |
+| `temporal_k10_convlstm_h1024` | 0.6296 | — | 0.618 | 0.864 | **worse**; early-stopped @36, undertrained | metrics only |
+| `temporal_k10_stack` | 0.6284 | 0.562 @0.5 | 0.662 | 0.804 | channel-stacking control — loses to ConvLSTM by 0.0143 | `best.pt` |
+| `temporal_k10_convlstm_cosine` | 0.6179 | — | 0.614 | 0.843 | **worst ConvLSTM**; early-stop @34, 5× the jitter | metrics only |
 | `baseline_single_temporal_k5partition_b64_lr1e5_60e` | 0.5966 | 0.581 @0.5 | 0.544 | 0.897 | single-frame floor (lr/batch confounded) | `best.pt` |
 
 **The top six are one statistical tie on dice** (0.6368–0.6437, span 0.0069 ≈
@@ -118,14 +131,14 @@ training samples. k5 is the better default.
 
 | Run | dice | obj F1 | P | R | Verdict | Kept |
 |---|---|---|---|---|---|---|
-| `convlstm_geo_k5_h256_..._207929` | 0.6539 | 0.647 @0.9 | 0.746 | 0.722 | most balanced patch P/R of any run | `best.pt` |
-| `baseline_single_geo_k5partition_b64_lr1e5_60e` | 0.6084 | — | 0.616 | 0.809 | single-frame floor; **lr/batch confounded — superseded** by `unet_single_geo_k5_posw4_60e_..._501433` | `best.pt` |
+| `geo_k5_convlstm_posw8` | 0.6539 | 0.647 @0.9 | 0.746 | 0.722 | most balanced patch P/R of any run | `best.pt` |
+| `geo_k5_single_b64` | 0.6084 | — | 0.616 | 0.809 | single-frame floor; **lr/batch confounded — superseded** by `geo_k5_single_base` | `best.pt` |
 
 ## Group G10 — geo_k10 partition (1 run)
 
 | Run | dice | obj F1 | P | R | Verdict | Kept |
 |---|---|---|---|---|---|---|
-| `convlstm_geo_k10_h256_..._206375` | 0.6583 | 0.456 @0.5 | 0.707 | 0.800 | best epoch 28/60, early-stop @48 | `best.pt` |
+| `geo_k10_convlstm_posw8` | 0.6583 | 0.456 @0.5 | 0.707 | 0.800 | best epoch 28/60, early-stop @48 | `best.pt` |
 
 **This run has no sibling on its val set** for dice purposes. Its 0.6583 was
 long the highest number in `outputs/`, and the object-level column shows why
@@ -183,14 +196,14 @@ the dice ordering it replaces.
 
 | Run | obj F1 | dice | Δ dice | Verdict | Kept |
 |---|---|---|---|---|---|
-| `convlstm_temporal_k5_..._neg1x_ring10_..._96432` | **0.698** @0.25 | 0.6432 | +0.0041 | ⭐ **group-T winner.** Far-field negatives: precision 0.451 → 0.726. Was 6th on dice | `best.pt` |
-| `tattn_..._fuse0_..._neg1x_ring3_..._96445` | 0.642 @0.25 | 0.6459 | −0.0001 | **attention beats recurrence** by +0.016 at 26% fewer params | `best.pt` |
-| `tattn_..._fuse0_recur-convlstm_..._neg1x_ring3_..._96449` | 0.639 @0.25 | 0.6468 | +0.0009 | hybrid; no gain over plain attention, and costlier | `best.pt` |
-| `convlstm_temporal_k5_..._neg1x_ring3_..._96429` | 0.626 @0.25 | 0.6460 | +0.0069 | **the negatives reference**; twin of the `tattn` run above | `best.pt` |
-| `convlstm_temporal_k5_h256_posw4_60e_..._82458` | 0.612 @0.5 | 0.6391 | anchor | the `pos_w` 4 baseline both experiments are read against | `best.pt` |
-| `tattn_temporal_k5_d256_fuse0_posw4_60e_..._96442` | 0.598 @0.5 | 0.6460 | +0.0069 | head-to-head, no negatives | `best.pt` |
-| `convlstm_temporal_k5_..._neg3x_ring3_..._96433` | — | 0.6449 | +0.0058 | 3:1 negatives; **unscored** — see the 3:1 note below | `best.pt` |
-| `tattn_..._fuse2_..._neg1x_ring3_..._96447` | — | 0.6399 | −0.0060 | temporally-fused skips, **wrong direction**; unscored | `best.pt` |
+| `temporal_k5_convlstm_ring10` | **0.698** @0.25 | 0.6432 | +0.0041 | ⭐ **group-T winner.** Far-field negatives: precision 0.451 → 0.726. Was 6th on dice | `best.pt` |
+| `temporal_k5_tattn_ring3` | 0.642 @0.25 | 0.6459 | −0.0001 | **attention beats recurrence** by +0.016 at 26% fewer params | `best.pt` |
+| `temporal_k5_tattn_hybrid_ring3` | 0.639 @0.25 | 0.6468 | +0.0009 | hybrid; no gain over plain attention, and costlier | `best.pt` |
+| `temporal_k5_convlstm_ring3` | 0.626 @0.25 | 0.6460 | +0.0069 | **the negatives reference**; twin of the `tattn` run above | `best.pt` |
+| `temporal_k5_convlstm_base` | 0.612 @0.5 | 0.6391 | anchor | the `pos_w` 4 baseline both experiments are read against | `best.pt` |
+| `temporal_k5_tattn_base` | 0.598 @0.5 | 0.6460 | +0.0069 | head-to-head, no negatives | `best.pt` |
+| `temporal_k5_convlstm_ring3_3x` | — | 0.6449 | +0.0058 | 3:1 negatives; **unscored** — see the 3:1 note below | `best.pt` |
+| `temporal_k5_tattn_fuse2_ring3` | — | 0.6399 | −0.0060 | temporally-fused skips, **wrong direction**; unscored | `best.pt` |
 
 Δ dice is against `convlstm_temporal_k5_h256_posw4_60e` for the negatives arms,
 and against the corresponding `fuse0` run for the attention variants.
@@ -215,16 +228,16 @@ group T and the only one pointing anywhere.
 
 | Run | obj F1 | dice | Δ dice | Verdict | Kept |
 |---|---|---|---|---|---|
-| `convlstm_geo_k5_..._neg3x_ring3_..._96439` | **0.724** @0.9 | 0.6386 | −0.0172 | ⭐ **best geo model in the project — and last on dice.** Holds recall 0.773 @0.9 where 1:1 drops to 0.615 | `best.pt` |
-| `convlstm_geo_k5_..._neg1x_ring3_..._96436` | 0.712 @0.7 | 0.6541 | −0.0017 | near-field negatives; precision 0.449 → 0.545 @0.5 at no recall cost | `best.pt` |
-| `convlstm_geo_k5_h256_posw4_60e_..._82459` | 0.667 @0.9 | 0.6558 | anchor | the `pos_w` 4 geo baseline; **top of the group on dice, third on scenes** | `best.pt` |
-| `convlstm_geo_k5_..._neg1x_ring10_..._96437` | — | 0.6461 | −0.0097 | far-field; **unscored, and the single highest-value job available** | `best.pt` |
+| `geo_k5_convlstm_ring3_3x` | **0.724** @0.9 | 0.6386 | −0.0172 | ⭐ **best geo model in the project — and last on dice.** Holds recall 0.773 @0.9 where 1:1 drops to 0.615 | `best.pt` |
+| `geo_k5_convlstm_ring3` | 0.712 @0.7 | 0.6541 | −0.0017 | near-field negatives; precision 0.449 → 0.545 @0.5 at no recall cost | `best.pt` |
+| `geo_k5_convlstm_base` | 0.667 @0.9 | 0.6558 | anchor | the `pos_w` 4 geo baseline; **top of the group on dice, third on scenes** | `best.pt` |
+| `geo_k5_convlstm_ring10` | — | 0.6461 | −0.0097 | far-field; **unscored, and the single highest-value job available** | `best.pt` |
 
 ### Group G10 addition — geo_k10 (val 4060)
 
 | Run | obj F1 | dice | Δ dice | Verdict | Kept |
 |---|---|---|---|---|---|
-| `convlstm_geo_k10_..._neg1x_ring3_..._96441` | 0.666 @0.7 | 0.6596 | −0.0050 | ring negatives lift obj F1 0.456 → 0.666 over `_206375` | `best.pt` |
+| `geo_k10_convlstm_ring3` | 0.666 @0.7 | 0.6596 | −0.0050 | ring negatives lift obj F1 0.456 → 0.666 over `geo_k10_convlstm_posw8` | `best.pt` |
 
 G10's dice noise floor is still unmeasured and expected to be *wider* than
 ±0.006 (its val set is under half the size), so −0.0050 is not a decline — it is
@@ -252,7 +265,7 @@ like the batch's clearest failure was measuring the wrong thing.
 **Current position on 3:1:** genuinely open, not settled either way. It wins on
 peak F1 and high-confidence recall; it costs 1.6× the GPU time; and the margin
 (+0.012) rests on a single pairing with no error bar at object level. The
-temporal 3:1 arm `_96433` is still unscored, which would give it a second data
+temporal 3:1 arm `temporal_k5_convlstm_ring3_3x` is still unscored, which would give it a second data
 point cheaply.
 
 ### Measured resources
@@ -276,7 +289,7 @@ jobs pending on 2026-08-10 for no reason.
 
 Still at the **top level of `outputs/`**, not yet moved into a dated folder, and
 still carrying `last.pt` + `resume.pt` (~2.1 GB across the four). All four are
-`geo_k5` at `pos_w` 4, batch 128, lr 1e-6 — matched to the `_82459` anchor, so
+`geo_k5` at `pos_w` 4, batch 128, lr 1e-6 — matched to the `geo_k5_convlstm_base` anchor, so
 they are directly comparable to the group-G5 additions above on dice.
 
 **All four finished cleanly.** Three stopped on early-stopping patience (20
@@ -288,14 +301,14 @@ dice column below must not be used to rank them.
 
 | Run | dice | obj F1 | Epochs | Purpose | Kept |
 |---|---|---|---|---|---|
-| `tattn_geo_k5_..._recur-convlstm_..._neg1x_ring3_..._493315` | 0.6487 | — | best @22, stop @42 | hybrid attention on geo | `best.pt` |
-| `unet_single_geo_k5_posw4_60e_..._501433` | 0.6434 | — | best @54, ran 60 | ⭐ **de-confounded single-frame control** | `best.pt` |
-| `tattn_geo_k5_d256_fuse0_..._neg1x_ring3_..._493314` | 0.6433 | — | best @16, stop @36 | plain attention on geo | `best.pt` |
-| `unet_single_geo_k5_posw4_neg1x_ring3_..._501434` | 0.6341 | — | best @20, stop @40 | single-frame **with** ring negatives | `best.pt` |
+| `geo_k5_tattn_hybrid_ring3` | 0.6487 | — | best @22, stop @42 | hybrid attention on geo | `best.pt` |
+| `geo_k5_single_base` | 0.6434 | — | best @54, ran 60 | ⭐ **de-confounded single-frame control** | `best.pt` |
+| `geo_k5_tattn_ring3` | 0.6433 | — | best @16, stop @36 | plain attention on geo | `best.pt` |
+| `geo_k5_single_ring3` | 0.6341 | — | best @20, stop @40 | single-frame **with** ring negatives | `best.pt` |
 
 ### What this batch already settled
 
-`unet_single_geo_k5_posw4_60e_..._501433` is the run that **corrects the
+`geo_k5_single_base` is the run that **corrects the
 "+0.046 temporal context" claim** (finding 1 in group T). It is the single-frame
 control at matched optimizer settings, which the 2026-08-05 baselines never
 were:
@@ -319,12 +332,200 @@ entirely on the temporal pairing (0.642 vs 0.626). The `geo_k5` attention arms
 above are its replication, and until they are evaluated the architecture
 recommendation has one leg. **Scoring these four is the top priority.**
 
+## The 2026-08-18 batch — the clean benchmark (14 runs)
+
+`outputs/2026-08-18/clean_*/`. The first runs on the **generation-3**
+partitions (`assets/partition_*_clean.json`): all years 2019–2026, every split
+restricted to the shoreline AOI lat 31.25–31.75 / lon 35.38–35.46, and the geo
+axis cut at 31.4° so train (North, 31.40–31.75) and hold-out (South,
+31.25–31.40) are disjoint ground for the first time. Submitted as
+`submit_all.sh clean22`; all 14 finished by 2026-08-19 06:14.
+
+Shared config across all fourteen — they differ in partition, architecture and
+negative ratio, in nothing else: `pos_w` 4, hidden / attn dim 256, batch 128,
+**lr 1e-5** (10× every previous batch), **100 epochs**, **patience 40**, seed 42,
+ring 1–3 negatives in training at 1:1 (except the `_3x` arm), and
+`--add_val_negatives`.
+
+### ⚠️ `val/dice` from this batch cannot be compared to any earlier number
+
+Every previous batch validated on **positives only**. All 14 runs here pass
+`--add_val_negatives`, so validation is **50% empty negative patches**:
+
+```
+validation set: 4093 positive + 4093 negative patches   (geo_k5; the log header of every run)
+```
+
+That changes what the number means, mechanically. `val/dice` is the **macro**
+per-image mean (`evaluate.py:190` says so outright: "the pooled F1 (micro) is
+*not* the returned Dice"), and in `losses.py:21`
+`sets_sum = torch.where(sets_sum == 0, inter, sets_sum)` makes an empty patch
+predicted empty score **exactly 1.0**. So on a 50/50 val set:
+
+```
+val/dice  =  0.5 · (dice on positives)  +  0.5 · (fraction of negatives with ZERO false-positive pixels)
+```
+
+Half the score is now a false-positive-cleanliness term. `val/F1`, `val/P` and
+`val/R` are pooled pixel counts and get no such free half — which is why dice
+rose and they did not.
+
+**This is the fix the 2026-08-10 batch needed**, not a regression: that batch
+landed all 13 arms inside ±0.006 precisely because positives-only validation
+could not see the false positives ring negatives were suppressing. Dice can now
+see them. It still must not be compared across the boundary.
+
+### What actually changed, generation 2 → generation 3
+
+Nine runs exist under the same name in both batches. Same architecture, same
+negatives, same partition *axis* — only the partition generation, the validation
+composition and the schedule differ.
+
+| Run | dice | F1 | P | R |
+|---|---|---|---|---|
+| `geo_k10_convlstm_ring3` | 0.660→0.722 **+0.063** | 0.750→0.624 **−0.127** | −0.100 | −0.154 |
+| `geo_k5_convlstm_ring3` | 0.654→0.726 **+0.072** | 0.745→0.634 **−0.111** | −0.083 | −0.143 |
+| `geo_k5_convlstm_ring3_3x` | 0.639→0.728 **+0.090** | 0.732→0.627 **−0.105** | −0.051 | −0.155 |
+| `geo_k5_single_ring3` | 0.634→0.691 **+0.057** | 0.728→0.635 **−0.093** | −0.044 | −0.157 |
+| `geo_k5_tattn_hybrid_ring3` | 0.649→0.735 **+0.086** | 0.741→0.639 **−0.102** | −0.035 | −0.174 |
+| `geo_k5_tattn_ring3` | 0.643→0.725 **+0.081** | 0.732→0.639 **−0.093** | −0.084 | −0.103 |
+| `temporal_k5_convlstm_ring3` | 0.646→0.792 **+0.146** | 0.729→0.731 **+0.002** | +0.007 | −0.005 |
+| `temporal_k5_tattn_hybrid_ring3` | 0.647→0.794 **+0.148** | 0.735→0.743 **+0.007** | +0.025 | −0.017 |
+| `temporal_k5_tattn_ring3` | 0.646→0.794 **+0.148** | 0.739→0.735 **−0.004** | +0.029 | −0.043 |
+
+**Recall is the metric to read here.** Adding empty negatives cannot change it —
+they contain no positive ground truth, so they contribute no TP and no FN. It is
+confounded only by the partition change itself, and it splits cleanly by axis:
+
+- **temporal −0.005 to −0.043.** Flat, and F1 flat with it. Nothing real moved.
+- **geo −0.10 to −0.17.** Every pair, large, same direction.
+
+### 🔴 The generation-2 geo numbers were inflated by train/hold-out overlap
+
+That geo recall drop is not a regression, it is the **leakage coming out**.
+`assets/PARTITIONS.md` records why generation 2 was superseded:
+
+> The geo split divides by **frame**, so the 31.25–31.44° band (~21 km) imaged
+> by both frames sits in train *and* in the hold-out.
+
+Generation 3 replaces the frame split with a hard 31.4° latitude cut, so the
+geo hold-out is now ground the model has never seen. That costs **~0.10–0.15
+recall**, and the temporal axis — which never had a frame-based split — is the
+control that confirms it: its honest numbers barely moved.
+
+**Every geo object-level score in `docs/PREDICTIONS.md` was measured partly on
+training ground.** The `eval5` batch replaces that table rather than extending
+it. `geo_k5 ring3_3x`'s obj F1 0.724, currently "the best model in the project",
+is among the numbers that need re-earning on clean ground.
+
+### The batch, ranked (comparable *within* this batch only)
+
+At the best-dice epoch. Epoch-to-epoch noise over the last 10 epochs is
+**±0.004 dice / ±0.003 F1** (median across the 14), so treat gaps under ~0.01 as
+ties. No run-to-run seed repeat exists on generation 3 yet, so the true floor is
+wider than that.
+
+**Geo** — the target axis:
+
+| Run | dice | F1 | P | R | best/last ep | obj F1 |
+|---|---|---|---|---|---|---|
+| `clean_geo_k10_tattn_hybrid_ring3` | **0.7378** | 0.6437 | 0.6558 | 0.6320 | 25 / 65 | — |
+| `clean_geo_k5_tattn_hybrid_ring3` | **0.7350** | 0.6395 | 0.6607 | 0.6196 | 50 / 90 | — |
+| `clean_geo_k5_convlstm_ring3_3x` | 0.7282 | 0.6273 | 0.6651 | 0.5935 | 73 / 100 | — |
+| `clean_geo_k10_tattn_ring3` | 0.7271 | 0.6426 | 0.5976 | 0.6950 | 46 / 86 | — |
+| `clean_geo_k5_convlstm_ring3` | 0.7262 | 0.6344 | 0.6264 | 0.6426 | 57 / 97 | — |
+| `clean_geo_k5_tattn_ring3` | 0.7246 | 0.6395 | 0.6231 | 0.6569 | 19 / 59 | — |
+| `clean_geo_k10_convlstm_ring3` | 0.7222 | 0.6237 | 0.6409 | 0.6073 | **9** / 49 | — |
+| `clean_geo_k5_single_ring3` | 0.6906 | 0.6348 | 0.6177 | 0.6529 | 33 / 73 | — |
+
+**Temporal:**
+
+| Run | dice | F1 | P | R | best/last ep | obj F1 |
+|---|---|---|---|---|---|---|
+| `clean_temporal_k10_convlstm_ring3` | 0.8038 | 0.7390 | 0.7464 | 0.7317 | 59 / 99 | — |
+| `clean_temporal_k10_tattn_ring3` | 0.7978 | 0.7330 | 0.7298 | 0.7362 | 74 / 100 | — |
+| `clean_temporal_k5_tattn_hybrid_ring3` | 0.7943 | 0.7429 | 0.6964 | 0.7960 | 68 / 100 | — |
+| `clean_temporal_k5_tattn_ring3` | 0.7942 | 0.7349 | 0.7194 | 0.7510 | 67 / 100 | — |
+| `clean_temporal_k5_convlstm_ring3` | 0.7923 | 0.7314 | 0.6783 | 0.7935 | 95 / 100 | — |
+| `clean_temporal_k5_single_ring3` | 0.7777 | 0.7274 | 0.7190 | 0.7359 | 79 / 100 | — |
+
+Geo and temporal dice are **not** rankable against each other: different splits,
+different AOI (geo scores a 31.25–31.40 South band, temporal the full
+31.25–31.75 box on both frames), different scene lists.
+
+### The one thing dice and F1 disagree about, and it is informative
+
+`clean_geo_k5_single_ring3` is **last on dice by 0.035** but **mid-pack on F1,
+P and R** — 0.6348 / 0.6177 / 0.6529 against the ConvLSTM anchor's 0.6344 /
+0.6264 / 0.6426. Same pixel-level quality; much worse dice.
+
+Both facts are real and they measure different things. Dice-on-negatives is
+near-binary — one stray pixel drops a patch from 1.0 to 0.0 — while pooled
+precision weighs by area. So the single-frame model leaks a *few* pixels into
+*more* negative patches, and the temporal models' advantage is concentrated in
+**completely clearing background patches**, not in delineating sinkholes better.
+
+That is exactly what ring negatives were built to buy, and exactly what
+positives-only validation could not see. Whether it survives at scene scale is
+`eval_clean_g5_single_control`, the highest-value job in `eval5`.
+
+### Convergence — half this batch did not finish learning
+
+`PATIENCE=40` at `LR=1e-5`, against the previous batches' 20 at 1e-6.
+
+- **Six ran out of epochs** rather than early-stopping: all five temporal k5/k10
+  arms and `geo_k5_convlstm_ring3_3x` hit 100/100. Their reported peak is a
+  floor, not a plateau — `temporal_k5_convlstm_ring3` peaked at epoch **95 of
+  100**.
+- **`clean_geo_k10_convlstm_ring3` peaked at epoch 9 of 49** and then degraded
+  for 40 epochs. The fastest overfit in the project; it is the weakest geo run
+  in the batch and is deliberately excluded from `eval5`.
+
+### Object-level status — nothing here is scored yet
+
+**Every `obj F1` cell above is `—`.** `outputs/predictions/` contains only
+generation-2 runs. Per the standing rule at the top of this file, the dice
+column must not be used to promote or kill any of these.
+
+`submit_all.sh eval5` scores **8 of the 14**, under the **benchmark paper's RTh
+protocol** (implemented 2026-08-19, `PLAN_CLEAN_BENCHMARK.md` §7(b) items 1 and
+4). Geo on `geo_k10`'s 35-scene test list, temporal on `temporal_k10`'s 22-scene
+list — verified 2026-08-19 that the k10 test lists are strict subsets of the k5
+ones on both axes, so k5 and k10 models share ground. The six skipped runs and
+the reason for each are listed in the `eval5` block of `scripts/submit_all.sh`;
+all six keep `best.pt`.
+
+The protocol, in one line each:
+
+- **stride 4** — quarter-patch step, 16 tiles per interior pixel.
+- **Confidence Factor** — each tile binarised at 0.5, the pixel value is the
+  *fraction of overlapping tiles voting positive*, on {0, 1/16, …, 1}.
+- **RTh 0.125 / 0.25 / 0.375 / 0.5** — "at least 2 / 4 / 6 / 8 of 16 agreed".
+- **Both Intersection Tolerances** — ITh 0.7 / b 5 and the softer ITh 0.5 / b 10.
+- **GT-area-weighted aggregate** reported alongside the unweighted scene mean.
+- **Recall is primary**, per the paper: full-range reconstruction scores a lot
+  of unannotated ground, so precision partly measures the digitisation.
+
+⚠️ **An RTh is not a `recon_th`.** One counts tiles, the other cuts a mean
+probability. No number produced by `eval5` belongs in the same column as
+anything in `docs/PREDICTIONS.md`.
+
+### Retention
+
+All 14 keep `best.pt`, `last.pt`, `resume.pt` and `interrupted.pt` as of
+2026-08-19. The standing rule — **keep `best.pt` for every run until it has an
+object-level score** — covers all of them, including the six `eval5` skips. The
+`last`/`resume`/`interrupted` checkpoints are the normal post-batch pruning
+target once the runs that ran out of epochs are decided (six of them could
+legitimately be *extended* from `resume.pt` rather than retrained, which is an
+argument for holding `resume.pt` longer than usual here).
+
 ## K10S — retired partition, INVALID RESULTS (`outputs/2026-08-03/`)
 
 | Run | dice | Verdict | Kept |
 |---|---|---|---|
-| `k10split_convlstm-h256` | 0.6694 | ⚠️ **invalid — union-bug training**; weights + 88 G eval deleted 2026-08-11 | metrics only |
-| `k10split_unet-single` | 0.6098 | single-frame on the retired partition; superseded | metrics only |
+| `k10split_convlstm_INVALID` | 0.6694 | ⚠️ **invalid — union-bug training**; weights + 88 G eval deleted 2026-08-11 | metrics only |
+| `k10split_single` | 0.6098 | single-frame on the retired partition; superseded | metrics only |
 
 **The 0.6694 is not a real number and neither is the 0.743 object F1 that went
 with it.** Two independent inflations, both pushing the same way:
@@ -339,7 +540,7 @@ with it.** Two independent inflations, both pushing the same way:
 2. **The val split was not held out** — 2019-08→2021-09, interleaved with its
    own 2019-05→2021-09 training range.
 
-`k10split_convlstm-h256` is the **only trained model on the wrong side of the
+`k10split_convlstm_INVALID` is the **only trained model on the wrong side of the
 fix**; every run from 2026-08-06 14:34 onward is clean, and the other three
 pre-fix runs are single-frame, which never touches that code path.
 
@@ -425,8 +626,8 @@ this file comes from those, and within a list they are mutually comparable.
 | `predictions/convlstm_10prev_k10split/` | 88 GB | evaluation of the invalid union-bug model |
 | `*_image.npy`, completed evals | 368 GB | never read by any metric |
 | 2026-08-10 `last`/`resume`/`interrupted.pt` | 8.9 GB | run finished; superseded by `best.pt` |
-| `k10split_convlstm-h256/best.pt` | 164 MB | invalid training; metrics kept as the record |
-| `geo-k10_..._seed7_lsf594073/best.pt` | 164 MB | error-bar probe; metrics carry the finding |
+| `k10split_convlstm_INVALID/best.pt` | 164 MB | invalid training; metrics kept as the record |
+| `geo_k10_convlstm_seed7/best.pt` | 164 MB | error-bar probe; metrics carry the finding |
 
 `outputs/` went from 749 GB to ~354 GB. **No run lost its metrics.** The five
 metrics-only runs of 2026-08-06 (seed7, cosine-lr5e6, h512, h1024, run1) were

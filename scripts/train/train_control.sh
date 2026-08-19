@@ -31,7 +31,10 @@ set -euo pipefail
 # variable of the same name, which is how scripts/submit_all.sh drives batches
 # without editing the file: ARCH=stack bsub -J <name> < this_script
 ARCH="${ARCH:-single}"                    # single | stack
-PARTITION="${PARTITION:-assets/partition_geo_k10.json}"  # geo_k5|geo_k10|temporal_k5|temporal_k10
+# No default on purpose: assets/ holds three generations of partition
+# (assets/PARTITIONS.md). Defaulting to one is how a clean-data run silently
+# trains on the 2019-2026 noisy lists, so set it explicitly every time.
+PARTITION="${PARTITION:?set PARTITION=assets/partition_<axis>_k<k>[_clean].json -- see assets/PARTITIONS.md}"
 K_PREVS="${K_PREVS:-10}"                  # stack only; ignored when ARCH=single
 POS_W="${POS_W:-8}"
 SEED="${SEED:-42}"
@@ -93,8 +96,8 @@ esac
 # mismatched K_PREVS would move the VALIDATION set as well as the training one.
 if { [ "$RING_NEGS" = yes ] || [ "$VAL_NEGS" = yes ]; } && [ "$ARCH" = single ]; then
   case "$PARTITION" in
-    *_k5.json)  [ "$K_PREVS" = 5 ]  || { echo "negatives with ARCH=single need K_PREVS=5 with a _k5 partition (it selects the exclusion chain)" >&2; exit 1; } ;;
-    *_k10.json) [ "$K_PREVS" = 10 ] || { echo "negatives with ARCH=single need K_PREVS=10 with a _k10 partition (it selects the exclusion chain)" >&2; exit 1; } ;;
+    *_k5.json|*_k5_*.json)  [ "$K_PREVS" = 5 ]  || { echo "negatives with ARCH=single need K_PREVS=5 with a _k5 partition (it selects the exclusion chain)" >&2; exit 1; } ;;
+    *_k10.json|*_k10_*.json) [ "$K_PREVS" = 10 ] || { echo "negatives with ARCH=single need K_PREVS=10 with a _k10 partition (it selects the exclusion chain)" >&2; exit 1; } ;;
   esac
 fi
 
@@ -105,8 +108,8 @@ case "$ARCH" in
   single) ARCH_FLAGS=(--k_prevs "$K_PREVS") ;;
   stack)  ARCH_FLAGS=(--add_temporal --k_prevs "$K_PREVS")
           case "$PARTITION" in
-            *_k5.json)  [ "$K_PREVS" = 5 ]  || { echo "K_PREVS=$K_PREVS with a _k5 partition"  >&2; exit 1; } ;;
-            *_k10.json) [ "$K_PREVS" = 10 ] || { echo "K_PREVS=$K_PREVS with a _k10 partition" >&2; exit 1; } ;;
+            *_k5.json|*_k5_*.json)  [ "$K_PREVS" = 5 ]  || { echo "K_PREVS=$K_PREVS with a _k5 partition"  >&2; exit 1; } ;;
+            *_k10.json|*_k10_*.json) [ "$K_PREVS" = 10 ] || { echo "K_PREVS=$K_PREVS with a _k10 partition" >&2; exit 1; } ;;
           esac ;;
   *)      echo "ARCH must be 'single' or 'stack', got '$ARCH'" >&2; exit 1 ;;
 esac

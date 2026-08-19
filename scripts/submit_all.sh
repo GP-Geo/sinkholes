@@ -7,7 +7,17 @@
 #    scripts/submit_all.sh training --submit # submit ConvLSTM + temporal-attention training
 #    scripts/submit_all.sh control --submit  # the single-frame U-Net 2x2 control
 #    scripts/submit_all.sh valneg  --submit  # the geo_k5 reruns with negative validation
-#    scripts/submit_all.sh eval4   --submit  # the 2026-08-11 evals -- START HERE
+#    scripts/submit_all.sh clean22 --submit  # THE CLEAN BENCHMARK: six runs, all with
+#                                            # ring negatives + negative validation
+#    scripts/submit_all.sh valpos  --submit  # six of the clean22 runs again, with the
+#                                            # negatives in TRAINING ONLY (VAL_NEGS off)
+#    scripts/submit_all.sh eval4   --submit  # the 2026-08-11 evals (DONE 2026-08-12)
+#    scripts/submit_all.sh eval5   --submit  # THE CLEAN BENCHMARK EVALS: 8 of the 14
+#                                            # clean22 runs, GEN=3 partitions at the
+#                                            # paper's stride-4 geometry
+#    scripts/submit_all.sh posonly --submit  # positives-only, the paper's protocol
+#    scripts/submit_all.sh blend   --submit  # Hann-blended stitching, the geo_k5 triple
+#                                            # (2 of 3 -- the single-frame arm is done)
 #    scripts/submit_all.sh eval    --submit  # the 2026-08-09 eval backlog
 #    scripts/submit_all.sh eval2   --submit  # the 2026-08-10 evals  (DONE 2026-08-11)
 #    scripts/submit_all.sh eval3   --submit  # second-wave evals     (DONE 2026-08-11)
@@ -30,10 +40,20 @@
 #  can be resubmitted by uncommenting a single `job` line.
 #
 #  Two kinds are live:
-#    valneg  the five geo_k5 reruns under the new negative validation set --
-#            same five experiments, a val/dice that can finally rank them.
-#    eval4   the object-level scores for the 2026-08-11 runs, which
-#            docs/RESULTS.md names the top priority.
+#    eval5   the object-level scores for 8 of the 14 clean22 runs, on the
+#            generation-3 partitions at stride 4. This is the queued work.
+#            clean22 itself is DONE -- all 14 finished 2026-08-19; do not
+#            resubmit it, it is ~50 GPU-hours of completed training.
+#    valpos  six of those fourteen re-run with the negatives in TRAINING ONLY.
+#            clean22's val/dice of 0.72-0.80 is inflated by the validation
+#            negatives -- an empty prediction on an empty mask scores dice 1.0,
+#            so at 1:1 the mean is roughly (1 + dice_on_positives)/2 and is not
+#            comparable to any earlier batch. ~52 GPU-hours. See the block
+#            below for what it costs on checkpoint selection.
+#
+#  `valneg` and `eval4` are retired: eval4 completed 2026-08-12, and valneg was
+#  superseded by clean22, which does the same thing on partitions whose geo
+#  hold-out is not contaminated by the frame-overlap band.
 #
 #  DRY RUN IS THE DEFAULT. Nothing reaches LSF without --submit.
 #
@@ -108,12 +128,12 @@ GEO_K5=assets/partition_geo_k5.json
 # The 2026-08-09 batch, archived (docs/MODEL_RUNS.md retention: results.csv,
 # log, curves.png, validation/ and best.pt kept; resume.pt and last.pt pruned).
 A09=outputs/2026-08-09
-G10_SEED7=$A09/geo-k10_convlstm-h256_seed7_lsf594073
-G10_POSW4=$A09/geo-k10_convlstm-h256_posw4_lsf594076
-G10_SINGLE=$A09/geo-k10_unet-single_lsf594074
-G10_STACK=$A09/geo-k10_unet-stack_lsf594075
-T5_POSW1=$A09/temporal-k5_convlstm-h256_posw1_lsf594080
-T5_POSW2=$A09/temporal-k5_convlstm-h256_posw2_lsf594078
+G10_SEED7=$A09/geo_k10_convlstm_seed7
+G10_POSW4=$A09/geo_k10_convlstm_posw4
+G10_SINGLE=$A09/geo_k10_single
+G10_STACK=$A09/geo_k10_stack
+T5_POSW1=$A09/temporal_k5_convlstm_posw1
+T5_POSW2=$A09/temporal_k5_convlstm_posw2
 
 # The 2026-08-10 batch: all 13 jobs (9 negative-sampling + 4 attention) ran to
 # completion, every one of them stopping on early-stopping patience rather than
@@ -121,40 +141,44 @@ T5_POSW2=$A09/temporal-k5_convlstm-h256_posw2_lsf594078
 # best.pt is kept for ALL 13 because none has been scored at object level yet.
 # Deleting any of them now would cost a retrain to run the eval below.
 #
-# Note the naming scheme changed with this batch: it leads with the
-# ARCHITECTURE ("convlstm_geo_k5_...") where earlier runs led with the group
-# ("geo-k5_convlstm-..."). run_eval.sh parses both.
+# Every run directory was renamed on 2026-08-17 to
+# <partition>_<arch>[_<variant>], dropping the LSF id, timestamp, epoch count
+# and any setting that is the default (h256, pos_w 4, b128, lr1e-6). See
+# outputs/README.md. run_eval.sh derives GROUP/ARCH from the flags below, not
+# from the directory name, so the rename does not affect it.
 A10=outputs/2026-08-10
-T5_POSW4=$A10/convlstm_temporal_k5_h256_posw4_60e_2026-08-10_15h41_lsf_82458
-T5_NEG1_R3=$A10/convlstm_temporal_k5_h256_posw4_neg1x_ring3_60e_2026-08-10_16h53_lsf_96429
-T5_NEG1_R10=$A10/convlstm_temporal_k5_h256_posw4_neg1x_ring10_60e_2026-08-10_16h53_lsf_96432
-T5_NEG3_R3=$A10/convlstm_temporal_k5_h256_posw4_neg3x_ring3_60e_2026-08-10_16h53_lsf_96433
-G5_POSW4=$A10/convlstm_geo_k5_h256_posw4_60e_2026-08-10_16h00_lsf_82459
-G5_NEG1_R3=$A10/convlstm_geo_k5_h256_posw4_neg1x_ring3_60e_2026-08-10_16h54_lsf_96436
-G5_NEG1_R10=$A10/convlstm_geo_k5_h256_posw4_neg1x_ring10_60e_2026-08-10_16h54_lsf_96437
-G5_NEG3_R3=$A10/convlstm_geo_k5_h256_posw4_neg3x_ring3_60e_2026-08-10_16h54_lsf_96439
-G10_NEG1_R3=$A10/convlstm_geo_k10_h256_posw4_neg1x_ring3_60e_2026-08-10_17h08_lsf_96441
-TA_FUSE0=$A10/tattn_temporal_k5_d256_fuse0_posw4_60e_2026-08-10_16h55_lsf_96442
-TA_FUSE0_NEG=$A10/tattn_temporal_k5_d256_fuse0_posw4_neg1x_ring3_60e_2026-08-10_16h54_lsf_96445
-TA_FUSE2_NEG=$A10/tattn_temporal_k5_d256_fuse2_posw4_neg1x_ring3_60e_2026-08-10_16h57_lsf_96447
-TA_HYBRID_NEG=$A10/tattn_temporal_k5_d256_fuse0_recur-convlstm_posw4_neg1x_ring3_60e_2026-08-10_16h57_lsf_96449
+T5_POSW4=$A10/temporal_k5_convlstm_base
+T5_NEG1_R3=$A10/temporal_k5_convlstm_ring3
+T5_NEG1_R10=$A10/temporal_k5_convlstm_ring10
+T5_NEG3_R3=$A10/temporal_k5_convlstm_ring3_3x
+G5_POSW4=$A10/geo_k5_convlstm_base
+G5_NEG1_R3=$A10/geo_k5_convlstm_ring3
+G5_NEG1_R10=$A10/geo_k5_convlstm_ring10
+G5_NEG3_R3=$A10/geo_k5_convlstm_ring3_3x
+G10_NEG1_R3=$A10/geo_k10_convlstm_ring3
+TA_FUSE0=$A10/temporal_k5_tattn_base
+TA_FUSE0_NEG=$A10/temporal_k5_tattn_ring3
+TA_FUSE2_NEG=$A10/temporal_k5_tattn_fuse2_ring3
+TA_HYBRID_NEG=$A10/temporal_k5_tattn_hybrid_ring3
 
 # The 2026-08-11 batch: the two geo attention arms (LSF 493314/493315) and the
 # two single-frame controls (LSF 501433/501434). All four finished cleanly --
 # three on early-stopping patience, one on the full 60 epochs, none killed --
-# and all four kept best.pt. They are still LOOSE AT THE TOP LEVEL of outputs/,
-# not under a dated folder, so there is no $A11 prefix to hang them on; the
-# paths below are deliberately written out in full and must be re-pointed if
-# docs/MODEL_RUNS.md's housekeeping (move into outputs/2026-08-11/) is done.
+# and all four kept best.pt. Moved into outputs/2026-08-11/ on 2026-08-17.
 #
-# None of the four has an object-level score -- they are exactly the four runs
-# the eval4 table below exists to score, so best.pt must not be pruned from any
-# of them until that has run.
-A11=outputs
-G5_TATTN_FUSE0=$A11/tattn_geo_k5_d256_fuse0_posw4_neg1x_ring3_60e_2026-08-11_14h15_lsf_493314
-G5_TATTN_HYBRID=$A11/tattn_geo_k5_d256_fuse0_recur-convlstm_posw4_neg1x_ring3_60e_2026-08-11_14h15_lsf_493315
-G5_SINGLE_BASE=$A11/unet_single_geo_k5_posw4_60e_2026-08-11_14h36_lsf_501433
-G5_SINGLE_NEG=$A11/unet_single_geo_k5_posw4_neg1x_ring3_60e_2026-08-11_14h36_lsf_501434
+# All four now have object-level scores (docs/PREDICTIONS.md): the hybrid ties
+# ConvLSTM on geo and pure attention trails it, so best.pt is still worth
+# keeping on all four, but the eval4 backlog they existed for is closed.
+A11=outputs/2026-08-11
+G5_TATTN_FUSE0=$A11/geo_k5_tattn_ring3
+G5_TATTN_HYBRID=$A11/geo_k5_tattn_hybrid_ring3
+G5_SINGLE_BASE=$A11/geo_k5_single_base
+G5_SINGLE_NEG=$A11/geo_k5_single_ring3
+
+# The 2026-08-06 geo_k10 reference: the project's worst over-predictor
+# (P=0.121 @ 0.125) and therefore the widest gap between what a model finds and
+# what it flags. Kept for the positives-only table below.
+G10_OLD=outputs/2026-08-06/geo_k10_convlstm_posw8
 
 # ---- the negative-sampling batch --------------------------------------------
 # Every model to date trained on positive patches only (--nonz_only), i.e. the
@@ -275,6 +299,14 @@ RES_NEG3_G5="long-gpu  160   36  24:00"   # geo_k5      + 3x negatives, ~16.2 h 
 # measured 262 s/epoch doubles to ~8.7 h over 60 epochs.
 RES_NEG1_G10="long-gpu 144   48  14:00"   # geo_k10     + 1x negatives, ~8.7 h
 RES_RESCORE="short-gpu 16    8   2:00"    # stage-2 re-scoring only, no inference
+# Positives-only: the patch stage is trivial (~4,400 positive patches over the
+# 18 geo test scenes, against 5,846 in a single validation epoch), and the scene
+# stage runs the network on ~2.5% of the tiles. What does NOT shrink is loading
+# and normalising every full patch grid, which is the transient ~30 GB term and
+# a good share of the 3.0 h a normal eval takes. So host memory stays at the
+# eval rung and only walltime comes down -- 6:00 is roughly 2x the I/O floor.
+# Measure the first one and tighten:  grep -A3 "Max Memory" logs/*.out
+RES_POSONLY="long-gpu 80    36   6:00"
 
 NAMES=(); KINDS=(); TEMPLATES=(); OVERRIDES=(); RESOURCES=(); WHYS=()
 job() { KINDS+=("$1"); NAMES+=("$2"); TEMPLATES+=("$3"); OVERRIDES+=("$4"); RESOURCES+=("$5"); WHYS+=("$6"); }
@@ -349,7 +381,7 @@ job eval eval_geo_k10_stack \
 # Pruning *_image.npy on 2026-08-11 does NOT affect this: rescore reads
 # _pred.npy and _gt.npy, both kept. Verified by re-scoring a pruned directory
 # to byte-identical numbers.
-RESCORE_G10=outputs/predictions/convlstm_geo_k10_lsf206375/best/test_geo_k10_08_09_12h38
+RESCORE_G10=outputs/predictions/geo_k10_convlstm_posw8/best/scenes_geo
 job rescore rescore_geo_k10_206375 \
     scripts/eval/rescore.sh "DIR=$RESCORE_G10" "$RES_RESCORE" \
     "the 0.6583 geo leader, currently unrankable -- 3 of 5 thresholds missing"
@@ -605,6 +637,304 @@ job valneg unet_single_geo_k5_posw4_neg1x_ring3_valneg1x_60e \
     scripts/train/train_control.sh "$CONTROL_G5 $NEG_R3_1X $VALNEG" "$RES_CTRL_G5_NEG" \
     "the control: does the temporal machinery buy anything once background is scored?"
 
+# ---- training: the clean benchmark (kind: clean22) --------------------------
+# The six runs of docs/PLAN_CLEAN_BENCHMARK.md section 6, on the generation-3
+# partitions written 2026-08-18 (assets/partition_*_clean.json). These are the
+# first runs on the new ground rules and NOTHING from the old batches carries
+# over -- different scene lists, an AOI window, and a latitude cut that makes
+# the geo train and hold-out disjoint for the first time.
+#
+# EVERY RUN HAS NEGATIVES, on both sides:
+#   RING_NEGS=yes   background patches in TRAINING  (ring 1-3, the arm that won
+#                   on the old data), so the model sees what it must not flag.
+#   VAL_NEGS=yes    background patches in VALIDATION, which is what makes
+#                   val/dice able to see a false positive at all. The
+#                   2026-08-10 batch is the cautionary tale: all nine arms
+#                   landed inside the +-0.006 noise floor because validation
+#                   was positives-only and structurally could not measure the
+#                   thing the negatives were changing.
+# VAL_NEGS needs a seed; SEED defaults to 42 in every template, and the
+# validation negatives are pinned (inner 1, outer 3, 1:1) so two runs on one
+# partition are scored on byte-identical samples.
+#
+# The partitions carry their own aoi_window, so no AOI flag is needed here --
+# train.py reads it from the file and hands it to the datasets. That is the
+# point of putting the window in the partition rather than on the command line.
+#
+# HOST MEMORY: every request is now sized from a measurement, capped at 128 GB.
+# SubsiDataset holds every loaded patch in RAM, so ring negatives add SAMPLES
+# and therefore add memory -- 1:1 doubles the stored set, 3:1 quadruples it.
+#
+# Calibration: the old geo_k5 train pool is 109 intfs / 45,487 positives and its
+# measured host peak was ~41 GB positives-only, which is 1.61x the raw sample
+# bytes (T x 200 x 100 x 4, plus the mask). Estimated peaks, +25% headroom:
+#
+#   geo_k5   1:1   59G -> 80     geo_k10  1:1   85G -> 112
+#   geo_k5   3:1  117G -> 128    temp_k5  1:1   77G -> 96
+#   geo_k5   single 17G -> 24    temp_k10 1:1  101G -> 128
+#
+# THE 3:1 ARM IS THE ONLY ONE NEAR THE CAP: 117G estimated against a 128G
+# request is ~9% headroom, where everything else has 25%. If it OOMs, drop
+# NEG_PER_POS to 2.0 (est. 88G) rather than raising the request -- "more than
+# 1:1" was the question that arm asks, not "exactly 3:1".
+#
+# WALLTIMES were re-scaled for EPOCHS=100 (x1.6 over the 60-epoch figures).
+#
+# SEVERAL NOW EXCEED 24:00, which scripts/submit_all.sh already flags as
+# possibly above long-gpu's hard cap. That is a cheap failure: an over-long
+# request is REJECTED AT SUBMIT TIME with
+#   "RUNLIMIT: Cannot exceed queue's hard limit(s)"
+# so nothing is wasted and the real cap becomes known immediately. Asking too
+# LITTLE is the expensive mistake -- the job dies mid-run at the wall.
+#
+# If a job bounces, either lower its -W here, or let it run to the wall and
+# continue from resume.pt:
+#     RESUME=<run dir> bsub -J <same name> < scripts/train/train_convlstm.sh
+# RESUME=auto will NOT do it: a runlimit kill is not a requeue, and the new job
+# gets a new id.
+#
+# PATIENCE=40 is what actually decides these runs. The 2026-08-10 batch stopped
+# every one of its 13 jobs on patience rather than the epoch budget, and at
+# LR=1e-5 the loss should move earlier still -- so 100 epochs is a ceiling most
+# runs will not reach.
+#
+# Resources are re-sized, not inherited: the clean training pools are LARGER
+# than the ones the old walltimes were measured on (temporal_k5 goes 106 -> 163
+# interferograms, geo_k5 109 -> 127), and 1:1 negatives double the sample count
+# on top of that. Walltimes below carry roughly 1.6x headroom over a linear
+# scaling of the 2026-08-10 measurements; host memory tracks FRAMES per sample,
+# so the k10 arms keep the 144 GB that geo_k10+negatives needed.
+GEO_K5_CLEAN=assets/partition_geo_k5_clean.json
+GEO_K10_CLEAN=assets/partition_geo_k10_clean.json
+TEMP_K5_CLEAN=assets/partition_temporal_k5_clean.json
+TEMP_K10_CLEAN=assets/partition_temporal_k10_clean.json
+
+# Shared hyperparameters for the whole batch, set 2026-08-18. Every clean22 job
+# carries $C_HYP so the fourteen runs differ in partition, architecture and
+# negatives -- and in nothing else. Changing a value here changes all fourteen,
+# which is the point: a hyperparameter that drifts between arms makes the
+# architecture comparison uninterpretable.
+#
+#   LR 1e-5     10x the 1e-6 every previous run used. Expect the loss to move
+#               much earlier in training; the old curves are not a guide.
+#   EPOCHS 100  a ceiling, not a target -- patience decides in practice.
+#   PATIENCE 40 doubled with the epoch budget so early stopping stays a
+#               proportional rule rather than becoming twice as aggressive.
+C_HYP="LR=1e-5 EPOCHS=100 PATIENCE=40"
+
+C_G5="PARTITION=$GEO_K5_CLEAN   K_PREVS=5  POS_W=4"
+C_G10="PARTITION=$GEO_K10_CLEAN  K_PREVS=10 POS_W=4"
+C_T5="PARTITION=$TEMP_K5_CLEAN  K_PREVS=5  POS_W=4"
+C_T10="PARTITION=$TEMP_K10_CLEAN K_PREVS=10 POS_W=4"
+C_CTRL_G5="ARCH=single PARTITION=$GEO_K5_CLEAN K_PREVS=5 POS_W=4"
+C_CTRL_T5="ARCH=single PARTITION=$TEMP_K5_CLEAN K_PREVS=5 POS_W=4"
+
+#                       queue    hostGB vramG walltime
+RES_C_G5="long-gpu       80   36  28:00"   # est peak 59G
+RES_C_G5_3X="long-gpu   128   36  48:00"   # est peak 117G -- the ONLY job near the cap
+RES_C_G10="long-gpu     112   48  28:00"   # est peak 85G
+RES_C_T5="long-gpu       96   36  35:00"   # est peak 77G (biggest pool)
+RES_C_T10="long-gpu     128   48  32:00"   # est peak 101G
+RES_C_CTRL="long-gpu     24   24   13:00"   # single-frame geo_k5, est peak 17G
+RES_C_CTRL_T5="long-gpu  32   24   13:00"   # single-frame temporal_k5, est peak 22G
+
+# Order matters: the geo_k5 1:1 ConvLSTM arm is the anchor every other run is
+# read against. Submit it first so a queue that only clears one job still
+# clears the interpretable one.
+job clean22 clean_geo_k5_convlstm_ring3 \
+    scripts/train/train_convlstm.sh "$C_G5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_G5" \
+    "THE anchor: geo_k5, ConvLSTM h256, 1:1 near-field negatives, negative validation"
+job clean22 clean_geo_k5_convlstm_ring3_3x \
+    scripts/train/train_convlstm.sh "$C_G5 $NEG_R3_3X $VALNEG $C_HYP" "$RES_C_G5_3X" \
+    "best config on the old data (3:1), re-run on clean ground -- does it survive the AOI?"
+job clean22 clean_geo_k5_single_ring3 \
+    scripts/train/train_control.sh "$C_CTRL_G5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_CTRL" \
+    "temporal-context control: what does the recurrence buy once background is scored?"
+job clean22 clean_geo_k10_convlstm_ring3 \
+    scripts/train/train_convlstm.sh "$C_G10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_G10" \
+    "k5 vs k10 on the geo axis, same negatives"
+job clean22 clean_temporal_k5_convlstm_ring3 \
+    scripts/train/train_convlstm.sh "$C_T5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_T5" \
+    "the temporal axis: train <2024, val <2025, test 2025+ -- the year shift, on the AOI"
+job clean22 clean_temporal_k10_convlstm_ring3 \
+    scripts/train/train_convlstm.sh "$C_T10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_T10" \
+    "k5 vs k10 there; val is 16 intfs / 4,735 positives, thin but no longer the old 6"
+# The control on BOTH axes, not just geo. Without it a "temporal context helps"
+# claim on the temporal axis has no baseline of its own: the geo control only
+# licenses the statement for geo-split data, and the two axes now differ in
+# training pool as well as in split rule.
+job clean22 clean_temporal_k5_single_ring3 \
+    scripts/train/train_control.sh "$C_CTRL_T5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_CTRL_T5" \
+    "temporal-context control on the temporal axis -- the missing half of the geo control"
+
+# ---- the attention arms of the clean batch ----------------------------------
+# Two architectures beyond the ConvLSTM, on both axes, same negatives and same
+# negative validation as everything else in clean22:
+#
+#   tattn   RECURRENCE=none      the current frame attends over its own history
+#                                at each bottleneck pixel. The hypothesis is
+#                                about PRECISION: atmospheric and decorrelation
+#                                artefacts are temporally inconsistent while
+#                                subsidence is persistent, so a learned
+#                                weighted average over the chain is a matched
+#                                filter for signal and a suppressor for noise.
+#   hybrid  RECURRENCE=convlstm  attention over the chain PLUS the recurrent
+#                                state -- the arm that tied ConvLSTM on geo in
+#                                docs/PREDICTIONS.md while pure attention
+#                                trailed it.
+#
+# Both at FUSE_SKIPS=0, matching the arms those results came from. FUSE_SKIPS=2
+# exists (temporal_k5_tattn_fuse2_ring3 on the old data) and is one env var away
+# -- add FUSE_SKIPS=2 to an override string -- but it is a third variant of an
+# already-four-run block and is deliberately not queued here.
+#
+# Why both axes rather than geo alone: the precision claim is about suppressing
+# temporally inconsistent artefacts, and the temporal axis is where the year
+# shift actually stresses that. Running it on geo only would leave the
+# architecture's own hypothesis untested.
+#
+# gmem: pure attention at k5/fuse0 fits 36G, the hybrid carries a 256-wide
+# ConvLSTM on top of the attention stack and gets 48G. The template itself
+# warns above 36G only for K_PREVS>=10 or FUSE_SKIPS>=3, neither of which
+# applies here -- the bump is for the hybrid's extra state, not the warning.
+C_TATTN_G5="PARTITION=$GEO_K5_CLEAN K_PREVS=5 POS_W=4 FUSE_SKIPS=0 RECURRENCE=none"
+C_HYBRID_G5="PARTITION=$GEO_K5_CLEAN K_PREVS=5 POS_W=4 FUSE_SKIPS=0 RECURRENCE=convlstm HIDDEN=256"
+C_TATTN_T5="PARTITION=$TEMP_K5_CLEAN K_PREVS=5 POS_W=4 FUSE_SKIPS=0 RECURRENCE=none"
+C_HYBRID_T5="PARTITION=$TEMP_K5_CLEAN K_PREVS=5 POS_W=4 FUSE_SKIPS=0 RECURRENCE=convlstm HIDDEN=256"
+# k=10 attention arms. The template itself warns that K_PREVS>=10 wants gmem 48G
+# against the 36G its #BSUB line asks for -- that is exactly this case, and the
+# RESOURCES below override the directive, which is why they live here.
+C_TATTN_G10="PARTITION=$GEO_K10_CLEAN K_PREVS=10 POS_W=4 FUSE_SKIPS=0 RECURRENCE=none"
+C_HYBRID_G10="PARTITION=$GEO_K10_CLEAN K_PREVS=10 POS_W=4 FUSE_SKIPS=0 RECURRENCE=convlstm HIDDEN=256"
+C_TATTN_T10="PARTITION=$TEMP_K10_CLEAN K_PREVS=10 POS_W=4 FUSE_SKIPS=0 RECURRENCE=none"
+
+RES_C_TATTN_G5="long-gpu   88   36  38:00"   # geo_k5 pool, attention only
+RES_C_HYBRID_G5="long-gpu  88   48  44:00"   # + recurrent state (GPU-side, not host)
+RES_C_TATTN_T5="long-gpu  104   36  44:00"   # temporal_k5: the biggest pool
+RES_C_HYBRID_T5="long-gpu 104   48  51:00"   # biggest pool + recurrent state
+RES_C_TATTN_G10="long-gpu  112   48  38:00"   # k=10 attention, est peak 85G
+RES_C_HYBRID_G10="long-gpu 112   48  44:00"   # k=10 attention + recurrent state
+RES_C_TATTN_T10="long-gpu  128   48  44:00"   # k=10 attention, est peak 101G
+
+job clean22 clean_geo_k5_tattn_ring3 \
+    scripts/train/train_tattn.sh "$C_TATTN_G5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_G5" \
+    "attention vs recurrence on geo, on clean ground and a precision-sensitive val set"
+job clean22 clean_geo_k5_tattn_hybrid_ring3 \
+    scripts/train/train_tattn.sh "$C_HYBRID_G5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_HYBRID_G5" \
+    "the hybrid tied ConvLSTM on the old geo data -- does it still, once the AOI removes the sea?"
+job clean22 clean_temporal_k5_tattn_ring3 \
+    scripts/train/train_tattn.sh "$C_TATTN_T5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_T5" \
+    "the artefact-suppression claim, tested where the year shift actually stresses it"
+job clean22 clean_temporal_k5_tattn_hybrid_ring3 \
+    scripts/train/train_tattn.sh "$C_HYBRID_T5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_HYBRID_T5" \
+    "hybrid on the temporal axis: recurrence and attention together against the 2025+ test set"
+
+# The k=10 attention arms. Attention over a chain is the case where depth should
+# matter MOST -- a longer history is more evidence for what is temporally
+# persistent and what is not, which is the whole artefact-suppression argument.
+# k5-only attention would leave that untested.
+#
+# Absent for symmetry: temporal_k10 hybrid. One `job` line away if wanted; left
+# out because the geo axis already carries the tattn-vs-hybrid pair at k10 and
+# the temporal axis carries it at k5, so both contrasts exist once.
+job clean22 clean_geo_k10_tattn_ring3 \
+    scripts/train/train_tattn.sh "$C_TATTN_G10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_G10" \
+    "attention at k=10 on geo: does a longer history buy what the k5 arm could not?"
+job clean22 clean_geo_k10_tattn_hybrid_ring3 \
+    scripts/train/train_tattn.sh "$C_HYBRID_G10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_HYBRID_G10" \
+    "the tattn-vs-hybrid contrast at k=10, against clean_geo_k10_convlstm_ring3"
+job clean22 clean_temporal_k10_tattn_ring3 \
+    scripts/train/train_tattn.sh "$C_TATTN_T10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_T10" \
+    "attention at k=10 under the year shift -- the longest history against the 2025+ test set"
+
+# ---- training: negatives in TRAIN ONLY (kind: valpos) -----------------------
+# Six of the fourteen clean22 runs, resubmitted with ONE change: $VALNEG is
+# dropped, so RING_NEGS=yes still puts background patches in TRAINING and the
+# validation split goes back to positives only.
+#
+# WHY. clean22's val/dice landed at 0.72-0.80 against the 0.64-0.66 every
+# earlier batch produced, and that jump is an artefact of the metric, not a
+# better model. dice_coeff (sinkholes/training/losses.py:12-22) maps an empty
+# prediction on an empty mask to (0+eps)/(0+eps) = 1.0, so at 1:1 validation
+# negatives roughly half the val samples score ~1.0 and the mean is about
+# (1 + dice_on_positives) / 2. Nothing in those runs is comparable to anything
+# before them on that column.
+#
+# WHAT THIS COSTS, and it is not nothing. best.pt is chosen on val/dice
+# (train.py:900-915), so positives-only validation goes back to selecting the
+# checkpoint that cannot see a false positive -- which is the failure mode
+# docs/PLAN_CLEAN_BENCHMARK.md put VAL_NEGS in for, and the reason the whole
+# 2026-08-10 batch landed inside its own noise floor. Expect these six to
+# select more recall-heavy weights than their clean22 twins. The object-level
+# eval, not this curve, is what settles them.
+#
+# WORTH KNOWING BEFORE SPENDING THE HOURS: val/F1, val/P and val/R in every
+# clean22 results.csv are accumulated from raw pixel tp/fp/fn
+# (evaluate.py:300-306), not per-sample, so they are ALREADY negative-aware and
+# already un-inflated -- the clean22 F1 column reads 0.62-0.74 and ranks the
+# arms the same way this batch will. These runs change which checkpoint is
+# kept; they do not change what is measurable.
+#
+# THE SIX. Geo-weighted, because geo (north->south) is the axis the project is
+# steering toward, and geo is where over-prediction has always been worst. The
+# geo four are a 2x2: {ConvLSTM, hybrid attention} x {k=5, k=10}, so depth and
+# architecture are both readable without a third factor moving. Plus the geo
+# single-frame control -- last night it placed LAST on dice and MID-PACK on F1
+# (0.6906 / 0.6348), the exact disagreement checkpoint selection can move --
+# and one temporal ConvLSTM so the geo numbers are not read in isolation.
+#
+# Left out on purpose: the 3:1 arm (16.9 h measured, and 1:1 vs 3:1 is a
+# training-side question this batch does not touch), pure tattn on both axes
+# (the hybrid carried the geo contrast last night), and the temporal k10 pair.
+#
+# RESOURCES ARE NOW MEASURED, not estimated -- all fourteen clean22 jobs
+# reported Max Memory and peak VRAM, and every one of them came in far under
+# its request. Host GB below is the measured peak +~25%, VRAM is the measured
+# RESERVED figure +~25%, walltime is the measured seconds-per-epoch carried to
+# the full 100-epoch ceiling with ~60% on top. Dropping the validation
+# negatives halves the val set, so all three move DOWN from here, never up.
+#
+#   run                     measured host / VRAM(res) / s per epoch
+#   geo_k5   convlstm        55.9 GB   25.8 GiB   222   (97 epochs, 6.0 h)
+#   geo_k5   hybrid          55.8 GB   26.2 GiB   271   (90 epochs, 6.8 h)
+#   geo_k5   single          20.8 GB    8.3 GiB   151   (73 epochs, 3.1 h)
+#   geo_k10  convlstm        85.4 GB   44.4 GiB   326   (49 epochs, 4.4 h)
+#   geo_k10  hybrid          85.5 GB   44.4 GiB   361   (65 epochs, 6.5 h)
+#   temp_k5  convlstm        69.2 GB   25.8 GiB   546  (100 epochs, 15.2 h)
+#
+# The temporal ConvLSTM's 546 s/epoch against the geo ConvLSTM's 222 is larger
+# than the pool difference (163 vs 127 interferograms) explains, so some of it
+# is card variance. Its 26:00 keeps the margin that gap deserves.
+#
+#                        queue    hostGB vramG walltime
+RES_V_G5="long-gpu        72   32  10:00"   # measured 55.9 GB / 25.8 GiB / 6.0 h
+RES_V_HYBRID_G5="long-gpu 72   36  12:00"   # measured 55.8 GB / 26.2 GiB / 6.8 h
+RES_V_CTRL_G5="long-gpu   28   16   8:00"   # measured 20.8 GB /  8.3 GiB / 3.1 h
+RES_V_G10="long-gpu      108   48  14:00"   # measured 85.4 GB / 44.4 GiB / 4.4 h
+RES_V_HYBRID_G10="long-gpu 108 48  15:00"   # measured 85.5 GB / 44.4 GiB / 6.5 h
+RES_V_T5="long-gpu        88   32  26:00"   # measured 69.2 GB / 25.8 GiB / 15.2 h
+
+# The anchor first, same rule as clean22: a queue that clears one job should
+# clear the interpretable one.
+job valpos clean_geo_k5_convlstm_ring3_valpos \
+    scripts/train/train_convlstm.sh "$C_G5 $NEG_R3_1X $C_HYP" "$RES_V_G5" \
+    "THE anchor, train-side negatives only -- the direct twin of clean_geo_k5_convlstm_ring3"
+job valpos clean_geo_k5_tattn_hybrid_ring3_valpos \
+    scripts/train/train_tattn.sh "$C_HYBRID_G5 $NEG_R3_1X $C_HYP" "$RES_V_HYBRID_G5" \
+    "best geo arm at k=5 last night (F1 0.6395) -- does it stay there on a positives-only curve?"
+job valpos clean_geo_k5_single_ring3_valpos \
+    scripts/train/train_control.sh "$C_CTRL_G5 $NEG_R3_1X $C_HYP" "$RES_V_CTRL_G5" \
+    "the control, and the run whose dice and F1 disagreed most -- 3 h, the cheapest arm here"
+job valpos clean_geo_k10_convlstm_ring3_valpos \
+    scripts/train/train_convlstm.sh "$C_G10 $NEG_R3_1X $C_HYP" "$RES_V_G10" \
+    "k5 vs k10 under ConvLSTM, completing the geo 2x2"
+job valpos clean_geo_k10_tattn_hybrid_ring3_valpos \
+    scripts/train/train_tattn.sh "$C_HYBRID_G10 $NEG_R3_1X $C_HYP" "$RES_V_HYBRID_G10" \
+    "top geo arm overall last night (F1 0.6437); k5 vs k10 under attention, the other half of the 2x2"
+job valpos clean_temporal_k5_convlstm_ring3_valpos \
+    scripts/train/train_convlstm.sh "$C_T5 $NEG_R3_1X $C_HYP" "$RES_V_T5" \
+    "one temporal arm so the geo five are not read without a cross-axis reference"
+
 # ---- evaluation: the 2026-08-10 batch (kind: eval2) -------------------------
 # THIS IS THE BATCH THAT SETTLES 2026-08-10. Its own kind so it can be sent
 # without dragging the 2026-08-09 backlog along:  submit_all.sh eval2 --submit
@@ -726,6 +1056,352 @@ job eval4 eval_g5_single_neg1x_ring3 \
     scripts/eval/run_eval.sh "RUN=$G5_SINGLE_NEG GROUP=geo_k10 ARCH=single" "$RES_EVAL" \
     "THE control: single-frame with \$G5_NEG1_R3's exact negatives. Near F1 0.712 and the temporal machinery is not what is doing the work"
 
+# ---- evaluation: the clean benchmark (kind: eval5) --------------------------
+#
+#     submit_all.sh eval5 --submit          # 8 jobs
+#     submit_all.sh eval5 --only anchor --submit
+#
+# THE ONLY QUEUED WORK IN THIS FILE. Eight of the fourteen clean22 runs, scored
+# on scenes for the first time. Written 2026-08-19 from the val-curve analysis
+# in docs/MODEL_RUNS.md ("The 2026-08-18 batch").
+#
+# WHY ONLY EIGHT. Fourteen jobs is ~50 GPU-hours and six of them answer a
+# question that is already answered or that geo does not depend on. The six
+# skipped, each with its reason, are listed at the bottom of this block. If one
+# of the eight below produces a surprise, the matching skipped run is the
+# cheapest follow-up -- they all still have best.pt.
+#
+# ---- PROTOCOL, and it is new on three axes ---------------------------------
+#
+#   GEN=3         the *_clean.json partitions. This is what makes the numbers
+#                 mean anything: the generation-2 geo split put the 31.25-31.44
+#                 band in train AND in the hold-out (assets/PARTITIONS.md), so
+#                 every geo object-level score in docs/PREDICTIONS.md was
+#                 measured partly on training ground. These are not comparable
+#                 to that table -- they REPLACE it.
+#
+#   DATA_STRIDE=4 the paper's reconstruction geometry: quarter-patch step, 16
+#                 tiles per interior pixel against the 4 every previous number
+#                 in this project used.
+#
+#   PROTOCOL=rth  the paper's RTh, implemented 2026-08-19 (plan section 7(b)
+#                 items 1 and 4). Each tile is binarised at 0.5 and the pixel
+#                 value is the FRACTION OF OVERLAPPING TILES voting positive --
+#                 the paper's Confidence Factor, on {0, 1/16, ..., 1} at stride
+#                 4. eval-outputs then sweeps RTh 0.125/0.25/0.375/0.5 under
+#                 BOTH of the paper's Intersection Tolerances (ITh 0.7 / b 5 and
+#                 the softer ITh 0.5 / b 10) and reports a GT-area-weighted
+#                 aggregate alongside the unweighted one.
+#
+#                 An RTh number is NOT comparable with any recon_th number in
+#                 docs/PREDICTIONS.md: one counts tiles, the other cuts a mean
+#                 probability. RTh 0.25 means "at least 4 of 16 tiles agreed".
+#
+#                 Per the paper, RECALL is the primary metric here: full-range
+#                 reconstruction scores a great deal of unannotated ground, so
+#                 precision partly measures the digitisation rather than the
+#                 model.
+#
+#   AOI           carried by the partition and passed to BOTH stages by
+#                 run_eval.sh. Only tiles wholly inside the box are predicted,
+#                 and eval-outputs crops to the same box before scoring.
+#
+# ---- scene lists -----------------------------------------------------------
+# Geo on geo_k10's 35-scene test list, temporal on temporal_k10's 22-scene test
+# list. Verified 2026-08-19: on generation 3 the k10 test lists are strict
+# SUBSETS of the k5 ones on both axes (geo 35/51, temporal 22/27), so the k10
+# list is the common ground and a k5 model scored on it is directly comparable
+# to a k10 model. That is the same convention the eval2/eval4 batches used, and
+# it is why K_PREVS=5 on a _k10 GROUP is expected here, not a mistake --
+# run_eval.sh only notes it.
+#
+# ---- sizing, which is NOT the stride-2 rung --------------------------------
+# Measured, not guessed. Tiles actually predicted per scene (AOI-gated,
+# computed from sinkholes.geo.grid_window at patch 200x100):
+#
+#   geo test (South band 31.25-31.40)   stride 2:  2,340    stride 4:   9,360
+#   temporal (both frames 31.25-31.75)  stride 2: 3.0k-9.8k stride 4: 12.0k-39.5k
+#
+# The AOI is what makes stride 4 affordable at all: a whole stride-4 canvas is
+# 68,322 tiles, and the geo box keeps 13.7% of it.
+#
+# HOST MEMORY IS THE BINDING CONSTRAINT, not the GPU. scenes.py:243 loads each
+# timestep's WHOLE grid as float32 with no banded streaming (that is section
+# 7(b) item 3, also unimplemented), and a stride-4 grid is 5.47 GB per scene per
+# timestep against 1.37 GB at stride 2 -- verified on disk. So the input stack
+# alone is 6 x 5.47 = 33 GB at k5 and 11 x 5.47 = 60 GB at k10, against the
+# ~8 GB it was when the 80 GB rung was measured at a ~57 GB peak.
+#
+#   k5  stride 4:  ~57 - 8 + 33  = ~82 GB  -> request 112
+#   k10 stride 4:  ~57 - 15 + 60 = ~102 GB -> request 144
+#
+# Walltime scales with tiles at ~29 tiles/s (3.0 h / 18 scenes / 17,177 tiles,
+# the pre-AOI stride-2 measurement), plus I/O that is now substantial: 35 scenes
+# x 6 timesteps x 5.47 GB is ~1.1 TB read off the mount. Hence the headroom.
+#
+# ---- RESIZED 2026-08-19 FROM MEASUREMENT -- the estimates above were wrong ---
+# The 2026-08-19 batch measured every rung and the k-dependent ones were far too
+# small. LSF reports in MiB and treats "112GB" as 114,688 MB, so these compare
+# directly:
+#
+#   g5_convlstm_3x   112,227 / 114,688 MB   97.9%  (died on a missing patch,
+#                                                   i.e. BEFORE its true peak)
+#   g5_tattn         109,828 / 114,688 MB   95.7%  same
+#   g5_tattn_hybrid  104,853 / 114,688 MB   91.4%  killed by owner
+#   g10_tattn_hybrid 147,456 / 147,456 MB  100.0%  TERM_MEMLIMIT, on scene 1-2
+#   g5_single         28,457 /  40,960 MB   69.4%  many scenes, so trustworthy
+#   t5_single         23,161 /  40,960 MB   56.5%
+#
+# WHY IT IS SO MUCH LARGER THAN THE MODEL ABOVE PREDICTED. scenes.py:280-286
+# rebinds the timestep list through a list comprehension:
+#     arrays_newest_first = [normalise_phase(p[...]) for p in arrays_newest_first]
+# normalise_phase RETURNS A NEW ARRAY (normalise.py:26-39, "the input is not
+# modified"), and the old list stays alive until the assignment completes -- so
+# both lists coexist and the stack is held TWICE at that moment. With the
+# largest stride-4 grid at 394 x 177 x 200 x 100 x 4 B = 5.196 GiB per timestep:
+#
+#                stack     x2 (the comprehension)   + mask_cur   + residual
+#   k5  (T=6)    31.2      62.4                     5.2          42   = 109.6 GiB
+#   k10 (T=11)   57.2     114.3                     5.2          42   = 161.5 GiB
+#
+# The 109.6 GiB for k5 is exactly the 112,227 MB measured, which is what makes
+# the 161.5 GiB k10 figure trustworthy -- and it is why a 144 GB k10 request
+# died. The 42 GiB residual is everything else (reconstruction canvas,
+# confidence maps, LiDAR gate, polygonisation) and is k-independent.
+#
+# Requests below are those peaks plus ~30%. THE ONE-LINE ALTERNATIVE, if these
+# ever fail to schedule: normalising in place, or deleting the old list before
+# building the new one, removes the x2 and takes k10 back under 110 GiB. That is
+# a change to inference code and is deliberately not bundled with a resize.
+#
+# T5 IS THE UNMEASURED RUNG. Its only job died in 14 s on a missing patch (58 MB
+# peak), so there is no number for it. Its stack is the same size as geo k5's,
+# but its AOI is 3.3x the latitude span (31.25-31.75 against 31.25-31.40) and
+# its North scenes carry 39.5k tiles against geo's 9,360, which inflates the
+# residual term rather than the stack. 160 GB is geo k5's rung plus room for
+# that; MEASURE IT and tighten:  grep -A3 "Max Memory" logs/*.out
+#                        queue    hostGB vramG walltime
+RES_EVAL_S4_G5="long-gpu    144   36  12:00"   # measured 109.6 GiB peak (was 112 -- 98% full)
+RES_EVAL_S4_G10="long-gpu   208   48  12:00"   # est 161.5 GiB (was 144 -- died at 100%)
+RES_EVAL_S4_T5="long-gpu    160   36  16:00"   # UNMEASURED: geo k5 + larger AOI residual
+RES_EVAL_S4_CTRL="long-gpu   48   24   6:00"   # measured 27.8 GiB over many scenes (was 40)
+
+CLEAN_G5_CONVLSTM=outputs/2026-08-18/clean_geo_k5_convlstm_ring3_2026-08-18_14h56_lsf_372682
+CLEAN_G5_CONVLSTM_3X=outputs/2026-08-18/clean_geo_k5_convlstm_ring3_3x_2026-08-18_14h56_lsf_372683
+CLEAN_G5_SINGLE=outputs/2026-08-18/clean_geo_k5_single_ring3_2026-08-18_14h56_lsf_372686
+CLEAN_G5_TATTN=outputs/2026-08-18/clean_geo_k5_tattn_ring3_2026-08-18_14h56_lsf_372694
+CLEAN_G5_HYBRID=outputs/2026-08-18/clean_geo_k5_tattn_hybrid_ring3_2026-08-18_14h56_lsf_372696
+CLEAN_G10_HYBRID=outputs/2026-08-18/clean_geo_k10_tattn_hybrid_ring3_2026-08-18_14h56_lsf_372702
+CLEAN_T5_CONVLSTM=outputs/2026-08-18/clean_temporal_k5_convlstm_ring3_2026-08-18_14h56_lsf_372689
+CLEAN_T5_SINGLE=outputs/2026-08-18/clean_temporal_k5_single_ring3_2026-08-18_14h56_lsf_372693
+
+# JOB_NAME names the OUTPUT DIRECTORY, separately from the LSF -J. outputs/README.md
+# fixes the convention at `scenes_geo` / `scenes_temporal` plus a suffix for a
+# non-default protocol (`scenes_geo_hann`). This batch is non-default on two
+# counts at once -- generation-3 partitions and stride 4 -- so it takes its own
+# suffix. Without it each directory would inherit the LSF job name and the eight
+# evaluations would be unglobbable as a set.
+CLEAN_GEO="GEN=3 GROUP=geo_k10 DATA_STRIDE=4 PROTOCOL=rth JOB_NAME=scenes_geo_clean_rth"
+CLEAN_TEMP="GEN=3 GROUP=temporal_k10 DATA_STRIDE=4 PROTOCOL=rth JOB_NAME=scenes_temporal_clean_rth"
+
+# Order matters, same rule as clean22: the anchor first, so a queue that clears
+# one job clears the interpretable one.
+job eval5 eval_clean_g5_convlstm_anchor \
+    scripts/eval/run_eval.sh "RUN=$CLEAN_G5_CONVLSTM $CLEAN_GEO K_PREVS=5" "$RES_EVAL_S4_G5" \
+    "THE anchor -- every other geo row is read against it, and the first honest geo object score the project has"
+job eval5 eval_clean_g5_single_control \
+    scripts/eval/run_eval.sh "RUN=$CLEAN_G5_SINGLE $CLEAN_GEO ARCH=single" "$RES_EVAL_S4_CTRL" \
+    "THE control, and the highest-value job here: on val it MATCHES the anchor on F1/P/R (0.635/0.618/0.653 vs 0.634/0.626/0.643) while losing 0.036 dice. If it matches on scenes too, the recurrence is buying nothing on geo"
+job eval5 eval_clean_g5_tattn_hybrid \
+    scripts/eval/run_eval.sh "RUN=$CLEAN_G5_HYBRID $CLEAN_GEO K_PREVS=5 ARCH=tattn" "$RES_EVAL_S4_G5" \
+    "top of the geo batch on dice (0.7350). ARCH=tattn is REQUIRED -- the hybrid carries a ConvLSTM cell and would match the wrong factory entry as ARCH=convlstm"
+job eval5 eval_clean_g5_tattn \
+    scripts/eval/run_eval.sh "RUN=$CLEAN_G5_TATTN $CLEAN_GEO K_PREVS=5 ARCH=tattn" "$RES_EVAL_S4_G5" \
+    "plain attention. Without it the hybrid's score cannot be attributed -- hybrid = attention + recurrence, so it takes all three arms to say which half moved"
+job eval5 eval_clean_g5_convlstm_3x \
+    scripts/eval/run_eval.sh "RUN=$CLEAN_G5_CONVLSTM_3X $CLEAN_GEO K_PREVS=5" "$RES_EVAL_S4_G5" \
+    "3:1 negatives was THE best model in the project on generation 2 (obj F1 0.724) and that was an object-level-only finding -- dice ranked it LAST. Unretested here, the old recommendation stands on leaked ground"
+job eval5 eval_clean_g10_tattn_hybrid \
+    scripts/eval/run_eval.sh "RUN=$CLEAN_G10_HYBRID $CLEAN_GEO K_PREVS=10 ARCH=tattn" "$RES_EVAL_S4_G10" \
+    "best geo dice overall (0.7378); gives k5-vs-k10 at the winning architecture on the shared 35-scene list"
+job eval5 eval_clean_t5_convlstm_anchor \
+    scripts/eval/run_eval.sh "RUN=$CLEAN_T5_CONVLSTM $CLEAN_TEMP K_PREVS=5" "$RES_EVAL_S4_T5" \
+    "the temporal anchor -- the axis whose val F1 did NOT move between generations, so its object score is the control on the whole geo story"
+job eval5 eval_clean_t5_single_control \
+    scripts/eval/run_eval.sh "RUN=$CLEAN_T5_SINGLE $CLEAN_TEMP ARCH=single" "$RES_EVAL_S4_CTRL" \
+    "the temporal half of the control pair. The geo control alone only licenses a claim about geo-split data; the two axes differ in training pool as well as split rule"
+
+# ---- deliberately NOT submitted, with the reason each ------------------------
+# All six keep best.pt under the retention rule (unscored runs are never
+# pruned), so any of these is one uncommented line away.
+#
+#   clean_geo_k10_convlstm_ring3     peaked at epoch 9 of 49 and degraded for 40
+#                                    epochs after -- the weakest geo run in the
+#                                    batch, and the k10 axis is covered by
+#                                    eval_clean_g10_tattn_hybrid above.
+#   clean_geo_k10_tattn_ring3        k10 architecture spread is already covered
+#                                    by g10_hybrid read against g5_hybrid.
+#   clean_temporal_k10_convlstm_ring3 k5-vs-k10 was a dead tie on generation 2
+#   clean_temporal_k10_tattn_ring3    (0.6420 vs 0.6427) and temporal is not the
+#                                    target axis -- see the geo focus in
+#                                    docs/RESULTS.md.
+#   clean_temporal_k5_tattn_ring3    attention-vs-recurrence ON TEMPORAL was
+#   clean_temporal_k5_tattn_hybrid_ring3  settled on generation 2 (0.642 vs
+#                                    0.626, attention ahead at 26% fewer params).
+#                                    Geo is where it has never been replicated,
+#                                    which is why both geo arms are in and both
+#                                    temporal arms are out.
+
+# ---- Hann blending at stitch time (kind: blend) -----------------------------
+#
+#     submit_all.sh blend --submit                  # the 2 remaining, ~3 h each
+#
+# WHAT IS BEING TESTED. Every full-scene number in this project was stitched
+# with a FLAT average: at stride 2 each pixel is covered by 4 tiles, and all 4
+# vote equally -- including the tiles that saw that pixel at their own BORDER,
+# where the U-Net predicted it from truncated context and edge padding. Those
+# border predictions are the usual source of the spurious blobs that appear
+# along tile seams, and seams are everywhere: at 200x100 / stride 2 they fall
+# every 100 rows and 50 columns of the canvas.
+#
+# --blend_type hann weights each tile's contribution by a Hann window
+# (sinkholes/inference/reconstruct.py:46,204) and normalises by the accumulated
+# weight, so a pixel is scored mostly by the tiles that saw it CENTRALLY and
+# barely at all by the tiles that saw it at their edge. The claim is therefore a
+# PRECISION claim -- fewer seam artefacts surviving the threshold -- which is
+# exactly the axis geo is broken on.
+#
+# The code has been in the repo since the reconstruction engine was written, is
+# covered by tests/test_reconstruction.py:157, and HAS NEVER BEEN RUN: no eval
+# script set --blend_type, so BLEND=none is what produced every figure in
+# docs/RESULTS.md and docs/MODEL_RUNS.md.
+#
+# WHY THESE. They are the geo_k5 architecture triple at IDENTICAL training
+# settings -- pos_w 4, 1:1 near-field ring-3 negatives, same optimizer, same
+# partition -- so only the architecture moves, and all three ALREADY HAVE an
+# unblended full-scene eval on the same geo_k10 18-scene test list:
+#
+#   $G5_TATTN_FUSE0  eval4, 2026-08-12   (R 0.983 @0.125 against P 0.21)
+#   $G5_NEG1_R3      eval2, F1 0.712     -- the reference every geo claim uses
+#   $G5_SINGLE_NEG   eval4, 2026-08-12   -- the no-temporal-machinery control
+#
+# That is what makes this batch cheap to interpret: the BLEND=none half of the
+# A/B is already on disk, so these jobs complete a paired comparison rather
+# than starting one. Run BOTH, not one -- if blending helps only the
+# model with the worst precision, that is a different finding from a uniform
+# lift, and one job cannot tell those apart.
+#
+# GAMMA IS PINNED AT 1.0 (a plain Hann window). One factor: blending on/off. A
+# gamma sweep sharpens the window further and is the obvious follow-up, but only
+# on whichever arm actually moves -- sweeping it now would confound "does
+# margin-weighting help" with "how much".
+#
+# HOW TO READ THE RESULT -- do NOT compare at a single threshold. Unblended
+# stitching uses average="uniform", which divides by stride^2 = 4 regardless of
+# how many tiles actually contributed, so pixels near the scene border and near
+# LiDAR-mask edges are ATTENUATED. Hann divides by the true accumulated weight
+# and removes that attenuation, which pushes those confidences up. So a
+# fixed-threshold comparison mixes the seam cleanup (precision up) with
+# de-attenuation (recall up) and reports their sum as if it were one effect.
+# Read the whole 0.125/0.25/0.5/0.7/0.9 sweep eval-outputs writes, and compare
+# best-F1 to best-F1 rather than 0.25 to 0.25.
+#
+# Two things this batch will move that are NOT regressions:
+#   - docs/PIPELINE.md:384 pins "464 polygons for 20190205_20190216 (LiDAR
+#     gating on, no blending)". Blending changes the polygon count by design.
+#   - rescore.sh CANNOT produce these numbers. Blending happens during
+#     reconstruction, before _pred.npy is written, so this is a full stage-1
+#     re-run and not the cheap re-threshold path.
+#
+# Sizing: RES_EVAL unchanged. Hann adds one extra float32 canvas (the weight
+# accumulator alongside the prediction sum) and one elementwise multiply per
+# tile -- a few hundred MB against an 80 GB rung, and no additional GPU work,
+# since the network runs on exactly the same tiles either way.
+# FIRST ATTEMPT, 2026-08-17 11:30: killed by the directory rename, not by
+# anything about blending. The run directories were renamed under the running
+# jobs at 11:53 and compatibility symlinks left at the old names; the compute
+# node could not traverse them, and both jobs died writing a shapefile
+# (pyogrio "Not a directory", scenes.py:299) at 5/18 and 9/18 scenes. Their
+# partial output was deleted. The single-frame arm had already finished at
+# 11:51 and SURVIVES as predictions/geo_k5_single_ring3/best/scenes_geo_hann --
+# it is deliberately no longer listed below, so a resubmit does not repeat 3 h
+# of completed work.
+#
+# The lesson worth keeping: eval-scenes resolves its output path ONCE at
+# startup, so renaming a directory an eval is writing into kills the job.
+BLEND_HANN="BLEND=hann GAMMA=1.0"
+
+# JOB_NAME names the output DIRECTORY (outputs/README.md's convention:
+# scenes_geo + a suffix for a non-default protocol) while the LSF -J name stays
+# unique so bjobs and logs/%J.out remain greppable. Both blended results
+# therefore land beside their unblended twin as
+#   predictions/<model>/best/scenes_geo       <- BLEND=none, already on disk
+#   predictions/<model>/best/scenes_geo_hann  <- these jobs
+# which is what makes the A/B a diff of two JSONs in one directory.
+HANN_JOB="$BLEND_HANN JOB_NAME=scenes_geo_hann"
+
+job blend eval_hann_geo_k5_tattn_ring3 \
+    scripts/eval/run_eval.sh "RUN=$G5_TATTN_FUSE0 GROUP=geo_k10 K_PREVS=5 ARCH=tattn $HANN_JOB" "$RES_EVAL" \
+    "THE headline: highest recall in the project (0.983) at P 0.21, so almost all its error is ground it should not have flagged -- the most seam artefacts available to remove"
+job blend eval_hann_geo_k5_convlstm_ring3 \
+    scripts/eval/run_eval.sh "RUN=$G5_NEG1_R3 GROUP=geo_k10 K_PREVS=5 $HANN_JOB" "$RES_EVAL" \
+    "the geo REFERENCE (F1 0.712 unblended) -- without it, a moved tattn number cannot be told from a moved protocol"
+
+# ---- positives-only: the paper's protocol (kind: posonly) -------------------
+#
+#     submit_all.sh posonly --submit                 # all five, ~6 h each
+#     submit_all.sh posonly --only tattn_geo_k5_fuse0 --submit   # the headline
+#
+# The benchmark paper scores ONLY patches that contain subsidence -- "delineate
+# subsidence where it is known to be", not "find it anywhere on the map". Every
+# number in docs/RESULTS.md is the second question. These five jobs answer the
+# first, on models that are already scored, so each one lands beside a number we
+# already have rather than on its own (docs/POSITIVES_ONLY_EVAL.md).
+#
+# READ THE RESULT AS A BASELINE COMPARISON AND NOTHING ELSE. A positives-only
+# precision cannot see the false positives a model scatters over the 97.5% of
+# the map that holds no subsidence, which is exactly how dice ranked the
+# ring-negative runs backwards (finding 2). Never promote a model on it.
+#
+# Scene list: geo_k10's 18-scene test split for the geo arms and temporal_k10's
+# 20 for the temporal one -- the same lists section 3 of RESULTS.md uses, so the
+# positives-only number sits directly beside that model's own full-scene one.
+# K_PREVS tracks the CHECKPOINT, so K_PREVS=5 on a _k10 group is expected.
+#
+# The five, and what each is for:
+#
+#   tattn_geo_k5_fuse0   THE ONE. Object recall 0.983 @0.125 -- the highest in
+#       the project -- against precision 0.21. Nearly all of its error is
+#       ground it should never have flagged, so this protocol removes the whole
+#       failure mode and leaves the question of how well it delineates what is
+#       actually there. If any model's number moves, it is this one.
+#   tattn_geo_k5_hybrid  its twin at recall 0.980. Attention-vs-recurrence on
+#       geo is being decided on ~0.003; stripping the background out of both
+#       sides is a fair chance at separating them.
+#   g10_old_206375       the widest gap in the project: recall 0.976, precision
+#       0.121. The upper bound on what this protocol can flatter.
+#   g5_neg3x_ring3       the current best full-scene F1 (0.724). The reference:
+#       without it, nothing says whether a good positives-only number means a
+#       good model or just an easy protocol.
+#   t5_ring10            already at precision 0.726 full-scene, the highest we
+#       have. It should move LEAST -- the control that shows the movement in
+#       the others is the protocol working rather than an artefact.
+job posonly posonly_tattn_geo_k5_fuse0 \
+    scripts/eval/run_eval_positives.sh "RUN=$G5_TATTN_FUSE0 GROUP=geo_k10 SPLIT=test K_PREVS=5 ARCH=tattn" "$RES_POSONLY" \
+    "THE headline: highest object recall in the project (0.983) at precision 0.21 -- the protocol removes precisely its failure mode"
+job posonly posonly_tattn_geo_k5_hybrid \
+    scripts/eval/run_eval_positives.sh "RUN=$G5_TATTN_HYBRID GROUP=geo_k10 SPLIT=test K_PREVS=5 ARCH=tattn" "$RES_POSONLY" \
+    "its twin at recall 0.980: attention vs recurrence on geo is a 0.003 margin, so remove the background noise from both sides"
+job posonly posonly_g10_old_206375 \
+    scripts/eval/run_eval_positives.sh "RUN=$G10_OLD GROUP=geo_k10 SPLIT=test K_PREVS=10 ARCH=convlstm" "$RES_POSONLY" \
+    "the widest gap in the project (R 0.976 / P 0.121) -- the upper bound on what positives-only can flatter"
+job posonly posonly_g5_neg3x_ring3 \
+    scripts/eval/run_eval_positives.sh "RUN=$G5_NEG3_R3 GROUP=geo_k10 SPLIT=test K_PREVS=5 ARCH=convlstm" "$RES_POSONLY" \
+    "the REFERENCE: best full-scene F1 (0.724). Without it a good positives-only number cannot be told from an easy protocol"
+job posonly posonly_t5_ring10 \
+    scripts/eval/run_eval_positives.sh "RUN=$T5_NEG1_R10 GROUP=temporal_k10 SPLIT=test K_PREVS=5 ARCH=convlstm" "$RES_POSONLY" \
+    "the CONTROL: already at P 0.726 full-scene, so it should move least -- proves the movement elsewhere is the protocol, not an artefact"
+
 # ---- argument parsing -------------------------------------------------------
 # --only <text> narrows to jobs whose NAME CONTAINS <text>, so a single job can
 # be sent without submitting its whole kind (an eval kind is 4-6 jobs and each
@@ -734,7 +1410,7 @@ job eval4 eval_g5_single_neg1x_ring3 \
 WANT=all; SUBMIT=no; ONLY=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    train|tattn|control|valneg|training|eval|eval2|eval3|eval4|rescore|all) WANT="$1" ;;
+    train|tattn|control|valneg|clean22|valpos|training|eval|eval2|eval3|eval4|eval5|posonly|blend|rescore|all) WANT="$1" ;;
     --submit)       SUBMIT=yes ;;
     --only)         shift; [ $# -gt 0 ] || { echo "--only needs a value" >&2; exit 1; }
                     ONLY+=("$1") ;;
@@ -755,7 +1431,17 @@ done
 #   eval   the 2026-08-09 backlog -- still pending, all 5 of them
 #   eval2  the 2026-08-10 batch, in decisive pairs -- COMPLETED 2026-08-11
 #   eval3  the second wave                         -- COMPLETED 2026-08-11
-#   eval4  the 2026-08-11 batch -- THE LIVE ONE, and RESULTS.md's top priority
+#   eval4  the 2026-08-11 batch                    -- COMPLETED 2026-08-12
+#   eval5  the clean benchmark, 8 of 14 runs       -- LIVE, the queued work.
+#          GEN=3 + DATA_STRIDE=4, so it shares NO ground with eval/eval2/eval3/
+#          eval4: different partitions, different scene lists, different
+#          reconstruction geometry. Its numbers replace docs/PREDICTIONS.md
+#          rather than extending it.
+#   posonly positives-only, the paper's protocol   -- LIVE
+#   blend  Hann-blended stitching on the geo_k5 architecture triple -- LIVE.
+#          The single-frame arm completed 2026-08-17; 2 jobs remain.
+#          Its BLEND=none halves are already on disk (eval2/eval4), so these
+#          three complete a paired comparison rather than starting one.
 # eval2 and eval3 are kept listed rather than retired because an eval is cheap
 # to repeat and its inputs (best.pt) are all still on disk, so re-running one is
 # a legitimate act; a re-run overwrites nothing, it writes a new timestamped

@@ -128,5 +128,22 @@
         "20250602_20250613",
         "20250705_20250716",
         "20250818_20250829"
-    ]
+    ],
+    "provenance": {
+        "generation": "2019_2026_noisy",
+        "years": [
+            2019,
+            2026
+        ],
+        "axis": "geo",
+        "k_prevs": 10,
+        "cut_lat": null,
+        "splits": {
+            "train": 108,
+            "val": 18
+        },
+        "superseded_by": "partition_geo_k10_testeval_clean.json",
+        "note": "Frozen. Built before the 2019-2022 restriction and carries the 2023-2026 interferograms whose scene-level precision motivated docs/PLAN_CLEAN_BENCHMARK.md. Geo splits here divide by frame, so the 31.25-31.44 deg overlap band sits in train AND hold-out. Kept so every result in MODEL_RUNS.md / RESULTS.md / PREDICTIONS.md stays reproducible; do not use for new work. Holds its parent's test list under 'val'.",
+        "derived_from": "partition_geo_k10.json"
+    }
 }

@@ -29,12 +29,28 @@ thing here, and encoding the offset rather than the absolute index keeps T out
 of the architecture. A model trained at k_prevs=5 still runs at k_prevs=10, the
 same contract ConvLSTMUNet holds and the ``--fallback_replicate`` eval path
 relies on.
+
+**Sequences with holes.** The identity "index == elapsed time" holds only for a
+gap-free chain, and the archive is not gap-free: the North frame is missing 12
+acquisition slots and South 33, so requiring an unbroken chain is what collapses
+the usable set from 273 interferograms to 20 at a 40-slot lookback. Both
+entry points therefore take two optional arguments:
+
+- ``offsets``  ``(T,)`` or ``(B, T)`` — each frame's real age in 11-day slot
+  units, so a frame two slots older than its neighbour is encoded as such
+  instead of as the next index along;
+- ``valid``    ``(B, T)`` — which slots carry a real frame, for batches padded
+  to a common length.
+
+Both default to None, which reproduces the gap-free behaviour exactly — the
+encoding carries no parameters, so every existing checkpoint keeps its numbers
+and can be run on a gappy sequence without retraining.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -54,26 +70,78 @@ DEFAULT_TATTN_HEADS = 8
 FFN_RATIO = 2
 
 
-def temporal_position_encoding(t: int, dim: int, *, device=None,
+def temporal_position_encoding(t: int, dim: int, *, offsets=None, device=None,
                                dtype=torch.float32) -> torch.Tensor:
-    """Sinusoidal encoding of "steps before the present", shape ``(T, dim)``.
+    """Sinusoidal encoding of "steps before the present".
 
-    Row ``t`` encodes the offset ``T-1-t``, so the current interferogram is
-    always at offset 0 and the oldest at ``T-1``, whatever T happens to be.
+    Without ``offsets`` the sequence is assumed gap-free: row ``t`` encodes the
+    offset ``T-1-t``, so the current interferogram is always at offset 0 and the
+    oldest at ``T-1``, whatever T happens to be. Shape ``(T, dim)``.
+
+    ``offsets`` states each frame's age explicitly, in **11-day slot units**
+    (offset 0 is the present, 1 is eleven days earlier). It is what makes a
+    sequence with holes mean anything: on a gap-free chain the list index and
+    the elapsed time are the same number, but as soon as an acquisition is
+    missing, "three back in the list" may be three or five slots old, and
+    encoding the index would tell the model something false. Accepts ``(T,)``
+    -> ``(T, dim)``, or ``(B, T)`` -> ``(B, T, dim)`` when samples in a batch
+    have different holes.
+
+    Slot units rather than days on purpose: a dense chain then produces exactly
+    the encoding this function returned before ``offsets`` existed, so trained
+    checkpoints are unaffected.
     """
     if dim % 2 != 0:
         raise ValueError(f"temporal_position_encoding needs an even dim, got {dim}.")
-    # t = 0 is the oldest frame, so its offset is the largest.
-    offsets = torch.arange(t - 1, -1, -1, device=device, dtype=torch.float32)
+    if offsets is None:
+        # t = 0 is the oldest frame, so its offset is the largest.
+        offsets = torch.arange(t - 1, -1, -1, device=device, dtype=torch.float32)
+    else:
+        offsets = torch.as_tensor(offsets, dtype=torch.float32,
+                                  device=device if device is not None else None)
+        if offsets.dim() not in (1, 2):
+            raise ValueError(
+                f"offsets must be (T,) or (B, T); got shape {tuple(offsets.shape)}."
+            )
+        if offsets.shape[-1] != t:
+            raise ValueError(
+                f"offsets cover {offsets.shape[-1]} timesteps but the sequence has {t}."
+            )
+        device = offsets.device
     freqs = torch.exp(
         torch.arange(0, dim, 2, device=device, dtype=torch.float32)
         * (-math.log(10000.0) / dim)
     )
-    angles = offsets.unsqueeze(1) * freqs.unsqueeze(0)  # (T, dim/2)
-    pe = torch.zeros(t, dim, device=device, dtype=torch.float32)
-    pe[:, 0::2] = torch.sin(angles)
-    pe[:, 1::2] = torch.cos(angles)
+    angles = offsets.unsqueeze(-1) * freqs  # (..., T, dim/2)
+    pe = torch.zeros(*offsets.shape, dim, device=device, dtype=torch.float32)
+    pe[..., 0::2] = torch.sin(angles)
+    pe[..., 1::2] = torch.cos(angles)
     return pe.to(dtype)
+
+
+def check_valid_mask(valid, b: int, t: int) -> torch.Tensor:
+    """Normalise a padding mask to a ``(B, T)`` bool tensor, or raise.
+
+    The present frame — index ``T-1`` — must be present in every sample. It is
+    the readout's only query, so a sample padded there would softmax over an
+    all ``-inf`` row and return NaN for the whole batch. Padding belongs at the
+    *old* end of the sequence, which is also the only end where a real chain
+    runs out of history.
+    """
+    valid = torch.as_tensor(valid)
+    if valid.dim() != 2 or valid.shape != (b, t):
+        raise ValueError(
+            f"valid must be a (B, T) mask matching the sequence; expected "
+            f"{(b, t)}, got {tuple(valid.shape)}."
+        )
+    valid = valid.bool()
+    if not bool(valid[:, -1].all()):
+        raise ValueError(
+            "the present frame (index T-1) is masked out for at least one sample. "
+            "It is the attention query, so the sample has nothing to predict from; "
+            "pad at the oldest end of the sequence, never at the newest."
+        )
+    return valid
 
 
 def _softmax_fp32(scores: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
@@ -120,7 +188,7 @@ class _CausalSelfAttentionBlock(nn.Module):
         b, p, t, _ = x.shape
         return x.view(b, p, t, self.heads, self.head_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, valid: Optional[torch.Tensor] = None) -> torch.Tensor:
         b, p, t, _ = x.shape
         normed = self.norm1(x)
         q = self._heads(self.q_proj(normed))
@@ -129,7 +197,18 @@ class _CausalSelfAttentionBlock(nn.Module):
 
         scores = torch.einsum("bpqhd,bpkhd->bphqk", q, k) * self.scale
         causal = torch.ones(t, t, device=x.device, dtype=torch.bool).tril()
-        scores = scores.masked_fill(~causal, float("-inf"))
+        allowed = causal.view(1, 1, 1, t, t)
+        if valid is not None:
+            # Mask the KEY axis: no position may read a padded frame.
+            allowed = allowed & valid.view(b, 1, 1, 1, t)
+            # A padded *query* early in the sequence can end up with no legal
+            # key at all (everything at or before it is padding), and softmax
+            # over an all -inf row returns NaN, which the residual would then
+            # spread to every position including the present. Letting every
+            # query keep its own diagonal costs nothing — the readout masks
+            # these rows out again — and keeps the row finite.
+            allowed = allowed | torch.eye(t, device=x.device, dtype=torch.bool).view(1, 1, 1, t, t)
+        scores = scores.masked_fill(~allowed, float("-inf"))
         weights = _softmax_fp32(scores, v.dtype)
 
         attended = torch.einsum("bphqk,bpkhd->bpqhd", weights, v).reshape(b, p, t, self.dim)
@@ -159,7 +238,8 @@ class _TemporalReadoutBlock(nn.Module):
         self.norm2 = nn.LayerNorm(self.dim)
         self.ffn = _feed_forward(self.dim)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor,
+                valid: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         b, p, t, _ = x.shape
         normed = self.norm1(x)
         present = normed[:, :, -1]  # index T-1 is the current interferogram
@@ -169,6 +249,12 @@ class _TemporalReadoutBlock(nn.Module):
         v = self.v_proj(normed).view(b, p, t, self.heads, self.head_dim)
 
         scores = torch.einsum("bphd,bpkhd->bphk", q, k) * self.scale
+        if valid is not None:
+            # Padded frames get exactly zero weight, which is also what makes
+            # fuse_over_time need no change at all: the skip fusion is a convex
+            # combination over these same weights, so a padded timestep drops
+            # out of it by arithmetic rather than by a second mask.
+            scores = scores.masked_fill(~valid.view(b, 1, 1, t), float("-inf"))
         weights = _softmax_fp32(scores, v.dtype)  # (B, P, heads, T)
 
         attended = torch.einsum("bphk,bpkhd->bphd", weights, v).reshape(b, p, self.dim)
@@ -223,22 +309,29 @@ class CausalTemporalAttention(nn.Module):
         self.norm = nn.LayerNorm(dim)
         self.out_proj = nn.Conv2d(dim, self.in_channels, kernel_size=1)
 
-    def forward(self, seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, seq: torch.Tensor, offsets: Optional[torch.Tensor] = None,
+                valid: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         b, t, c, h, w = seq.shape
         if c != self.in_channels:
             raise ValueError(
                 f"CausalTemporalAttention was built for {self.in_channels} channels "
                 f"per timestep but received {c} (input {tuple(seq.shape)})."
             )
+        if valid is not None:
+            valid = check_valid_mask(valid, b, t).to(seq.device)
 
         x = self.in_proj(seq.reshape(b * t, c, h, w))          # (B*T, d, H, W)
         # (B*T, d, H, W) -> (B, P, T, d): one token sequence per spatial location.
         x = self.in_norm(x.reshape(b, t, self.dim, h * w).permute(0, 3, 1, 2))
-        x = x + temporal_position_encoding(t, self.dim, device=x.device, dtype=x.dtype)
+        pe = temporal_position_encoding(t, self.dim, offsets=offsets,
+                                        device=x.device, dtype=x.dtype)
+        # (T, d) broadcasts over (B, P, T, d) as it stands; a per-sample (B, T, d)
+        # needs the spatial axis inserted.
+        x = x + (pe if pe.dim() == 2 else pe.unsqueeze(1))
 
         for block in self.self_blocks:
-            x = block(x)
-        fused, weights = self.readout(x)                       # (B, P, d), (B, P, heads, T)
+            x = block(x, valid)
+        fused, weights = self.readout(x, valid)                # (B, P, d), (B, P, heads, T)
 
         fused = self.norm(fused).permute(0, 2, 1).reshape(b, self.dim, h, w)
         fused = self.out_proj(fused)                           # (B, C, H, W)

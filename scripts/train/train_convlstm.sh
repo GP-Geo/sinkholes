@@ -30,7 +30,10 @@ set -euo pipefail
 # Edit the defaults here for a one-off run. Each also honours an environment
 # variable of the same name, which is how scripts/submit_all.sh drives batches
 # without editing the file: SEED=7 bsub -J <name> < this_script
-PARTITION="${PARTITION:-assets/partition_geo_k10.json}"  # geo_k5|geo_k10|temporal_k5|temporal_k10
+# No default on purpose: assets/ holds three generations of partition
+# (assets/PARTITIONS.md). Defaulting to one is how a clean-data run silently
+# trains on the 2019-2026 noisy lists, so set it explicitly every time.
+PARTITION="${PARTITION:?set PARTITION=assets/partition_<axis>_k<k>[_clean].json -- see assets/PARTITIONS.md}"
 K_PREVS="${K_PREVS:-10}"                  # temporal depth; MUST match the partition's k
 HIDDEN="${HIDDEN:-256}"                   # ConvLSTM hidden channels (256 is enough; see PRESETS)
 POS_W="${POS_W:-8}"                       # BCE positive weight (code default is 1)
@@ -83,8 +86,8 @@ RESUME="${RESUME:-auto}"                  # auto | <run dir> | <checkpoint file>
 # interferograms with 5-previous chains, _k10 only those with 10. Mixing them
 # silently trains on a smaller set than you think.
 case "$PARTITION" in
-  *_k5.json)  [ "$K_PREVS" = 5 ]  || { echo "K_PREVS=$K_PREVS with a _k5 partition"  >&2; exit 1; } ;;
-  *_k10.json) [ "$K_PREVS" = 10 ] || { echo "K_PREVS=$K_PREVS with a _k10 partition" >&2; exit 1; } ;;
+  *_k5.json|*_k5_*.json)  [ "$K_PREVS" = 5 ]  || { echo "K_PREVS=$K_PREVS with a _k5 partition"  >&2; exit 1; } ;;
+  *_k10.json|*_k10_*.json) [ "$K_PREVS" = 10 ] || { echo "K_PREVS=$K_PREVS with a _k10 partition" >&2; exit 1; } ;;
 esac
 
 # Ring negatives reach the TRAIN dataset only -- train.py passes them to the

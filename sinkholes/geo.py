@@ -43,6 +43,89 @@ def aligned_origin(frame: str) -> Tuple[float, float]:
         ) from None
 
 
+#: Default patch geometry of every tree in this project: (H, W) and the
+#: stride-2 step that tiles them.
+DEFAULT_PATCH = (200, 100)
+
+
+def grid_window(
+    frame: str,
+    lat_min: float = -90.0,
+    lat_max: float = 90.0,
+    lon_min: float = -180.0,
+    lon_max: float = 180.0,
+    patch_size: Tuple[int, int] = DEFAULT_PATCH,
+    stride: Optional[Tuple[int, int]] = None,
+    tol: float = 1e-9,
+) -> Tuple[int, int, int, int]:
+    """Half-open grid ranges ``(row0, row1, col0, col1)`` whose patches lie
+    **entirely** inside the lat/lon box.
+
+    This is the one place the benchmark's spatial restrictions are turned into
+    grid indices. Three consumers must agree on it — ``dataprep/dataset.py``
+    (which patches are loaded), ``inference/scenes.py`` (which tiles are
+    predicted) and ``inference/outputs.py`` (which canvas is scored). If they
+    disagree, a model is scored on ground it trained on.
+
+    Rows and columns are derived from :data:`FRAME_ORIGINS`, **never** from a
+    scene's raw ``north``: every grid on disk was cropped to the frame's
+    aligned origin, and the raw value differs from it by up to ~700 rows.
+
+    A patch is inside only when its whole footprint is, which is what keeps the
+    31.4 deg cut's two sides disjoint — a straddling patch belongs to neither.
+
+    The upper bounds are *not* clamped to any particular grid: scene grids vary
+    from 191 to 200 rows because alignment fixes the origin, not the height.
+    Callers clamp with ``min(row1, arr.shape[0])``.
+
+    Args:
+      frame: 'North' or 'South'.
+      lat_min, lat_max, lon_min, lon_max: the box, in degrees. Defaults are
+        wide open, so passing none of them returns the whole grid.
+      patch_size: (H, W) of one patch.
+      stride: (row_step, col_step) in pixels; defaults to half a patch.
+      tol: slack for float comparisons, in grid-step units.
+
+    Returns:
+      (row0, row1, col0, col1), half-open. Empty when row0 >= row1 or
+      col0 >= col1 — which is a real answer, not an error: it means no patch
+      of this frame fits the box.
+    """
+    lon0, lat0 = aligned_origin(frame)
+    ph, pw = patch_size
+    sh, sw = stride if stride is not None else (ph // 2, pw // 2)
+    if sh <= 0 or sw <= 0:
+        raise ValueError(f"stride must be positive, got {(sh, sw)}")
+    if lat_min > lat_max or lon_min > lon_max:
+        raise ValueError(
+            f"empty box: lat [{lat_min}, {lat_max}], lon [{lon_min}, {lon_max}]"
+        )
+
+    d_row = sh * PIXEL_DEG          # latitude advanced per grid row (southward)
+    d_col = sw * PIXEL_DEG          # longitude advanced per grid column (eastward)
+
+    # patch i spans lat [lat0 - (i*sh + ph)*P, lat0 - i*sh*P]
+    #   top    <= lat_max  ->  i >= (lat0 - lat_max) / d_row
+    #   bottom >= lat_min  ->  i <= (lat0 - lat_min - ph*P) / d_row
+    row0 = math.ceil((lat0 - lat_max) / d_row - tol)
+    row1 = math.floor((lat0 - lat_min - ph * PIXEL_DEG) / d_row + tol) + 1
+
+    # patch j spans lon [lon0 + j*sw*P, lon0 + (j*sw + pw)*P]
+    col0 = math.ceil((lon_min - lon0) / d_col - tol)
+    col1 = math.floor((lon_max - lon0 - pw * PIXEL_DEG) / d_col + tol) + 1
+
+    row0, col0 = max(0, row0), max(0, col0)
+    return row0, max(row0, row1), col0, max(col0, col1)
+
+
+def window_contains(
+    window: Tuple[int, int, int, int], row: int, col: int
+) -> bool:
+    """True when grid cell (row, col) is inside a :func:`grid_window` result."""
+    row0, row1, col0, col1 = window
+    return row0 <= row < row1 and col0 <= col < col1
+
+
 def crop_to_start_xy(
     intf: np.ndarray,
     mask: Optional[np.ndarray],

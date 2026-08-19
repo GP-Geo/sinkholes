@@ -34,6 +34,7 @@ def object_level_evaluate(
     epsilon: float = 1e-7,
     th: float = 0.7,
     buffer: float = 5,
+    round_ndigits: Optional[int] = 2,
 ):
     """Object-level recall/precision over a batch of binary masks.
 
@@ -47,8 +48,19 @@ def object_level_evaluate(
     non-empty ``features`` list, per-object features are collected separately
     for detected and undetected ground-truth objects.
 
+    ``round_ndigits`` rounds the per-patch and returned figures, and defaults
+    to 2 because every archived number was produced that way. Full-scene
+    scoring passes ``None``: at scene scale the rounding happens BEFORE the
+    area weighting, so a 0.005 quantum on each scene propagates into the
+    aggregate, and model deltas in this project are routinely smaller than
+    that. Leave the default alone for the patch-level path, whose numbers are
+    published at 2 decimals anyway.
+
     Returns (recall, precision, batch_gt_area, {feature: [detected, undetected]}).
     """
+    def _round(x):
+        return x if round_ndigits is None else round(x, round_ndigits)
+
     feature_lists = {feature: [[], []] for feature in features}
     if image is not None and image.ndim == 2:
         image = np.expand_dims(image, axis=0)
@@ -89,14 +101,14 @@ def object_level_evaluate(
             if pp.intersection(buffered_gt_union).area / pp.area < th
         )
 
-        recall_i = round(intersection_area / (total_gt_area + epsilon), 2)
-        precision_i = round(intersection_area / (intersection_area + fp_area + epsilon), 2)
+        recall_i = _round(intersection_area / (total_gt_area + epsilon))
+        precision_i = _round(intersection_area / (intersection_area + fp_area + epsilon))
         intersect_recall.append(recall_i)
         intersect_precision.append(min(precision_i, 1.0))
 
     batch_gt_area = float(np.sum(patch_gt_areas))
-    ol_recall = round(np.sum(np.array(intersect_recall) * np.array(patch_gt_areas)) / batch_gt_area, 2)
-    ol_precision = round(np.sum(np.array(intersect_precision) * np.array(patch_gt_areas)) / batch_gt_area, 2)
+    ol_recall = _round(np.sum(np.array(intersect_recall) * np.array(patch_gt_areas)) / batch_gt_area)
+    ol_precision = _round(np.sum(np.array(intersect_precision) * np.array(patch_gt_areas)) / batch_gt_area)
     return ol_recall, ol_precision, batch_gt_area, feature_lists
 
 

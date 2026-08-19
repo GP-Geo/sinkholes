@@ -29,23 +29,23 @@ Plus, fixed in both templates and not normally changed: `--patch_size 200 100`,
 
 | Job name (`#BSUB -J`) | CONFIG delta | Run |
 |---|---|---|
-| `convlstm_geo_k10_h256_b128_lr1e6_60e` | *(defaults)* | `2026-08-06/geo-k10_convlstm-h256_lsf206375` |
-| `convlstm_geo_k5_h256_b128_lr1e6_60e` | `PARTITION=…geo_k5.json` `K_PREVS=5` | `2026-08-06/geo-k5_convlstm-h256_lsf207929` |
-| `convlstm_temporal_k10_h256_b128_lr1e6_60e` | `PARTITION=…temporal_k10.json` | `2026-08-06/temporal-k10_convlstm-h256_lsf202343` |
-| `convlstm_temporal_k5_h256_b128_lr1e6_60e` | `PARTITION=…temporal_k5.json` `K_PREVS=5` | `2026-08-06/temporal-k5_convlstm-h256_run2_lsf208207` (and `_run1`) |
-| `convlstm_temporal_k10_h512_b128_lr1e6_60e` | `PARTITION=…temporal_k10.json` `HIDDEN=512` | `2026-08-06/temporal-k10_convlstm-h512_lsf209863` |
-| `convlstm_temporal_k10_h1024_b128_lr1e6_60e` | `PARTITION=…temporal_k10.json` `HIDDEN=1024` | `2026-08-06/temporal-k10_convlstm-h1024_lsf202344` |
-| `convlstm_temporal_k10_h256_b128_lr1e6_posw4_60e` | `PARTITION=…temporal_k10.json` `POS_W=4` | `2026-08-06/temporal-k10_convlstm-h256_posw4_lsf209866` |
-| `convlstm_temporal_k10_h256_b128_lr1e6_seed7_60e` | `PARTITION=…temporal_k10.json` `SEED=7` | `2026-08-06/temporal-k10_convlstm-h256_seed7_lsf209867` |
-| `convlstm_temporal_k10_h256_b128_lr5e6_cosine_60e` | `PARTITION=…temporal_k10.json` `LR=5e-6` `SCHEDULE=cosine` | `2026-08-06/temporal-k10_convlstm-h256_cosine-lr5e6_lsf209865` |
+| `convlstm_geo_k10_h256_b128_lr1e6_60e` | *(defaults)* | `2026-08-06/geo_k10_convlstm_posw8` |
+| `convlstm_geo_k5_h256_b128_lr1e6_60e` | `PARTITION=…geo_k5.json` `K_PREVS=5` | `2026-08-06/geo_k5_convlstm_posw8` |
+| `convlstm_temporal_k10_h256_b128_lr1e6_60e` | `PARTITION=…temporal_k10.json` | `2026-08-06/temporal_k10_convlstm_posw8` |
+| `convlstm_temporal_k5_h256_b128_lr1e6_60e` | `PARTITION=…temporal_k5.json` `K_PREVS=5` | `2026-08-06/temporal_k5_convlstm_run2` (and `_run1`) |
+| `convlstm_temporal_k10_h512_b128_lr1e6_60e` | `PARTITION=…temporal_k10.json` `HIDDEN=512` | `2026-08-06/temporal_k10_convlstm_h512` |
+| `convlstm_temporal_k10_h1024_b128_lr1e6_60e` | `PARTITION=…temporal_k10.json` `HIDDEN=1024` | `2026-08-06/temporal_k10_convlstm_h1024` |
+| `convlstm_temporal_k10_h256_b128_lr1e6_posw4_60e` | `PARTITION=…temporal_k10.json` `POS_W=4` | `2026-08-06/temporal_k10_convlstm_posw4` |
+| `convlstm_temporal_k10_h256_b128_lr1e6_seed7_60e` | `PARTITION=…temporal_k10.json` `SEED=7` | `2026-08-06/temporal_k10_convlstm_seed7` |
+| `convlstm_temporal_k10_h256_b128_lr5e6_cosine_60e` | `PARTITION=…temporal_k10.json` `LR=5e-6` `SCHEDULE=cosine` | `2026-08-06/temporal_k10_convlstm_cosine` |
 
 ## `train_control.sh`
 
 | Job name (`#BSUB -J`) | CONFIG delta | Run |
 |---|---|---|
-| `unet_stack_temporal_k10_b128_lr1e6_60e` | `ARCH=stack` `PARTITION=…temporal_k10.json` | `2026-08-06/temporal-k10_unet-stack_lsf209864` |
-| `baseline_single_geo_k5partition_b64_lr1e5_60e` | `ARCH=single` `PARTITION=…geo_k5.json` `BATCH=64` `LR=1e-5` | `2026-08-05/geo-k5_unet-single_baseline` |
-| `baseline_single_temporal_k5partition_b64_lr1e5_60e` | `ARCH=single` `PARTITION=…temporal_k5.json` `BATCH=64` `LR=1e-5` | `2026-08-05/temporal-k5_unet-single_baseline` |
+| `unet_stack_temporal_k10_b128_lr1e6_60e` | `ARCH=stack` `PARTITION=…temporal_k10.json` | `2026-08-06/temporal_k10_stack` |
+| `geo_k5_single_b64` | `ARCH=single` `PARTITION=…geo_k5.json` `BATCH=64` `LR=1e-5` | `2026-08-05/geo_k5_single_b64` |
+| `baseline_single_temporal_k5partition_b64_lr1e5_60e` | `ARCH=single` `PARTITION=…temporal_k5.json` `BATCH=64` `LR=1e-5` | `2026-08-05/temporal_k5_single_b64` |
 
 The two 2026-08-05 baselines ran at `b64`/`lr1e-5` while every ConvLSTM ran at
 `b128`/`lr1e-6`. That confounds architecture with optimizer — the +0.046
@@ -54,7 +54,7 @@ exists to settle it.
 
 ## Planned: geo reference runs (never submitted)
 
-Group G10 has exactly one occupant, so `geo-k10_convlstm-h256_lsf206375`'s
+Group G10 has exactly one occupant, so `geo_k10_convlstm_posw8`'s
 0.6583 has nothing to be measured against — it is the highest number in
 `outputs/` and also the only member of its comparison group. These four give it
 a group. Submit 12 first: without an error bar nothing else here is
@@ -97,12 +97,12 @@ differs from its baseline in the negative sampling and nothing else.
 | `convlstm_geo_k10_h256_posw4_neg1x_ring3_60e` | `PARTITION=…geo_k10.json` `K_PREVS=10` `POS_W=4` `RING_NEGS=yes` | 1:1, near field |
 
 **Submit the two baselines first.** Pinning the batch at `pos_w` 4 invalidated
-the previously-trained references — they sit at `pos_w` 2 (`temporal-k5_…_posw2_lsf594078`,
-0.6496) and `pos_w` 8 (`geo-k5_convlstm-h256_lsf207929`, 0.6539). Until the two
+the previously-trained references — they sit at `pos_w` 2 (`temporal_k5_convlstm_posw2`,
+0.6496) and `pos_w` 8 (`geo_k5_convlstm_posw8`, 0.6539). Until the two
 baselines exist, nothing in those groups is interpretable. They are also the
 cheapest jobs in the batch.
 
-`geo_k10` needs no new baseline: `geo-k10_convlstm-h256_posw4_lsf594076` was
+`geo_k10` needs no new baseline: `geo_k10_convlstm_posw4` was
 trained at `pos_w` 4 on 2026-08-09 and holds the highest val dice in the
 project (0.6646).
 
