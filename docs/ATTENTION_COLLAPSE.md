@@ -1,8 +1,11 @@
 # The temporal attention collapsed to a uniform average — cause and fix
 
-**Status:** diagnosed and fixed 2026-08-19. The fix is on by default for new runs
-(`--tattn_contrast`, `--tattn_qk_norm`); every existing checkpoint still loads and
-behaves exactly as before. Reproduce the measurements with `sinkholes attention-probe`.
+**Status:** diagnosed and fixed 2026-08-19; the fix **measured on real runs
+2026-08-20**, where it works but is not finished —
+[What the fix did in a real run](#what-the-fix-did-in-a-real-run). It is on by
+default for new runs (`--tattn_contrast`, `--tattn_qk_norm`); every existing
+checkpoint still loads and behaves exactly as before. Reproduce every
+measurement here with `sinkholes attention-probe`.
 
 ## Summary
 
@@ -16,11 +19,22 @@ before the first gradient step: at initialisation the tokens attention sees are
 99.91% a component shared across the whole sequence, so there is nothing to select
 on. Two changes fix it, and neither is sufficient alone.
 
+> **Naming, 2026-08-20.** Every run named in this document validated against
+> negatives and its directory now ends `_valneg` (`clean_geo_k10_tattn_ring3` →
+> `attention_probe/geo_k10_tattn_ring3_valneg`, and so on). The names in the
+> prose below are the ones the runs had when the work was done;
+> `outputs/README.md` carries the mapping.
+
 This does not invalidate the results: `clean_geo_k10_tattn_ring3` scores 0.727
 object F1 and still beats its ConvLSTM twin. But the mechanism those results were
 attributed to was not the mechanism running, and any experiment premised on
 attention *choosing* frames — long or hole-tolerant histories above all — was
 untestable until now.
+
+The fix has since been trained and measured. It works, and it is half-finished:
+the retrained runs select rather than average, but training walks most of that
+selectivity back, and one of them collapses anyway. See
+[What the fix did in a real run](#what-the-fix-did-in-a-real-run).
 
 ## The measurement
 
@@ -130,6 +144,116 @@ At the production learning rate the fixed block *sharpens* to ~3 of 11 frames wh
 reaching the same loss as the averaging baseline (0.6167 vs 0.6169). It is
 selecting, and selection costs nothing.
 
+## What the fix did in a real run
+
+**Measured 2026-08-20** on the five `attnfix` runs of 2026-08-19, the first
+trained with it. Probed on their own val split at the depth they were trained
+at, none of them is the old collapse — but only two of the four fixed arms are
+convincingly selective, and one fails the alarm outright.
+
+| run | effective frames | of uniform | `--require_selectivity 0.9` |
+|---|---|---|---|
+| `clean_geo_k5_tattn_fixed_ring3` | 4.540 / 6 | 75.7% | pass |
+| `clean_geo_k10_tattn_fixed_ring3` | 8.672 / 11 | 78.8% | pass |
+| `clean_geo_k10_tattn_hybrid_fixed_ring3` | 9.826 / 11 | 89.3% | pass, by 0.7 points |
+| `clean_temporal_k5_tattn_fixed_ring3` | 5.566 / 6 | **92.8%** | **COLLAPSED** |
+| `clean_geo_k10_tattn_prefix_ring3` (control) | 11.000 / 11 | 100.0% | COLLAPSED, as designed |
+
+The paired control is what makes the table readable. `prefix` is the same
+commit, the same data, the same hyper-parameters and `CONTRAST=no QK_NORM=no`,
+and it lands on exactly 1/T to five decimals like the fifteen checkpoints before
+it. **Every departure from uniform above is attributable to the fix and to
+nothing else in the batch.** Per-offset weights and summaries are under
+`outputs/attention_probe/<run>/`.
+
+### Training erodes the selectivity it is given
+
+The number to read that table against is not uniform. It is what the *untrained*
+fixed model already does — same architecture, same patches, zero gradient steps:
+
+| on the 272 `geo_k10_clean` val patches | effective frames | of uniform |
+|---|---|---|
+| fixed architecture, **untrained** | 5.462 / 11 | 49.7% |
+| fixed architecture, after 74 epochs | 8.672 / 11 | 78.8% |
+| pre-fix architecture, **untrained** | 10.974 / 11 | 99.8% |
+| pre-fix architecture, after 86 epochs | 11.000 / 11 | 100.0% |
+
+Training moved the fixed block **58% of the way back toward uniform**. The
+selectivity these checkpoints have is mostly what initialisation handed them.
+The pressure documented under [The cause](#the-cause) is still there and still
+gaining ground — contrast and qk_norm buy a far better starting point and a much
+slower slide, not a different dynamic.
+
+### The learned temperature is what decays now
+
+`qk_norm` took the logit scale off q/k magnitude and put it on one parameter, so
+that parameter is where the decay now shows up:
+
+| run | `logit_scale.exp()` at `best.pt` | at `last.pt` | sharpest still reachable |
+|---|---|---|---|
+| initialisation (every run) | 10.000 | — | ~1.0 / T |
+| `geo_k5_fixed` | 1.287 | 1.311 | 2.81 / 6 |
+| `temporal_k5_fixed` | 1.170 | 1.188 | 3.17 / 6 |
+| `geo_k10_fixed` | 1.280 | 1.164 | 5.41 / 11 |
+| `geo_k10_hybrid_fixed` | 0.999 | 1.000 | 7.44 / 11 |
+
+"Sharpest still reachable" is the entropy of the most peaked softmax that
+temperature permits at all — one frame at cosine +1 and every other at −1. At
+1.280 a *perfectly* aligned set of queries and keys could not get below 5.41 of
+11 frames; at 0.999 it could not get below 7.44. The hybrid clears the 90% alarm
+by 0.7 points because its temperature no longer allows anything sharper, and
+that arm should be read as still averaging.
+
+`weight_decay` is 1e-8 (`training/train.py:658`), far too small to account for
+the travel from `log 10` to ~`log 1.2`, so this is gradient-driven. Note also
+that `geo_k10`'s temperature was still falling when `best.pt` was written — 1.280
+at epoch 34, 1.164 by epoch 74 — so the kept checkpoint is not a settled state.
+
+### The queries and keys did learn; the temperature hides it
+
+Reset `logit_scale` to 10 on a trained checkpoint and change nothing else:
+
+| `clean_geo_k10_tattn_fixed_ring3` | effective frames | weight range | argmax share at offset 2 |
+|---|---|---|---|
+| as trained (temperature 1.280) | 8.672 / 11 | 0.69–1.31 x | 25.4276% |
+| same weights, temperature 10 | **4.194 / 11** | 0.39–1.84 x | 25.4276% |
+
+The argmax shares are bit-identical at every offset — argmax does not depend on
+temperature — so the q/k directions are untouched and only the sharpness moved.
+Those directions encode a real, structured temporal preference, and at the
+initialisation temperature this checkpoint sits at 4.19/11, inside the 2.85–4.64
+band the bench predicted. **The mechanism works. The temperature throttles it.**
+
+The same test separates `temporal_k5`, the arm that fails the alarm, from the
+rest: at temperature 10 it reaches only 4.457/6 (74.3%), over a weight range of
+0.73–1.20x against `geo_k10`'s 0.39–1.84x. Its queries and keys really are close
+to uninformative, so a temperature floor alone would not rescue that arm.
+
+### Where the weight lands
+
+Every fixed run **down-weights the current frame** and prefers older ones. With
+`FUSE_SKIPS=0` the decoder already receives the present frame through the skips,
+so that is a sensible division of labour rather than a defect.
+
+| run | weight on the current frame | shape over offset |
+|---|---|---|
+| `geo_k5_fixed` | 0.79 x | rises monotonically to 1.32x at the oldest frame |
+| `geo_k10_fixed` | 0.84 x | hump at offsets 2–4 (22–44 days), peak 1.31x |
+| `geo_k10_hybrid_fixed` | 0.70 x | rises monotonically to 1.48x at the oldest frame |
+| `temporal_k5_fixed` | 0.88 x | nearly flat; 1.07x at its highest |
+
+### Long histories are no better supported than before
+
+Run at a 40-slot lookback the fixed runs hold their selectivity ratio — 79.2% at
+32.7 frames against 78.8% at 11 — which is the T-independence `qk_norm` was
+supposed to buy, and which the pre-fix control cannot manage at any length.
+
+They do not, however, *reach back*. The exactly-uniform control puts 0.641 of its
+mass beyond the trained horizon on this patch set, so 0.641 is what no depth
+preference at all looks like here. `geo_k10_fixed` puts 0.629 there and the
+hybrid 0.664 — a couple of points either side of nothing. Ranking depths still
+needs a model trained at depth, and §4 below is unchanged.
+
 ## Compatibility
 
 Both options add parameters (`contrast_norm`, `logit_scale`), so a checkpoint's
@@ -155,6 +279,12 @@ of fixing this first. The long-history machinery is already in place — real of
 instead of list positions, and a padding mask, so a gappy 40-slot lookback keeps
 all 273 interferograms where the strict chain rule keeps 20 (`meta.select_history`).
 What was missing was a mechanism able to use it.
+
+**Measured 2026-08-20:** that mechanism now exists and holds its selectivity at
+40 slots as designed, but it shows no preference for the far history — it spreads
+the same mild weighting wider rather than reaching back. Nothing there is settled
+by a model trained at k=10 and merely *run* at 40; see
+[Long histories are no better supported than before](#long-histories-are-no-better-supported-than-before).
 
 ### Trained fresh at a 41-slot depth
 
@@ -182,19 +312,12 @@ fixed attention stays selective at that length. Ranking depths needs a cluster r
 
 ## What to run next
 
-**1. Retrain the tattn family with the fix.** This is a drop-in change — same
-partitions, same data layer, same flags, and `CONTRAST`/`QK_NORM` default to `yes`:
+**1. ~~Retrain the tattn family with the fix.~~ DONE** — the five `attnfix`
+runs of 2026-08-19, including the paired `prefix` control. To train the old
+architecture deliberately, set `CONTRAST=no QK_NORM=no`.
 
-```bash
-PARTITION=assets/partition_geo_k10_clean.json K_PREVS=10 RING_NEGS=yes \
-  bsub -J tattn_geo_k10_fixed_ring3 < scripts/train/train_tattn.sh
-```
-
-The comparison that matters is against the pre-fix twin at the same depth, since
-that isolates "what did working selection buy" from every other difference. To
-train the old architecture deliberately, set `CONTRAST=no QK_NORM=no`.
-
-**2. Check the result actually selects**, rather than assuming it:
+**2. ~~Check the result actually selects.~~ DONE 2026-08-20**, and it is the
+reason for the section above. Run it on every new tattn checkpoint:
 
 ```bash
 sinkholes attention-probe --model outputs/<run>/checkpoints/best.pt \
@@ -203,11 +326,30 @@ sinkholes attention-probe --model outputs/<run>/checkpoints/best.pt \
 ```
 
 `--require_selectivity` exits non-zero if the attention is at or above 90% of
-uniform. Worth wiring into the eval scripts: this is the check that would have
-caught the original collapse, and it can only be made against a *trained*
-checkpoint — a fresh model passes every content-sensitivity test and still dies.
+uniform. Still worth wiring into the eval scripts: it caught
+`clean_temporal_k5_tattn_fixed_ring3`, and it can only be made against a
+*trained* checkpoint — a fresh model passes every content-sensitivity test and
+still dies. Note that 90% is a **collapse alarm, not a pass mark**: the hybrid
+clears it by 0.7 points while averaging, so read the number, not the exit code.
 
-**3. Only then, the long-history work.** `select_history()` and the mask make a
+**3. Put a floor under the temperature, before spending the next batch.** This
+is the open item, and it blocks the `attnpos` batch
+(`scripts/submit_all.sh:968`) — five re-runs, ~30 GPU-hours, which as configured
+will reproduce exactly the decay measured above. The evidence says the queries
+and keys are learning something real and one scalar is flattening it, so the
+cheap experiment is to stop `logit_scale` from travelling: clamp it below (it is
+already clamped above at `MAX_LOGIT_SCALE`), freeze it at its initial 10, or put
+it in its own optimiser group at a much lower learning rate. `geo_k10_fixed`
+read at temperature 10 sits at 4.19/11, so the upside is roughly the difference
+between 79% and 38% of uniform. Any of the three is a few lines in
+`models/temporal_attention.py` plus a `STRICT_CONFIG_KEYS` entry, and it needs
+one paired run to settle — not five.
+
+Whatever the temperature does, `clean_temporal_k5_tattn_fixed_ring3` needs its
+own answer: it is the one arm whose q/k are genuinely uninformative, and a
+floor would not rescue it.
+
+**4. Only then, the long-history work.** `select_history()` and the mask make a
 40-slot gappy lookback expressible, and the model now has a mechanism that can use
 it, but the *data layer* still materialises `(T, N, H, W)` per interferogram
 (`dataprep/dataset.py:411`) and reloads each grid once per referencing current.
@@ -229,7 +371,30 @@ sinkholes attention-probe \
 ```
 
 Writes `weights_<condition>.csv` (per-offset mean weight, argmax share,
-availability), `summary.json` and `dice_vs_depth.csv`.
+availability), `summary.json` and `dice_vs_depth.csv`. The 2026-08-20 results
+are on disk under `outputs/attention_probe/`, one directory per run plus
+`diagnostics/` for the two below — but `/outputs/` is gitignored, so the tables
+in this file are the durable record and the CSVs are the working copy.
+
+### The two controls that make a number mean something
+
+A single effective-frames figure is close to uninterpretable on its own — 8.672
+of 11 is neither uniform nor selective until you know what the same architecture
+does untouched. Both controls are built by writing a state dict to a scratch
+path and pointing the probe at it, so neither needs a GPU or a training run.
+
+- **The untrained reference.** Build `TemporalAttentionUNet` with the run's own
+  `config_dict()`, save `state_dict()` plus the `tattn_unet_config` blob, probe
+  it on the same split. This is the only way to tell selectivity that was
+  *learned* from selectivity that initialisation supplied — and for the fixed
+  block the answer was that training gives back more than it earns.
+- **The temperature override.** Load a trained checkpoint, set
+  `temporal_attn.readout.logit_scale` to `log(10)`, change nothing else, re-probe.
+  Because argmax over time does not depend on temperature, the argmax shares come
+  back bit-identical and any change in effective frames is *purely* sharpness.
+  That separates "the queries and keys learned nothing" from "they learned
+  something the temperature is flattening", which are opposite findings with
+  opposite remedies.
 
 ## Why no test caught this
 
@@ -242,6 +407,16 @@ was true at init and false after training, and "different" is not the same claim
 `tests/test_attention_selectivity.py` replaces that with assertions on *how much*
 selectivity there is, including one that pins the broken baseline so the fix cannot
 silently stop being a fix.
+
+**That is still not enough, and the 2026-08-20 measurement is why.** Those
+assertions also run at initialisation —
+`test_fixed_attention_is_selective_at_initialisation` requires the fixed block to
+use fewer than `0.75 * T` frames, and an untrained model clears it comfortably at
+49.7% of uniform. Every trained checkpoint in this batch then finished *above*
+that same threshold (75.7–92.8%), with the one at 92.8% failing the collapse
+alarm outright. The suite proves the architecture can select on the day it is
+built; only `--require_selectivity` against a real checkpoint proves it still
+does at the end of a run. Neither claim substitutes for the other.
 
 ## The code
 

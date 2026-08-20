@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 # ============================================================================
+#  SUPERSEDED 2026-08-20 -- DO NOT RUN. Kept as the record of a one-off that
+#  already happened. It expects 14 run dirs at outputs/clean_*_2026-08-18_* and
+#  there are none, so it dies SILENTLY with status 1 -- `ls` fails, pipefail
+#  propagates it, and set -e kills the script before its own error message
+#  runs. The sed blocks below would rewrite paths that have since changed
+#  again, so do not lift them out either.
+#
+#  The general version is scripts/tidy_outputs.sh: same job, any batch, dry-run
+#  by default, and it derives the _valpos/_valneg suffix from reporter.log.
+#
 #  Move the fourteen 2026-08-18 (clean22) training runs into outputs/2026-08-18/,
 #  the same retention layout as outputs/2026-08-09 / 2026-08-10 / 2026-08-11.
 #

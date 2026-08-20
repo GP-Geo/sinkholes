@@ -215,24 +215,28 @@ patches sampled in an annulus around positives — candidates must be empty at *
 timestep); `--nonz_only/--no-nonz_only`; `--add_nulls_to_train`;
 `--train_with_nonz_th --nonz_th N S` (per-region positive-count threshold).
 
-**Negative validation patches (`--add_val_negatives`).** `--add_ring_negatives` reaches
-the *train* split only, so `val/dice` over a positives-only val set cannot see the false
-positives it exists to suppress — the 2026-08-10 batch moved object F1 by +0.096 while
-dice sat inside the noise floor. `--add_val_negatives` adds negatives to the
-**validation** set as well, drawn by the same annulus rule and subject to the same
-"empty at every timestep" test, so a false positive on background costs dice. It is
-independent of `--add_ring_negatives`; either may be used alone.
+**Negatives reach the train split only. Validation is positives-only.** That is a
+deliberate, permanent property of this pipeline as of 2026-08-20, and it has a known
+cost: `val/dice` cannot see the false positives ring negatives exist to suppress — the
+2026-08-10 batch moved object F1 by +0.096 while dice sat inside the noise floor. Read
+`val/F1` instead when you want a negative-aware number out of `results.csv` (it is
+pooled over raw pixel counts, `evaluate.py:300-306`), and settle precision claims at
+scene scale with `scripts/eval/run_eval.sh`.
 
-Its configuration is *fixed in the code* (`dataset.py`: ring 1..3, 1:1) rather than
-exposed as flags, because it is the ruler and not the experiment: the set is drawn once
-from the validation interferograms using `--seed`, stays identical for every epoch, and
-depends on nothing but partition and seed. Two runs sharing those are scored on
-byte-identical samples whatever their architecture or training-negative settings. It
-requires `--seed`, is part of the resume fingerprint, and adds no new metrics —
-`val/dice` (and with it the LR schedule, early stopping and `best.pt`) is simply now
-computed over positives *and* negatives. The test split is untouched: it is scored at
-scene scale by `scripts/eval/run_eval.sh`, where the background is all there already.
-**Runs with and without it are not on the same scale**; compare like with like.
+**`--add_val_negatives` — DEPRECATED, do not use.** It put a fixed 1:1 negative set
+(ring 1..3, drawn once from the validation interferograms with `--seed`) into the
+**validation** split. It was used by the `valneg` reruns and all 14 `clean22` runs, and
+it was a mistake: an empty prediction on an empty mask scores dice 1.0
+(`losses.py:21`), so at 1:1 the mean becomes roughly `(1 + dice_on_positives)/2` — a
+number that ranks nothing and cannot be read against a positives-only run. The pixel-
+pooled `val/F1` was already negative-aware, so it bought nothing real.
+
+The flag still parses, and the trainer warns when it is passed. It exists for one
+reason: it is part of the strict `dataset` resume fingerprint
+(`sinkholes/training/resume.py`), so removing it would make every run trained with it
+unresumable — the five `attnfix` runs of 2026-08-19 included. Nothing under `scripts/`
+sets it. Delete it, `validation_negatives()`, the `VAL_NEGATIVE_*` constants and
+`SubsiDataset(val_negatives=…)` once those runs have landed.
 
 **Loss.** Default: `BCEWithLogits(pos_weight=--pos_w) + soft Dice`. With
 `--treat_nodata_regions`: masked BCE (pos_weight fixed at 8.0, deliberately independent

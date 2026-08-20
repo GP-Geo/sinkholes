@@ -19,6 +19,41 @@ from .paths import asset
 #: An interferogram id embedded in a longer string, e.g. a patch file name.
 INTF_ID_RE = re.compile(r"\d{8}_\d{8}")
 
+#: The value ``lidar_source_for`` writes when the mapping covers an id.
+NO_LIDAR_MASK = "no_mask"
+
+#: LiDAR survey used for interferograms the mapping does not cover.
+#:
+#: assets/lidar_intf_mask.txt stops at start date 20240605 and
+#: assets/lidar_mask_polygs.shp holds four surveys (2019, 2020, 2021, 2022), so
+#: every interferogram from 20240615_20240626 onward -- 112 of 437, all of 2025
+#: and 2026 -- has no mapping of its own and the dictionary records it as
+#: ``no_mask``.
+#:
+#: ``no_mask`` used to reach :func:`rasterise_lidar_gates`, whose
+#: fallback test only catches None/''/'none'/'null'. The literal string missed
+#: it, matched nothing in the shapefile and tripped the "not in shapefile ->
+#: using ALL polygons" branch, so those scenes were silently gated by the UNION
+#: of all four footprints -- the widest area available, not one matched to the
+#: scene's own date. Resolving to the LAST REAL SURVEY instead is both narrower
+#: and explicit. Change this constant when a newer survey is added to the
+#: shapefile, and add its rows to lidar_intf_mask.txt.
+LIDAR_FALLBACK_SOURCE = "LiDAR2022"
+
+
+def resolve_lidar_mask(value: Optional[str]) -> str:
+    """The LiDAR source id a consumer should gate on.
+
+    Maps the dictionary's ``no_mask`` (and the empty/None spellings) onto
+    :data:`LIDAR_FALLBACK_SOURCE`. Applied at read time in :func:`intf_meta`
+    rather than written into assets/intf_coord.json, so the dictionary keeps
+    recording what the mapping file actually says and
+    ``sinkholes prepare-metadata`` still warns about ids it does not cover.
+    """
+    if value is None or str(value).strip().lower() in ("", "none", "null", NO_LIDAR_MASK):
+        return LIDAR_FALLBACK_SOURCE
+    return value
+
 
 @dataclass(frozen=True)
 class IntfMeta:
@@ -33,7 +68,9 @@ class IntfMeta:
     nlines: int          # raster height
     byte_order: str      # 'MSBFirst' scenes need a byteswap after np.fromfile
     frame: str           # 'North' | 'South'
-    lidar_mask: str      # source id in lidar_mask_polygs.shp, or 'no_mask'
+    lidar_mask: str      # source id in lidar_mask_polygs.shp; ids the mapping
+                         # does not cover resolve to LIDAR_FALLBACK_SOURCE,
+                         # never to 'no_mask' (see resolve_lidar_mask)
     nonz_num: Any        # int, or 'none' when no patches exist for this id
 
 
@@ -61,7 +98,7 @@ def intf_meta(intf_id: str, path: Optional[str] = None) -> IntfMeta:
         nlines=int(m["nlines"]),
         byte_order=m["byte_order"],
         frame=m["frame"],
-        lidar_mask=m.get("lidar_mask", "no_mask"),
+        lidar_mask=resolve_lidar_mask(m.get("lidar_mask")),
         nonz_num=m.get("nonz_num", "none"),
     )
 
@@ -253,8 +290,13 @@ def lidar_source_for(intf_id: str, mapping_path: Optional[str] = None) -> str:
     Each line carries a start date at [8:16], an end date at [24:32] and the
     source id at [40:49]. A line matching both dates or just the start date
     assigns the source; later lines override earlier ones.
+
+    Reports what the mapping file says, so an uncovered id comes back as
+    ``no_mask`` and ``sinkholes prepare-metadata`` can warn about it. Consumers
+    that need a survey to gate on call :func:`resolve_lidar_mask` instead --
+    :func:`intf_meta` already does.
     """
-    mask = "no_mask"
+    mask = NO_LIDAR_MASK
     with open(mapping_path or asset("lidar_intf_mask.txt")) as fh:
         for line in fh:
             if intf_id[:8] == line[8:16] and intf_id[9:17] == line[24:32]:

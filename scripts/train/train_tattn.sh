@@ -113,21 +113,23 @@ NEG_RING_INNER="${NEG_RING_INNER:-1}"     # annulus radii, in patch-grid units
 NEG_RING_OUTER="${NEG_RING_OUTER:-3}"     # 3 = hard near-field only; raise to reach far-field
 NEG_PER_POS="${NEG_PER_POS:-1.0}"         # negatives per positive, capped by availability
 
-# --- validation negatives ---------------------------------------------------
-# The knobs above shape TRAINING data. VAL_NEGS=yes puts negatives in the
-# VALIDATION set too, so val/dice can finally see a false positive on
-# background instead of scoring only the positive patches. Its configuration is
-# FIXED in the code (ring 1..3, 1:1, drawn once from the validation
-# interferograms with SEED) and deliberately has no knobs here: it is the ruler,
-# not the experiment. Any two runs sharing a partition and a seed are scored on
-# identical samples whatever their architecture or RING_NEGS settings, which is
-# what this model most needs -- its whole claim is a PRECISION claim, and the
-# temporal_k5 head-to-head came in at 0.6459 against the ConvLSTM's 0.6460 on a
-# val set that could not see precision at scene scale.
+# --- validation negatives (DEPRECATED 2026-08-20, DO NOT USE) ---------------
+# VAL_NEGS=yes put negatives in the VALIDATION set as well, so val/dice could
+# see a false positive on background. It is deprecated: dice_coeff maps an
+# empty prediction on an empty mask to 1.0, so at 1:1 roughly half the val
+# samples score ~1.0 and the mean becomes about (1 + dice_on_positives)/2 --
+# a number that ranks nothing and cannot be read against any run trained
+# without it. val/F1, val/P and val/R are pooled from raw pixel counts
+# (evaluate.py:300-306) and were already negative-aware, so nothing was gained.
+# Precision claims belong to scripts/eval/run_eval.sh at object level.
 #
-# It does NOT make a run comparable with one trained before it existed: a
-# positives-only val set and a 1:1 one are different scales.
-VAL_NEGS="${VAL_NEGS:-no}"                # yes | no   (needs SEED)
+# IT STILL WORKS, for exactly one reason: the five attnfix runs of 2026-08-19
+# were trained with it, and `dataset` is a STRICT resume key carrying
+# `valneg=1-3x1.0` (resume.py). A resume of one of those runs -- including the
+# manual `RESUME=<run dir> bsub -J <same name> < this script` path -- must pass
+# VAL_NEGS=yes or it will be refused as an incompatible resume. No new run
+# should set it, and nothing in scripts/submit_all.sh does any more.
+VAL_NEGS="${VAL_NEGS:-no}"                # yes | no   DEPRECATED: resume only
 
 # 'auto' finds this LSF job's own directory again after a WEXAC preemption, and
 # only works because a requeued job keeps its id. A job KILLED by TERM_RUNLIMIT
@@ -165,11 +167,11 @@ if [ "$K_PREVS" -ge 10 ] || [ "$FUSE_SKIPS" -ge 3 ]; then
 fi
 
 # Ring negatives reach the TRAIN dataset only -- train.py passes them to the
-# train split and not to val/test. With VAL_NEGS=no, validation therefore stays
-# positives-only and val/dice CANNOT see the thing this flag exists to fix:
-# expect it flat or slightly down while scene-level precision improves, and
-# judge the run with scripts/eval/run_eval.sh (object-level F1) rather than the
-# results.csv curve. VAL_NEGS=yes is the fix for it.
+# train split and not to val/test. Validation is therefore positives-only and
+# val/dice CANNOT see the thing this flag exists to fix: expect it flat or
+# slightly down while scene-level precision improves, and judge the run with
+# scripts/eval/run_eval.sh (object-level F1) rather than the results.csv curve.
+# Read val/F1 there too, not val/dice -- it is pooled over pixels and does move.
 NEG_FLAGS=()
 case "$RING_NEGS" in
   yes) NEG_FLAGS=(--add_ring_negatives
@@ -181,7 +183,10 @@ case "$RING_NEGS" in
 esac
 
 case "$VAL_NEGS" in
-  yes) NEG_FLAGS+=(--add_val_negatives) ;;
+  yes) echo "WARNING: VAL_NEGS=yes is DEPRECATED and inflates val/dice to roughly" >&2
+       echo "         (1 + dice_on_positives)/2. It is kept only so the attnfix runs of" >&2
+       echo "         2026-08-19 can be resumed. Do not start a NEW run with it." >&2
+       NEG_FLAGS+=(--add_val_negatives) ;;
   no)  ;;
   *)   echo "VAL_NEGS must be 'yes' or 'no', got '$VAL_NEGS'" >&2; exit 1 ;;
 esac

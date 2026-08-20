@@ -39,6 +39,17 @@ from ..meta import find_11day_sequences, load_coord_dict
 GENERATION = "all_years_clean"
 
 
+def generation_label(years):
+    """The generation stamp for this run.
+
+    A ``--years``-restricted run is *not* :data:`GENERATION`. Stamping it
+    ``all_years_clean`` would make the year-restricted family indistinguishable
+    from the full one in the only place a reader is told to trust
+    (assets/PARTITIONS.md: "trust the file's own provenance").
+    """
+    return GENERATION if not years else f"{years[0]}_{years[1]}_clean"
+
+
 def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--intf_dict", type=str, default=None,
                    help="coordinate dictionary (default: the committed asset)")
@@ -302,10 +313,14 @@ def main(args) -> None:
             check_invariants(axis, k, splits, counter, windows)
 
             prov = {
-                "generation": GENERATION,
+                "generation": generation_label(args.years),
                 "axis": axis,
                 "k_prevs": k,
+                # ``years`` is what the splits actually contain; ``years_filter``
+                # is what was asked for. They differ when the archive is thinner
+                # than the request, so both are recorded.
                 "years": sorted({int(i[:4]) for v in splits.values() for i in v}) or None,
+                "years_filter": list(args.years) if args.years else None,
                 "cut_lat": args.cut_lat if axis == "geo" else None,
                 "aoi": list(aoi),
                 "temporal_bounds": list(args.temporal_bounds) if axis == "temporal" else None,

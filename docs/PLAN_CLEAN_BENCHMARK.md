@@ -42,6 +42,19 @@ been identified, so it may contaminate the new benchmark the way it contaminated
 mitigations are the AOI, the LiDAR gate, and the fact that scene-level results are reported per
 year — so if the collapse reappears it will be visible rather than averaged away.
 
+> **Added 2026-08-20 — the restriction is back, as a second arm rather than a reversal.**
+> `assets/partition_{geo,temporal}_k{5,10}_pre2023.json` rebuild §5's 2019–2022 design with the
+> current generator: same cut, same AOI, same seed, same val share, `--years 2019 2022`. They do
+> **not** supersede the `_clean` family and they change nothing above — the benchmark is still all
+> years. What they add is the control this section could not run: a pre23 arm read against its
+> `clean22` twin differs in the archive and in nothing else, which turns "how much of the
+> false-positive rate is the newer years" from the open question §1 leaves into a measurement.
+> Eleven training arms are queued as `scripts/submit_all.sh pre23` — five of them attention arms,
+> since attention's artefact-suppression claim is a precision claim about exactly the background §1
+> measured — and the temporal files use §5's
+> `20210101 / 20210701` bounds, not §5a's, because §5a's put every held-out scene in years this
+> archive does not contain. Registry: `assets/PARTITIONS.md`, "Generation 3b".
+
 **Consequences, all reflected below:** the "subset dictionary" of §3 is no longer a subset; the
 `lidar_mask != "no_mask"` assertion must be **dropped**, not kept; §5's partition sizes and the
 temporal boundaries are re-derived in §5a; and partition files lose the `_2019_2022` suffix.
@@ -332,14 +345,18 @@ Two things to accept, both consequences of the archive rather than the design:
   doubles the sample count; if it proves unstable, the documented fallback is to let *val
   only* chains reach back into train, which restores **24 interferograms / 9,452 positives**
   at k10 (k5: 25 / 9,701) while the test split stays strict.
+  > **Superseded 2026-08-20:** `--add_val_negatives` was removed, so this padding is no
+  > longer available and the thin-val problem stands on its own. The fallback above —
+  > val-only chains reaching back into train — is now the only lever for it.
 - **k10 train is 50 interferograms.** The k5/k10 comparison on the temporal axis is now also
   a 77-vs-50 scene comparison; keep that in mind before reading a k10 deficit as a
   context-length result.
 
 ### 5a. Re-derived for 2019–2026 — supersedes the sizes above
 
-*All figures above in §5 were computed on 2019–2022 and are kept for the record only. These are
-the live numbers: all years, chain-contained, counted as **positives inside the AOI**.*
+*All figures above in §5 were computed on 2019–2022. They are the live numbers for the
+`*_pre2023.json` family only (§0a, 2026-08-20) and are superseded for the benchmark itself. These
+are the benchmark's numbers: all years, chain-contained, counted as **positives inside the AOI**.*
 
 **Chain-valid interferograms** (`find_11day_sequences`, all years):
 
@@ -576,6 +593,13 @@ Everything else is template default (b128, seed 42, plateau schedule, `--amp`,
 `--save_best_only`, `--resume auto`), plus **`VAL_NEGS=yes` on every run** — a positives-only
 val set cannot see the false positives that are the whole problem, and with `temporal_k10`'s
 6-interferogram val it matters more, not less. New `submit_all.sh` kind: `clean22`.
+
+> **Superseded 2026-08-20.** `VAL_NEGS=yes` is what the 14 `clean22` runs were actually
+> trained with, and it is why their `val/dice` reads 0.72–0.80 — an empty prediction on an
+> empty mask scores 1.0, so at 1:1 the mean is about `(1 + dice_on_positives)/2`. The flag
+> has been removed; validation is positives-only again, and `val/F1` (pixel-pooled, always
+> negative-aware) is the negative-sensitive column to read instead. Resubmitting any
+> `clean22` job now produces a run whose curve does not line up with the recorded one.
 
 ---
 

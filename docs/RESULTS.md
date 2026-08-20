@@ -97,14 +97,26 @@ mostly outside the val set. Dice cannot see the thing that changed.
 **Consequence: never promote or kill a model on dice again.** Dice is now only
 a training-health signal (is it learning at all, is it diverging).
 
-**The measurement, not the metric, was the problem.** `--add_val_negatives`
-puts a fixed 1:1 negative set into validation — same ring 1..3 the training
-negatives use, drawn once from the validation interferograms with the run seed,
-identical across architectures and training-negative ratios — so a false
-positive on background now costs dice. The five geo_k5 arms are being retrained
-under it (`bash scripts/submit_all.sh valneg --submit`; settings in
-`scripts/train/PRESETS.md`). Whether that closes the dice/object-F1 disagreement
-above is the question those runs answer; until they land, the rule stands.
+**We tried fixing the measurement, and it did not work.** `--add_val_negatives`
+put a fixed 1:1 negative set into validation — same ring 1..3 the training
+negatives use, drawn once from the validation interferograms with the run seed —
+so that a false positive on background would cost dice. It was used by the
+`valneg` reruns and by all 14 `clean22` runs.
+
+**Removed 2026-08-20.** It made dice *look* different without making it
+discriminate: an empty prediction on an empty mask scores dice **1.0**
+(`losses.py:21`), so at 1:1 the mean is roughly `(1 + dice_on_positives)/2` —
+which is exactly why `clean22` reads 0.72–0.80 against everything else's
+0.63–0.66. What it bought was a second incomparable dice scale on top of the
+first. Meanwhile `val/F1` / `val/P` / `val/R` are pooled over raw pixel counts
+(`evaluate.py:300-306`) and were **already** negative-aware the whole time.
+
+So the rule above stands, unchanged and now permanent: **dice is a
+training-health signal only** — and if you want a negative-aware number from
+`results.csv`, read `val/F1`. Promote/kill still belongs to `run_eval.sh`.
+Validation is positives-only for every run from 2026-08-20 on; nothing under
+`scripts/` can turn negatives on. The flag survives, deprecated, only so the
+`attnfix` runs of 2026-08-19 stay resumable.
 
 ### ③ Temporal context helps much less than we thought: +0.012, not +0.046
 

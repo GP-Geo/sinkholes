@@ -226,3 +226,64 @@ def test_missing_nonz_indices_is_a_clear_error(tmp_path):
                          "--out_dir", str(tmp_path), "--dry_run"])
     with pytest.raises(SystemExit, match="nonz_num is whole-scene"):
         bp.main(args)
+
+
+# ---------------------------------------------------------------- year filter
+#
+# The 2019-2022 family (assets/partition_*_pre2023.json) exists because the
+# post-2022 interferograms drive scene-level false positives -- see
+# docs/PLAN_CLEAN_BENCHMARK.md section 1. It is produced by --years alone, so
+# these check the two ways that flag can silently lie: a scene outside the range
+# surviving into a split, and a restricted file still claiming to be the
+# all-years generation.
+
+
+def test_year_filter_keeps_only_the_requested_years(tmp_path):
+    # A two-year archive: 60 interferograms x 11 days runs into 2024.
+    dict_path, patches, _ = build_archive(tmp_path, n_north=60, n_south=60)
+    out = tmp_path / "out"
+    out.mkdir()
+    p = argparse.ArgumentParser()
+    bp.add_arguments(p)
+    args = p.parse_args([
+        "--intf_dict", str(dict_path), "--patches_dir", str(patches),
+        "--out_dir", str(out), "--temporal_bounds", "20230601", "20231201",
+        "--years", "2023", "2023", "--suffix", "y2023",
+    ])
+    bp.main(args)
+    files = {f.name: json.loads(f.read_text()) for f in out.glob("*.json")}
+    assert files, "the year filter emptied the archive"
+    assert all("_y2023.json" in n for n in files)
+
+    for name, d in files.items():
+        for split, ids in d.items():
+            if split in ("aoi_window", "provenance"):
+                continue
+            assert ids, f"{name}: {split} is empty under the year filter"
+            assert all(i[:4] == "2023" for i in ids), f"{name}: {split} leaks another year"
+
+
+def test_year_filter_restamps_the_generation(tmp_path):
+    dict_path, patches, _ = build_archive(tmp_path, n_north=60, n_south=60)
+    out = tmp_path / "out"
+    out.mkdir()
+    p = argparse.ArgumentParser()
+    bp.add_arguments(p)
+    args = p.parse_args([
+        "--intf_dict", str(dict_path), "--patches_dir", str(patches),
+        "--out_dir", str(out), "--temporal_bounds", "20230601", "20231201",
+        "--years", "2023", "2023", "--suffix", "y2023",
+    ])
+    bp.main(args)
+    for f in out.glob("*.json"):
+        pr = json.loads(f.read_text())["provenance"]
+        # A restricted family must not be mistakable for the all-years one.
+        assert pr["generation"] == "2023_2023_clean" != bp.GENERATION
+        assert pr["years_filter"] == [2023, 2023]
+
+
+def test_unrestricted_run_records_no_year_filter(tmp_path):
+    files, _ = run_generator(tmp_path)
+    for d in files.values():
+        assert d["provenance"]["years_filter"] is None
+        assert d["provenance"]["generation"] == bp.GENERATION

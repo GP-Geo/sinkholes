@@ -179,15 +179,17 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--neg_ring_outer", type=int, default=3)
     p.add_argument("--neg_per_pos", type=float, default=1.0)
     p.add_argument("--add_val_negatives", action="store_true",
-                   help="also put negative patches in the VALIDATION set, so val/dice "
-                        f"can see the false positives negatives exist to suppress. "
-                        f"Fixed configuration — ring {VAL_NEGATIVE_INNER}.."
+                   help="DEPRECATED (2026-08-20), do not use on a new run. Puts negative "
+                        f"patches in the VALIDATION set (ring {VAL_NEGATIVE_INNER}.."
                         f"{VAL_NEGATIVE_OUTER}, {VAL_NEGATIVE_PER_POS:g}:1, drawn once "
-                        f"from the validation interferograms with --seed and unchanged "
-                        f"for every epoch. Deliberately NOT tunable: it is the ruler, "
-                        f"not the experiment, so any two runs on one partition and seed "
-                        f"are scored on identical samples. Independent of "
-                        f"--add_ring_negatives — either may be used without the other.")
+                        f"from the validation interferograms with --seed). It inflates "
+                        f"val/dice to roughly (1 + dice_on_positives)/2 — an empty "
+                        f"prediction on an empty mask scores 1.0 — so the curve ranks "
+                        f"nothing and cannot be read against a positives-only run. "
+                        f"val/F1, val/P and val/R are pooled over pixels and were "
+                        f"already negative-aware. Kept ONLY so runs trained with it "
+                        f"stay resumable: it is part of the strict `dataset` resume "
+                        f"fingerprint. Judge precision with eval-scenes instead.")
 
     p.add_argument("--attn_unet", action="store_true", help="AttentionUNet")
     p.add_argument("--add_attn", action="store_true", help="UNet + bottleneck attention")
@@ -227,7 +229,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--tattn_contrast", action=argparse.BooleanOptionalAction, default=True,
                    help="form queries and keys from token - mean_over_time(token), so "
                         "attention selects on how frames DIFFER. Without it the shared "
-                        "component swamps the frame-to-frame signal (0.09% of the token "
+                        "component swamps the frame-to-frame signal (0.09%% of the token "
                         "magnitude at init) and the softmax is uniform before training "
                         "even starts -- see docs/ATTENTION_COLLAPSE.md")
     p.add_argument("--tattn_qk_norm", action=argparse.BooleanOptionalAction, default=True,
@@ -324,6 +326,26 @@ def build_model(args, device):
     model = model.to(memory_format=memory_format_for(device))
     model.to(device=device)
     return model, num_c
+
+
+def warn_if_val_negatives_deprecated(args, log) -> None:
+    """Say so, at the top of the run log, when --add_val_negatives is passed.
+
+    Deprecated 2026-08-20. The flag is kept only because ``dataset`` is a strict
+    resume key and runs already trained with it carry ``valneg=`` in theirs, so
+    a run that passes it deliberately is doing the one legitimate thing left:
+    continuing an existing run. Anything else wants this warning.
+    """
+    if not getattr(args, "add_val_negatives", False):
+        return
+    log.warning(
+        "--add_val_negatives is DEPRECATED and should not be used on a new run. It "
+        "inflates val/dice to roughly (1 + dice_on_positives)/2, because an empty "
+        "prediction on an empty mask scores dice 1.0, so the curve cannot be compared "
+        "with any positives-only run — and it selects best.pt. val/F1 is pooled over "
+        "pixels and is negative-aware without it. The flag is kept ONLY so runs "
+        "already trained with it stay resumable."
+    )
 
 
 def _log_val_composition(val_set, val_ring) -> None:
@@ -427,6 +449,14 @@ def build_datasets(args, rep):
 
     # --add_val_negatives changes what val/dice MEANS, so the ways it could be
     # accepted while quietly not applying are all rejected here instead.
+    #
+    # DEPRECATED 2026-08-20. Nothing under scripts/ turns this on any more and
+    # no new run should. It survives only because it is part of the strict
+    # `dataset` resume fingerprint (resume.py), so deleting it would make every
+    # run trained with it unresumable — the five attnfix runs of 2026-08-19
+    # among them. Delete this branch, the flag, validation_negatives(), the
+    # VAL_NEGATIVE_* constants and SubsiDataset's val_negatives= parameter once
+    # those runs have landed.
     val_ring = None
     if args.add_val_negatives:
         if args.seed is None:
@@ -1049,6 +1079,7 @@ def main(args) -> None:
     log = rep or logging.getLogger()
     for note in location.notes:
         log.info(note)
+    warn_if_val_negatives_deprecated(args, log)
 
     # -- vet the checkpoint before anything expensive happens
     if checkpoint is not None:

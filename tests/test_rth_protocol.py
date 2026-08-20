@@ -132,3 +132,42 @@ def test_without_rth_the_historical_thresholds_are_kept(scene_dir):
     assert res["thresholds"] == list(outputs.THRESHOLDS)
     assert res["threshold_kind"] == "probability"
     assert set(res["summary_by_tolerance"]) == {"ith0.7_b5"}
+
+
+def write_empty_gt_scene(d, intf, shape=(400, 300)):
+    """A scene whose AOI window caught no ground truth at all.
+
+    The model still fires somewhere; there is simply nothing to score it
+    against, which is what an AOI crop does to a scene whose sinkholes all sit
+    outside the window.
+    """
+    conf = np.zeros(shape, dtype=np.float32)
+    conf[100:130, 100:130] = 0.75
+    np.save(os.path.join(d, f"{intf}_pred.npy"), conf)
+    np.save(os.path.join(d, f"{intf}_gt.npy"), np.zeros(shape, dtype=np.float32))
+
+
+def test_a_scene_with_no_ground_truth_does_not_nan_the_whole_summary(tmp_path):
+    """Regression: one empty-GT scene used to turn every summary figure NaN.
+
+    object_level_evaluate divides by batch_gt_area, so a scene with no GT
+    polygon comes back (NaN, NaN, 0.0) -- undefined, correctly. The aggregate
+    then took a plain mean over it and reported NaN for the whole evaluation,
+    which is what happened to the three geo evals of 2026-08-19: 32 perfectly
+    good scenes were hidden behind three empty ones.
+    """
+    write_scene(tmp_path, INTF_HIGH, 0.75)
+    write_empty_gt_scene(tmp_path, INTF_LOW)
+
+    res = run_outputs(tmp_path, ["--rth"])
+
+    assert np.isnan(res["per_intf"][INTF_LOW]["0.25"]["recall"]), \
+        "the empty scene is still reported as undefined, not silently zeroed"
+
+    at_25 = res["summary"]["0.25"]
+    assert not np.isnan(at_25["mean_recall"]), "one empty scene must not NaN the summary"
+    assert not np.isnan(at_25["weighted_recall"]), "NaN * 0 poisons the weighted mean too"
+    # The one scored scene is INTF_HIGH, which survives every RTh in the sweep.
+    assert at_25["mean_recall"] == pytest.approx(1.0)
+    assert at_25["n_scenes"] == 1, "the mean is over the defined scenes only"
+    assert at_25["n_undefined"] == 1, "and it says how many it dropped"

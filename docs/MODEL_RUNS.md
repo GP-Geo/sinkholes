@@ -41,13 +41,20 @@ changes — which is exactly what happened on 2026-08-18.
 > diverging, when did it peak. Every promote/kill decision belongs to the
 > object-level column.
 >
-> **Partly repaired 2026-08-18, and a new trap opened.** The 14-run clean batch
-> passes `--add_val_negatives`, so validation is half empty background patches
-> and dice can finally see a false positive. That fixes the blindness above —
-> but it makes `val/dice` **incomparable across the boundary**: half the new
-> score is a negative-patch-cleanliness term that the old number does not
-> contain at all. Never read a pre-2026-08-18 dice against a post- one. See
+> **Attempted repair 2026-08-18, reverted 2026-08-20.** The 14-run clean batch
+> passes `--add_val_negatives`, so its validation is half empty background
+> patches and dice can see a false positive. That fixed the blindness above and
+> opened a worse trap: it makes `val/dice` **incomparable across the boundary**,
+> because half the new score is a negative-patch-cleanliness term the old number
+> does not contain at all. **Never read a pre-2026-08-18 dice against a
+> 2026-08-18/19 one.** See
 > [The 2026-08-18 batch](#the-2026-08-18-batch--the-clean-benchmark-14-runs).
+>
+> The flag was removed on 2026-08-20 and validation is positives-only again, so
+> that boundary is closed and no future run reopens it. If you want a
+> negative-aware number out of `results.csv`, read **`val/F1`** — it is pooled
+> over raw pixel counts (`evaluate.py:300-306`), so it always could see a false
+> positive, on every batch, including the old ones.
 
 ### Object-level scores
 
@@ -334,7 +341,14 @@ recommendation has one leg. **Scoring these four is the top priority.**
 
 ## The 2026-08-18 batch — the clean benchmark (14 runs)
 
-`outputs/2026-08-18/clean_*/`. The first runs on the **generation-3**
+> **Renamed 2026-08-20.** Every run in this batch validated against negatives,
+> so each surviving directory is now `<partition>_<arch>_<variant>_valneg` — the
+> `clean_` prefix and the `_<date>_lsf_<id>` suffix are gone. The tables below
+> keep the original `clean_*` names, because only 7 of these 14 survive as
+> directories and half-rewriting the record would be worse than not rewriting
+> it. `outputs/README.md` carries the old→new mapping.
+
+`outputs/2026-08-18/*_valneg/`. The first runs on the **generation-3**
 partitions (`assets/partition_*_clean.json`): all years 2019–2026, every split
 restricted to the shoreline AOI lat 31.25–31.75 / lon 35.38–35.46, and the geo
 axis cut at 31.4° so train (North, 31.40–31.75) and hold-out (South,
@@ -347,10 +361,14 @@ negative ratio, in nothing else: `pos_w` 4, hidden / attn dim 256, batch 128,
 ring 1–3 negatives in training at 1:1 (except the `_3x` arm), and
 `--add_val_negatives`.
 
-### ⚠️ `val/dice` from this batch cannot be compared to any earlier number
+### ⚠️ `val/dice` from this batch cannot be compared to any earlier number — or any later one
 
-Every previous batch validated on **positives only**. All 14 runs here pass
-`--add_val_negatives`, so validation is **50% empty negative patches**:
+Every previous batch validated on **positives only**, and so does every batch
+after 2026-08-20, when `--add_val_negatives` was removed. This batch and the
+five `attnfix` runs of 2026-08-19 are the only ones that ever used it, which
+makes their dice column an island: readable against each other, against nothing
+else. All 14 runs here pass `--add_val_negatives`, so validation is **50% empty
+negative patches**:
 
 ```
 validation set: 4093 positive + 4093 negative patches   (geo_k5; the log header of every run)
@@ -512,13 +530,27 @@ anything in `docs/PREDICTIONS.md`.
 
 ### Retention
 
-All 14 keep `best.pt`, `last.pt`, `resume.pt` and `interrupted.pt` as of
-2026-08-19. The standing rule — **keep `best.pt` for every run until it has an
+~~All 14 keep `best.pt`, `last.pt`, `resume.pt` and `interrupted.pt` as of
+2026-08-19.~~ The standing rule — **keep `best.pt` for every run until it has an
 object-level score** — covers all of them, including the six `eval5` skips. The
 `last`/`resume`/`interrupted` checkpoints are the normal post-batch pruning
 target once the runs that ran out of epochs are decided (six of them could
 legitimately be *extended* from `resume.pt` rather than retrained, which is an
 argument for holding `resume.pt` longer than usual here).
+
+**Superseded 2026-08-20: the seven runs of the 2026-08-18 batch hold no
+checkpoints at all.** Every one of them validated against negatives, which is
+the defect that the whole positives-only protocol exists to remove, so the
+weights were deleted rather than pruned — `best.pt` included, 5.5 GB. This
+overrides the standing rule above for exactly two runs,
+`clean_geo_k10_convlstm_ring3` and `clean_temporal_k10_convlstm_ring3`, which
+went without an object-level score. The reasoning: an object score of a
+checkpoint chosen on an inflated curve measures the wrong checkpoint, so
+scoring them first would not have answered anything the positives-only rerun
+does not answer better. **Cost if that is wrong: ~2.5 h GPU each**, and
+`temporal_k10_convlstm_ring3` has no positives-only twin yet — the `attnpos`
+batch is where it was meant to come from. The other five keep their
+`predictions/` object scores from before the deletion.
 
 ## K10S — retired partition, INVALID RESULTS (`outputs/2026-08-03/`)
 

@@ -23,7 +23,15 @@ from pathlib import Path
 import numpy as np
 
 from ..geo import aligned_origin, grid_window
-from ..meta import INTF_ID_RE, find_11day_sequences, intf_meta, load_coord_dict
+from ..meta import (
+    INTF_ID_RE,
+    LIDAR_FALLBACK_SOURCE,
+    NO_LIDAR_MASK,
+    find_11day_sequences,
+    intf_meta,
+    lidar_source_for,
+    load_coord_dict,
+)
 from ..normalise import SCENE_RANGE_TOL, normalise_phase
 from ..paths import DEFAULT_PREDICTIONS_DIR
 from ..polygons import mask_array_to_polygons, pixel_polygons_to_lonlat
@@ -49,6 +57,14 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                    help="partition JSON whose 'val' list to evaluate")
     p.add_argument("--year_range", nargs=2, type=int, default=[2019, 2023],
                    metavar=("Y0", "Y1"), help="year filter for --intf_source all")
+    p.add_argument("--min_positives", type=int, default=150,
+                   help="skip interferograms with this many positive patches or fewer "
+                        "(strictly MORE than this is kept). Applies to every "
+                        "--intf_source, including an explicit --intf_list, and the "
+                        "dropped ids are logged. 0 disables it. NOTE the count is "
+                        "'nonz_num' from the coordinate dictionary, which is WHOLE-SCENE: "
+                        "it is not restricted to --aoi_window, so a scene with most of "
+                        "its positives outside the window can still pass")
 
     p.add_argument("--k_prevs", type=int, default=0,
                    help="temporal context; must match how the model was trained")
@@ -109,7 +125,46 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                    help="also write one combined shapefile across all interferograms")
 
 
+def filter_by_min_positives(ids, args) -> list:
+    """Drop interferograms with too few positive patches to be worth scoring.
+
+    Thin scenes make the object-level mean per-scene precision/recall noisy:
+    one missed sinkhole on a scene holding four of them moves that scene's
+    recall by 0.25, and every scene carries equal weight in the mean. The
+    threshold is applied to every ``--intf_source`` -- an explicit
+    ``--intf_list`` included -- so one number describes the whole run, and the
+    dropped ids are logged rather than silently vanishing.
+    """
+    if args.min_positives <= 0:
+        return list(ids)
+    coord = load_coord_dict(args.intf_dict_path)
+    kept, dropped = [], []
+    for intf_id in ids:
+        n = coord.get(intf_id, {}).get("nonz_num", "none")
+        keep = isinstance(n, int) and n > args.min_positives
+        (kept if keep else dropped).append((intf_id, n))
+    if dropped:
+        logging.info(
+            f"--min_positives {args.min_positives}: dropped {len(dropped)} of {len(ids)} "
+            f"interferograms with too few positive patches: "
+            + ", ".join(f"{i}({n})" for i, n in sorted(dropped))
+        )
+    if not kept:
+        sys.exit(
+            f"--min_positives {args.min_positives} removed every interferogram in the "
+            f"list ({len(ids)} of {len(ids)}). Lower it, or pass --min_positives 0."
+        )
+    logging.info(f"{len(kept)} interferograms with more than {args.min_positives} "
+                 f"positive patches")
+    return [i for i, _ in kept]
+
+
 def resolve_intf_list(args, data_dir) -> list:
+    """The interferograms to score, from --intf_source, minus the thin ones."""
+    return filter_by_min_positives(_intf_list_from_source(args, data_dir), args)
+
+
+def _intf_list_from_source(args, data_dir) -> list:
     if args.intf_source == "intf_list":
         if not args.intf_list:
             sys.exit("--intf_source intf_list needs --intf_list")
@@ -223,6 +278,18 @@ def main(args) -> None:
                             patch_dir_name("mask", patch_h, patch_w, args.data_stride, args.days_diff))
 
     intf_list = resolve_intf_list(args, data_dir)
+    if args.add_lidar_mask:
+        # Which scenes are gated on a survey that is not theirs. Reported once
+        # here rather than per tile, because it changes what the object-level
+        # numbers mean for those scenes: the gate is the LAST survey, not one
+        # contemporaneous with the interferogram.
+        unmapped = [i for i in intf_list if lidar_source_for(i) == NO_LIDAR_MASK]
+        if unmapped:
+            logging.warning(
+                f"{len(unmapped)} of {len(intf_list)} interferograms have no LiDAR "
+                f"mapping of their own (assets/lidar_intf_mask.txt ends at 20240605) "
+                f"and are gated on {LIDAR_FALLBACK_SOURCE}: {', '.join(sorted(unmapped))}"
+            )
     aoi = resolve_aoi_window(args)
     if aoi is not None:
         logging.info(f"AOI window lat {aoi[0]}-{aoi[1]}, lon {aoi[2]}-{aoi[3]}: "

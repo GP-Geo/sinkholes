@@ -18,8 +18,12 @@ Both templates ship with these, so an empty delta means "submit as-is":
     VAL_NEGS=no
     RESUME=auto
 
-`VAL_NEGS` defaults to `no` so every preset above this line still reproduces the
-run it names. Set it only where the table says so.
+`VAL_NEGS` is **deprecated as of 2026-08-20 and must stay `no`**. Validation is
+positives-only for every run from here on; see
+[Negative validation, and why it is gone](#negative-validation-and-why-it-is-gone).
+The presets below that still list `VAL_NEGS=yes` are the historical record of
+what those runs were trained with — they are no longer reproducible as written
+and are not meant to be resubmitted.
 
 Plus, fixed in both templates and not normally changed: `--patch_size 200 100`,
 `--stride 2`, `--partition_mode preset_by_intf`, `--amp`, `--save_best_only`,
@@ -111,10 +115,37 @@ only; val stayed positives-only, so the false positives being suppressed are
 mostly outside the validation set. Expect the curve flat or slightly down while
 object-level precision improves. Judge them with `scripts/eval/run_eval.sh`.
 
-That is no longer a fact of life — see the next section, which reruns five of
-them with a validation set that can see the difference.
+That is a fact of life again, and the answer is `run_eval.sh`, not a padded
+validation set — see the next section.
 
-## The negative-validation reruns (`VAL_NEGS=yes`)
+## Negative validation, and why it is gone
+
+**Removed 2026-08-20.** `VAL_NEGS=yes` / `--add_val_negatives` is deprecated:
+nothing in `scripts/submit_all.sh` sets it, no new run should, and the trainer
+warns if it is passed. The flag still exists **only** so runs already trained
+with it stay resumable — it is part of the strict `dataset` resume fingerprint
+(`sinkholes/training/resume.py`), and the five `attnfix` runs of 2026-08-19
+carry `valneg=1-3x1.0` in theirs. It goes for good once those land.
+
+Why it was dropped: `dice_coeff` maps an empty prediction on an empty mask to
+`(0+eps)/(0+eps) = 1.0`, so at 1:1 about half the validation samples score ~1.0
+and the mean is roughly `(1 + dice_on_positives)/2`. That is the whole reason
+the `clean22` batch reads 0.72–0.80 where every earlier batch reads 0.63–0.66.
+The curve moved; the ranking did not. And `val/F1`, `val/P` and `val/R` are
+pooled from raw pixel counts (`sinkholes/training/evaluate.py:300-306`) rather
+than averaged per sample, so they were **already** negative-aware — the padding
+bought nothing they did not already give.
+
+What replaces it: keep background patches in **training** (`RING_NEGS=yes`),
+read `val/F1` rather than `val/dice` for training health, and settle every
+precision claim at object level with `scripts/eval/run_eval.sh`.
+
+What it costs, honestly: `best.pt` is still selected on `val/dice`, so
+checkpoint selection is once again blind to false positives on background and
+will lean recall-heavy. That is a real regression against what this flag was
+introduced to fix, and the object-level eval is what has to absorb it.
+
+### The reruns it produced (historical)
 
 The batch above was measured on 5,846 purely positive validation patches, so
 `val/dice` was structurally blind to the false positives ring negatives exist to
@@ -137,9 +168,10 @@ would have picked, so re-scoring the old weights would answer a different
 question.
 
 Everything except the validation set is copied from the run each one replaces —
-verified against each run's own banner, not from memory. Submit with
-`bash scripts/submit_all.sh valneg --submit`; the first row is the reference the
-other four are read against, so send it first.
+verified against each run's own banner, not from memory. **These are no longer
+submittable**: the `valneg` batch is retired and `bash scripts/submit_all.sh
+valneg` now exits with an error. The table is kept as the record of what the
+runs in `outputs/` were trained with.
 
 | Order | Template | Job name | CONFIG delta | Replaces (old dice) |
 |---|---|---|---|---|

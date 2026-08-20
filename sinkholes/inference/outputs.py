@@ -313,6 +313,20 @@ def main(args) -> None:
         rs = np.array([v["recall"] for v in vals], dtype=float)
         ps = np.array([v["precision"] for v in vals], dtype=float)
         ws = np.array([v.get("gt_area", 0.0) for v in vals], dtype=float)
+        # A scene whose AOI window holds no ground-truth polygon has gt_area 0,
+        # and object_level_evaluate divides by it: recall and precision come
+        # back NaN because they are genuinely undefined, not because the model
+        # failed. One such scene used to turn every figure below into NaN — it
+        # poisons the plain mean, and NaN * 0 poisons the weighted one too, so
+        # the zero weight does not save it. Score the defined scenes and say
+        # how many were dropped.
+        ok = ~(np.isnan(rs) | np.isnan(ps))
+        rs, ps, ws = rs[ok], ps[ok], ws[ok]
+        n_undefined = int((~ok).sum())
+        if not len(rs):
+            return {"mean_recall": None, "mean_precision": None,
+                    "weighted_recall": None, "weighted_precision": None,
+                    "gt_area": 0.0, "n_scenes": 0, "n_undefined": n_undefined}
         tot = float(ws.sum())
         return {
             # Unweighted: the historical aggregation, kept so the numbers in
@@ -324,7 +338,9 @@ def main(args) -> None:
             "weighted_recall": float((rs * ws).sum() / tot) if tot else None,
             "weighted_precision": float((ps * ws).sum() / tot) if tot else None,
             "gt_area": tot,
-            "n_scenes": int(len(vals)),
+            # n_scenes counts what the means are actually over.
+            "n_scenes": int(len(rs)),
+            "n_undefined": n_undefined,
         }
 
     summary = {}
@@ -333,11 +349,15 @@ def main(args) -> None:
         for th in args.thresholds:
             summary[str(th)] = _aggregate(per_intf, th)
             a = summary[str(th)]
+            def _f(x):
+                return "n/a" if x is None else f"{x:.4f}"
+            dropped = a.get("n_undefined", 0)
             logging.info(
                 f"{'RTh' if args.rth else 'th'} {th}: "
-                f"recall={a['mean_recall']:.4f} precision={a['mean_precision']:.4f} "
-                f"| area-weighted recall={a['weighted_recall']:.4f} "
-                f"precision={a['weighted_precision']:.4f}  (n={a['n_scenes']})"
+                f"recall={_f(a['mean_recall'])} precision={_f(a['mean_precision'])} "
+                f"| area-weighted recall={_f(a['weighted_recall'])} "
+                f"precision={_f(a['weighted_precision'])}  (n={a['n_scenes']}"
+                + (f", {dropped} scene(s) undefined — no GT in window)" if dropped else ")")
             )
         for ith, buf in tolerances:
             key = _tolerance_key(ith, buf)

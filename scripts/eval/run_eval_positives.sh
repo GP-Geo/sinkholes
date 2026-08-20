@@ -49,6 +49,12 @@ RECON_TH="${RECON_TH:-0.25}"
 OL_TH="${OL_TH:-0.7}"       # object-level overlap threshold
 BUFFER="${BUFFER:-5}"       # object-matching buffer, pixels
 SCENES="${SCENES:-1}"       # 0 = patch level only (much faster)
+MIN_POS="${MIN_POS:-150}"   # stage-2 SCENE GATE: skip interferograms with this
+                            # many positive patches or fewer. Stage 1
+                            # (test-patches) is unaffected -- it scores patches,
+                            # not scenes, so a thin interferogram contributes
+                            # proportionally there rather than as a full scene.
+                            # 0 disables. See scripts/eval/run_eval.sh.
 # ----------------------------------------------------------------------------
 
 REPO=/home/labs/rudich/pinkas/sinkholes
@@ -144,6 +150,7 @@ python -m sinkholes eval-scenes \
   --recon_th "$RECON_TH" \
   "${ARCH_FLAGS[@]}" \
   --add_lidar_mask --positives_only \
+  --min_positives "$MIN_POS" \
   --save_confidence --merge_polygs \
   --job_name "$JOB" --output_dir "$OUTROOT"
 

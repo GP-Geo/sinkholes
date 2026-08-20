@@ -6,14 +6,22 @@
 #    scripts/submit_all.sh train             # dry run, training jobs only
 #    scripts/submit_all.sh training --submit # submit ConvLSTM + temporal-attention training
 #    scripts/submit_all.sh control --submit  # the single-frame U-Net 2x2 control
-#    scripts/submit_all.sh valneg  --submit  # the geo_k5 reruns with negative validation
 #    scripts/submit_all.sh clean22 --submit  # THE CLEAN BENCHMARK: six runs, all with
-#                                            # ring negatives + negative validation
+#                                            # ring negatives in TRAINING
 #    scripts/submit_all.sh valpos  --submit  # six of the clean22 runs again, with the
+#                                            # negatives in TRAINING ONLY
 #    scripts/submit_all.sh attnfix --submit  # THE ATTENTION FIX: the clean22 tattn arms
 #                                            # re-run with attention that actually
 #                                            # selects, plus the paired pre-fix control
-#                                            # negatives in TRAINING ONLY (VAL_NEGS off)
+#                                            # (DONE 2026-08-20 -- do not resubmit)
+#    scripts/submit_all.sh attnpos --submit  # THE QUEUED WORK: four of those arms
+#                                            # again on a positives-only val set,
+#                                            # plus four new temporal arms
+#    scripts/submit_all.sh pre23   --submit  # THE 2019-2022 ARCHIVE: eleven arms on
+#                                            # partitions that stop at 2022-12-31,
+#                                            # to measure how much of the
+#                                            # false-positive rate is the newer
+#                                            # years. Five are attention arms
 #    scripts/submit_all.sh eval4   --submit  # the 2026-08-11 evals (DONE 2026-08-12)
 #    scripts/submit_all.sh eval5   --submit  # THE CLEAN BENCHMARK EVALS: 8 of the 14
 #                                            # clean22 runs, GEN=3 partitions at the
@@ -42,11 +50,33 @@
 #  were trained with is kept in the commented blocks below, so any one of them
 #  can be resubmitted by uncommenting a single `job` line.
 #
-#  Two kinds are live:
+#  Four kinds are live:
+#    pre23   ELEVEN arms on the 2019-2022 archive (assets/partition_*_pre2023.json,
+#            generated 2026-08-20). Same generator, cut, AOI, seed and val share
+#            as clean22 -- the archive stops at 2022-12-31 and nothing else
+#            moves, so a pre23 run read against its clean22 twin measures the
+#            newer years and nothing else. That is the open question section 0a
+#            of docs/PLAN_CLEAN_BENCHMARK.md accepted knowingly rather than
+#            answered. FIVE of the eleven are attention arms, because
+#            attention's hypothesis IS this batch's hypothesis: it claims to
+#            suppress temporally inconsistent artefacts, which is what section 1
+#            measured accumulating in the post-2022 scenes. ~223 h of walltime
+#            requests at the 100-epoch ceiling, materially less with early
+#            stopping; the pools are 50-66% of their clean22 twins.
+#    attnpos EIGHT arms on a POSITIVES-ONLY validation set: four of the five
+#            attnfix arms re-run (the prefix control is not repeated -- attnfix
+#            already ran that pair on one protocol), plus FOUR NEW temporal
+#            arms that have no positives-only twin. attnfix itself is DONE --
+#            all five finished by 2026-08-20 05:41, four of them early-stopping
+#            on patience 40 against a padded curve that also chose their
+#            best.pt. ~80 GPU-hours at the 100-epoch ceiling, and materially
+#            less in practice: early stopping ended four of five attnfix runs,
+#            and losing the validation negatives took 35% off the measured
+#            epoch time of the one run that exists in both protocols.
 #    eval5   the object-level scores for 8 of the 14 clean22 runs, on the
-#            generation-3 partitions at stride 4. This is the queued work.
-#            clean22 itself is DONE -- all 14 finished 2026-08-19; do not
-#            resubmit it, it is ~50 GPU-hours of completed training.
+#            generation-3 partitions at stride 4. clean22 itself is DONE --
+#            all 14 finished 2026-08-19; do not resubmit it, it is ~50
+#            GPU-hours of completed training.
 #    valpos  six of those fourteen re-run with the negatives in TRAINING ONLY.
 #            clean22's val/dice of 0.72-0.80 is inflated by the validation
 #            negatives -- an empty prediction on an empty mask scores dice 1.0,
@@ -54,9 +84,16 @@
 #            comparable to any earlier batch. ~52 GPU-hours. See the block
 #            below for what it costs on checkpoint selection.
 #
-#  `valneg` and `eval4` are retired: eval4 completed 2026-08-12, and valneg was
-#  superseded by clean22, which does the same thing on partitions whose geo
-#  hold-out is not contaminated by the frame-overlap band.
+#  attnpos and valpos are the same correction applied to the two training
+#  batches that used negative validation. Between them they re-establish one
+#  val protocol across everything trained on the generation-3 partitions.
+#
+#  `valneg` and `eval4` are retired: eval4 completed 2026-08-12, and valneg is
+#  gone with negative validation itself (2026-08-20). VALIDATION IS NOW
+#  POSITIVES-ONLY FOR EVERY JOB IN THIS FILE -- no template passes
+#  --add_val_negatives any more, and the `valneg` kind is rejected by name.
+#  What replaces it: keep background patches in TRAINING ($NEG_R3_1X) and
+#  settle every precision claim at object level with scripts/eval/run_eval.sh.
 #
 #  DRY RUN IS THE DEFAULT. Nothing reaches LSF without --submit.
 #
@@ -552,7 +589,26 @@ RES_CTRL_G5_NEG="long-gpu 64   24  10:00"
 #       "THE control: single-frame with the same negatives \$G5_NEG1_R3 got"
 
 # ---- the geo_k5 reruns under negative validation (kind: valneg) -------------
-# WHAT IS BROKEN. Every negative-sampling result in this file was produced
+# RETIRED 2026-08-20: NEGATIVE VALIDATION IS NO LONGER SUBMITTABLE FROM HERE.
+# Validation is positives-only for every job in this file. $VALNEG is gone and
+# the five jobs at the end of this section are commented out, so no new run can
+# turn negative validation on. The reasoning below is kept as the record of why
+# it was tried and what it cost -- read it as history, not as instructions.
+#
+# WHAT IT COST. The fix worked as designed and bought a metric nobody could
+# read across the boundary: half of a post-2026-08-18 val/dice is a
+# negative-patch-cleanliness term the older numbers do not contain, so the
+# clean22 batch cannot be ranked against anything trained before it. The
+# object-level eval already answers the question negative validation was
+# introduced to answer, and it answers it on scenes rather than on a sampled
+# annulus. See docs/RESULTS.md and docs/MODEL_RUNS.md.
+#
+# The `--add_val_negatives` flag itself still exists in the trainer, DEPRECATED,
+# for one reason only: the five attnfix runs of 2026-08-19 were trained with it
+# and their resume.pt fingerprints carry `valneg=1-3x1.0`, a STRICT resume key.
+# Removing the flag would make those runs unresumable. It goes when they land.
+#
+# WHAT WAS BROKEN. Every negative-sampling result in this file was produced
 # against a val set of 5846 PURELY POSITIVE patches. Negatives went to the train
 # split only, so the false positives they exist to suppress were almost entirely
 # outside the thing being measured, and val/dice was structurally unable to rank
@@ -592,7 +648,11 @@ RES_CTRL_G5_NEG="long-gpu 64   24  10:00"
 # anything. The reruns' numbers can be compared with each other, and with
 # nothing trained before them: a positives-only val set and a 1:1 one are
 # different scales, so do not read a rerun against the figure beside it above.
-VALNEG="VAL_NEGS=yes"
+# VALNEG="VAL_NEGS=yes" -- REMOVED 2026-08-20. It was appended to the override
+# string of all 24 training jobs below (valneg, clean22 and attnfix); every one
+# of them now trains against a positives-only validation set. Do not reinstate
+# it: put background patches in TRAINING with $NEG_R3_1X and settle precision
+# claims with scripts/eval/run_eval.sh at object level.
 
 # Sizing. Negatives DOUBLE the validation set, and validation runs at batch size
 # 1 (train.py's val_loader), which makes it a much larger share of an epoch than
@@ -624,21 +684,21 @@ RES_TATTN_G5_VN="long-gpu  88   36  12:00"
 # reference every other arm is read against, and until it exists the rest are
 # individually uninterpretable -- exactly the mistake the 2026-08-10 batch made
 # by queueing arms before their baseline.
-job valneg convlstm_geo_k5_h256_posw4_neg1x_ring3_valneg1x_60e \
-    scripts/train/train_convlstm.sh "$G5_BASE $NEG_R3_1X $VALNEG" "$RES_NEG1_G5" \
-    "THE reference arm: 1:1 near-field negatives, now scored on a val set that can see them"
-job valneg convlstm_geo_k5_h256_posw4_neg3x_ring3_valneg1x_60e \
-    scripts/train/train_convlstm.sh "$G5_BASE $NEG_R3_3X $VALNEG" "$RES_NEG3_G5" \
-    "how much is enough: 3:1 against 1:1, on a metric that can tell them apart"
-job valneg convlstm_geo_k5_h256_posw4_neg1x_ring10_valneg1x_60e \
-    scripts/train/train_convlstm.sh "$G5_BASE $NEG_R10_1X $VALNEG" "$RES_NEG1_G5" \
-    "near vs far field: same count, drawn from a 10-cell annulus"
-job valneg tattn_geo_k5_d256_fuse0_posw4_neg1x_ring3_valneg1x_60e \
-    scripts/train/train_tattn.sh "$TATTN_G5 $NEG_R3_1X $VALNEG" "$RES_TATTN_G5_VN" \
-    "attention vs recurrence on geo -- a precision claim, finally on a precision-sensitive metric"
-job valneg unet_single_geo_k5_posw4_neg1x_ring3_valneg1x_60e \
-    scripts/train/train_control.sh "$CONTROL_G5 $NEG_R3_1X $VALNEG" "$RES_CTRL_G5_NEG" \
-    "the control: does the temporal machinery buy anything once background is scored?"
+# job valneg convlstm_geo_k5_h256_posw4_neg1x_ring3_valneg1x_60e \
+#     scripts/train/train_convlstm.sh "$G5_BASE $NEG_R3_1X" "$RES_NEG1_G5" \
+#     "THE reference arm: 1:1 near-field negatives, now scored on a val set that can see them"
+# job valneg convlstm_geo_k5_h256_posw4_neg3x_ring3_valneg1x_60e \
+#     scripts/train/train_convlstm.sh "$G5_BASE $NEG_R3_3X" "$RES_NEG3_G5" \
+#     "how much is enough: 3:1 against 1:1, on a metric that can tell them apart"
+# job valneg convlstm_geo_k5_h256_posw4_neg1x_ring10_valneg1x_60e \
+#     scripts/train/train_convlstm.sh "$G5_BASE $NEG_R10_1X" "$RES_NEG1_G5" \
+#     "near vs far field: same count, drawn from a 10-cell annulus"
+# job valneg tattn_geo_k5_d256_fuse0_posw4_neg1x_ring3_valneg1x_60e \
+#     scripts/train/train_tattn.sh "$TATTN_G5 $NEG_R3_1X" "$RES_TATTN_G5_VN" \
+#     "attention vs recurrence on geo -- a precision claim, finally on a precision-sensitive metric"
+# job valneg unet_single_geo_k5_posw4_neg1x_ring3_valneg1x_60e \
+#     scripts/train/train_control.sh "$CONTROL_G5 $NEG_R3_1X" "$RES_CTRL_G5_NEG" \
+#     "the control: does the temporal machinery buy anything once background is scored?"
 
 # ---- training: the clean benchmark (kind: clean22) --------------------------
 # The six runs of docs/PLAN_CLEAN_BENCHMARK.md section 6, on the generation-3
@@ -647,18 +707,19 @@ job valneg unet_single_geo_k5_posw4_neg1x_ring3_valneg1x_60e \
 # over -- different scene lists, an AOI window, and a latitude cut that makes
 # the geo train and hold-out disjoint for the first time.
 #
-# EVERY RUN HAS NEGATIVES, on both sides:
+# EVERY RUN HAS NEGATIVES, in TRAINING:
 #   RING_NEGS=yes   background patches in TRAINING  (ring 1-3, the arm that won
 #                   on the old data), so the model sees what it must not flag.
-#   VAL_NEGS=yes    background patches in VALIDATION, which is what makes
-#                   val/dice able to see a false positive at all. The
-#                   2026-08-10 batch is the cautionary tale: all nine arms
-#                   landed inside the +-0.006 noise floor because validation
-#                   was positives-only and structurally could not measure the
-#                   thing the negatives were changing.
-# VAL_NEGS needs a seed; SEED defaults to 42 in every template, and the
-# validation negatives are pinned (inner 1, outer 3, 1:1) so two runs on one
-# partition are scored on byte-identical samples.
+#
+# AS ORIGINALLY SUBMITTED, all fourteen also carried VAL_NEGS=yes, which put
+# background patches in VALIDATION as well. That is why their val/dice reads
+# 0.72-0.80 against the 0.63-0.66 of every earlier batch: an empty prediction
+# on an empty mask scores dice 1.0, so at 1:1 the mean is roughly
+# (1 + dice_on_positives)/2. The numbers in outputs/ are what those runs
+# actually scored and are kept as they are -- but the flag was removed on
+# 2026-08-20, so RESUBMITTING ANY JOB BELOW NOW TRAINS AGAINST A
+# POSITIVES-ONLY VAL SET and its curve will not line up with the recorded one.
+# Start such a rerun under a new --job_name rather than resuming.
 #
 # The partitions carry their own aoi_window, so no AOI flag is needed here --
 # train.py reads it from the file and hands it to the datasets. That is the
@@ -745,29 +806,29 @@ RES_C_CTRL_T5="long-gpu  32   24   13:00"   # single-frame temporal_k5, est peak
 # read against. Submit it first so a queue that only clears one job still
 # clears the interpretable one.
 job clean22 clean_geo_k5_convlstm_ring3 \
-    scripts/train/train_convlstm.sh "$C_G5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_G5" \
+    scripts/train/train_convlstm.sh "$C_G5 $NEG_R3_1X $C_HYP" "$RES_C_G5" \
     "THE anchor: geo_k5, ConvLSTM h256, 1:1 near-field negatives, negative validation"
 job clean22 clean_geo_k5_convlstm_ring3_3x \
-    scripts/train/train_convlstm.sh "$C_G5 $NEG_R3_3X $VALNEG $C_HYP" "$RES_C_G5_3X" \
+    scripts/train/train_convlstm.sh "$C_G5 $NEG_R3_3X $C_HYP" "$RES_C_G5_3X" \
     "best config on the old data (3:1), re-run on clean ground -- does it survive the AOI?"
 job clean22 clean_geo_k5_single_ring3 \
-    scripts/train/train_control.sh "$C_CTRL_G5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_CTRL" \
+    scripts/train/train_control.sh "$C_CTRL_G5 $NEG_R3_1X $C_HYP" "$RES_C_CTRL" \
     "temporal-context control: what does the recurrence buy once background is scored?"
 job clean22 clean_geo_k10_convlstm_ring3 \
-    scripts/train/train_convlstm.sh "$C_G10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_G10" \
+    scripts/train/train_convlstm.sh "$C_G10 $NEG_R3_1X $C_HYP" "$RES_C_G10" \
     "k5 vs k10 on the geo axis, same negatives"
 job clean22 clean_temporal_k5_convlstm_ring3 \
-    scripts/train/train_convlstm.sh "$C_T5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_T5" \
+    scripts/train/train_convlstm.sh "$C_T5 $NEG_R3_1X $C_HYP" "$RES_C_T5" \
     "the temporal axis: train <2024, val <2025, test 2025+ -- the year shift, on the AOI"
 job clean22 clean_temporal_k10_convlstm_ring3 \
-    scripts/train/train_convlstm.sh "$C_T10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_T10" \
+    scripts/train/train_convlstm.sh "$C_T10 $NEG_R3_1X $C_HYP" "$RES_C_T10" \
     "k5 vs k10 there; val is 16 intfs / 4,735 positives, thin but no longer the old 6"
 # The control on BOTH axes, not just geo. Without it a "temporal context helps"
 # claim on the temporal axis has no baseline of its own: the geo control only
 # licenses the statement for geo-split data, and the two axes now differ in
 # training pool as well as in split rule.
 job clean22 clean_temporal_k5_single_ring3 \
-    scripts/train/train_control.sh "$C_CTRL_T5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_CTRL_T5" \
+    scripts/train/train_control.sh "$C_CTRL_T5 $NEG_R3_1X $C_HYP" "$RES_C_CTRL_T5" \
     "temporal-context control on the temporal axis -- the missing half of the geo control"
 
 # ---- the attention arms of the clean batch ----------------------------------
@@ -820,16 +881,16 @@ RES_C_HYBRID_G10="long-gpu 112   48  44:00"   # k=10 attention + recurrent state
 RES_C_TATTN_T10="long-gpu  128   48  44:00"   # k=10 attention, est peak 101G
 
 job clean22 clean_geo_k5_tattn_ring3 \
-    scripts/train/train_tattn.sh "$C_TATTN_G5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_G5" \
+    scripts/train/train_tattn.sh "$C_TATTN_G5 $NEG_R3_1X $C_HYP" "$RES_C_TATTN_G5" \
     "attention vs recurrence on geo, on clean ground and a precision-sensitive val set"
 job clean22 clean_geo_k5_tattn_hybrid_ring3 \
-    scripts/train/train_tattn.sh "$C_HYBRID_G5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_HYBRID_G5" \
+    scripts/train/train_tattn.sh "$C_HYBRID_G5 $NEG_R3_1X $C_HYP" "$RES_C_HYBRID_G5" \
     "the hybrid tied ConvLSTM on the old geo data -- does it still, once the AOI removes the sea?"
 job clean22 clean_temporal_k5_tattn_ring3 \
-    scripts/train/train_tattn.sh "$C_TATTN_T5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_T5" \
+    scripts/train/train_tattn.sh "$C_TATTN_T5 $NEG_R3_1X $C_HYP" "$RES_C_TATTN_T5" \
     "the artefact-suppression claim, tested where the year shift actually stresses it"
 job clean22 clean_temporal_k5_tattn_hybrid_ring3 \
-    scripts/train/train_tattn.sh "$C_HYBRID_T5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_HYBRID_T5" \
+    scripts/train/train_tattn.sh "$C_HYBRID_T5 $NEG_R3_1X $C_HYP" "$RES_C_HYBRID_T5" \
     "hybrid on the temporal axis: recurrence and attention together against the 2025+ test set"
 
 # The k=10 attention arms. Attention over a chain is the case where depth should
@@ -841,16 +902,23 @@ job clean22 clean_temporal_k5_tattn_hybrid_ring3 \
 # out because the geo axis already carries the tattn-vs-hybrid pair at k10 and
 # the temporal axis carries it at k5, so both contrasts exist once.
 job clean22 clean_geo_k10_tattn_ring3 \
-    scripts/train/train_tattn.sh "$C_TATTN_G10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_G10" \
+    scripts/train/train_tattn.sh "$C_TATTN_G10 $NEG_R3_1X $C_HYP" "$RES_C_TATTN_G10" \
     "attention at k=10 on geo: does a longer history buy what the k5 arm could not?"
 job clean22 clean_geo_k10_tattn_hybrid_ring3 \
-    scripts/train/train_tattn.sh "$C_HYBRID_G10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_HYBRID_G10" \
+    scripts/train/train_tattn.sh "$C_HYBRID_G10 $NEG_R3_1X $C_HYP" "$RES_C_HYBRID_G10" \
     "the tattn-vs-hybrid contrast at k=10, against clean_geo_k10_convlstm_ring3"
 job clean22 clean_temporal_k10_tattn_ring3 \
-    scripts/train/train_tattn.sh "$C_TATTN_T10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_T10" \
+    scripts/train/train_tattn.sh "$C_TATTN_T10 $NEG_R3_1X $C_HYP" "$RES_C_TATTN_T10" \
     "attention at k=10 under the year shift -- the longest history against the 2025+ test set"
 
 # ---- training: the attention that actually selects (kind: attnfix) ----------
+# DONE 2026-08-20. All five finished (768296-768300); four early-stopped on
+# patience 40. They are left listed rather than commented out because the
+# `attnpos` batch below re-runs them and the two must stay readable side by
+# side -- but DO NOT RESUBMIT THIS KIND: it is ~30 GPU-hours of completed work,
+# and it would now train against a positives-only val set anyway, i.e. it would
+# silently become attnpos with the wrong job names. Use `attnpos`.
+#
 # Every tattn run above this line trained a DEAD attention. Measured on all 15
 # checkpoints: the weights came out at exactly 1/T, so the model averaged its
 # history instead of choosing from it, and the ~1M attention parameters were
@@ -899,25 +967,184 @@ C_FIX_T5="$C_TATTN_T5 CONTRAST=yes QK_NORM=yes"
 C_PREFIX_G10="$C_TATTN_G10 CONTRAST=no QK_NORM=no"
 
 job attnfix clean_geo_k10_tattn_fixed_ring3 \
-    scripts/train/train_tattn.sh "$C_FIX_G10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_G10" \
+    scripts/train/train_tattn.sh "$C_FIX_G10 $NEG_R3_1X $C_HYP" "$RES_C_TATTN_G10" \
     "the headline: does attention that SELECTS beat the averaging it was doing, at the depth where it should matter most"
 job attnfix clean_geo_k10_tattn_prefix_ring3 \
-    scripts/train/train_tattn.sh "$C_PREFIX_G10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_G10" \
+    scripts/train/train_tattn.sh "$C_PREFIX_G10 $NEG_R3_1X $C_HYP" "$RES_C_TATTN_G10" \
     "the paired control: the OLD dead-attention architecture from THIS code, so the pair differs in the fix and nothing else"
 job attnfix clean_geo_k5_tattn_fixed_ring3 \
-    scripts/train/train_tattn.sh "$C_FIX_G5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_G5" \
+    scripts/train/train_tattn.sh "$C_FIX_G5 $NEG_R3_1X $C_HYP" "$RES_C_TATTN_G5" \
     "k5 with selection: k10 beat k5 while merely averaging, so the depth ordering may not survive the fix"
 job attnfix clean_geo_k10_tattn_hybrid_fixed_ring3 \
-    scripts/train/train_tattn.sh "$C_FIX_HYBRID_G10 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_HYBRID_G10" \
+    scripts/train/train_tattn.sh "$C_FIX_HYBRID_G10 $NEG_R3_1X $C_HYP" "$RES_C_HYBRID_G10" \
     "the best clean22 arm (0.7378), re-run with working selection"
 job attnfix clean_temporal_k5_tattn_fixed_ring3 \
-    scripts/train/train_tattn.sh "$C_FIX_T5 $NEG_R3_1X $VALNEG $C_HYP" "$RES_C_TATTN_T5" \
+    scripts/train/train_tattn.sh "$C_FIX_T5 $NEG_R3_1X $C_HYP" "$RES_C_TATTN_T5" \
     "the artefact-suppression claim on the axis that stresses it -- and the claim was always about selecting frames, never averaging them"
 
+# ---- training: the attnfix five, positives-only val (kind: attnpos) ---------
+# THE SAME FIVE RUNS AS attnfix, with the validation negatives gone. Nothing
+# else moves: same partitions, same architectures, same ring-3 1:1 training
+# negatives, same LR/epochs/patience/seed. Only the val set changes, and with
+# it which checkpoint gets kept.
+#
+# WHY RERUN RATHER THAN RESCORE -- the same argument the valneg batch made in
+# the opposite direction, and it is the whole reason this costs GPU hours.
+# best.pt is selected on val/dice, and val/dice is also what drives the plateau
+# schedule and early stopping. Every one of the five below was SELECTED on an
+# inflated curve, so re-scoring those weights would answer a different question
+# than "what would this experiment have produced under the protocol we now
+# use". Four of the five never reached epoch 100 either: they early-stopped on
+# patience 40 against that curve, so even the run LENGTH is a product of it.
+#
+# WHAT THE ORIGINALS DID (all five finished; four early-stopped):
+#
+#   run                      best val/dice @ epoch   stopped   measured
+#   geo_k10  fixed            0.7331 @ 34             74/100    246 s/epoch
+#   geo_k10  prefix (control) 0.7271 @ 46             86/100    232 s/epoch
+#   geo_k10  hybrid fixed     0.7442 @ 56             96/100    292 s/epoch
+#   geo_k5   fixed            0.7233 @ 48             88/100    374 s/epoch
+#   temporal_k5 fixed         0.7957 @ 75            100/100    416 s/epoch
+#
+# PLUS FOUR TEMPORAL ARMS THAT HAVE NO POSITIVES-ONLY TWIN YET. The temporal
+# axis (train 2019-22 -> val 2023-24) is the one that stresses the artefact-
+# suppression claim, and attnfix covered it with a single k5 run. These four
+# complete it: {attention, hybrid} x {k5, k10} for the tattn family, plus the
+# ConvLSTM at k10 as the non-attention reference on the same axis.
+#
+#   clean_temporal_k5_convlstm_ring3_valpos IS ALREADY DONE -- LSF 664204, the
+#   full 100 epochs on 2026-08-19, positives-only. It is NOT re-queued here.
+#   That run is the ConvLSTM half of the k5 reference; this batch adds k10.
+#
+# Those dice figures are inflated by roughly (1 + dice_on_positives)/2 -- an
+# empty prediction on an empty mask scores dice 1.0 -- so expect this batch to
+# land near 0.63-0.66 on the same models. THAT IS NOT A REGRESSION, it is the
+# padding coming off. The comparison that means anything is attnpos against
+# valpos (both positives-only) and, above all, object-level F1 from run_eval.sh.
+#
+# WHAT THIS COSTS, unchanged from the valpos batch: positives-only validation
+# goes back to selecting a checkpoint that cannot see a false positive on
+# background, so expect more recall-heavy weights than the attnfix twins. The
+# object-level eval is what absorbs that, not this curve. Read val/F1 rather
+# than val/dice while the runs are live -- it is pooled over raw pixel counts
+# (evaluate.py:300-306), so it is negative-aware on both protocols and is the
+# one column that IS directly comparable to the attnfix runs.
+#
+# NO PAIRED CONTROL IN THIS BATCH, deliberately. attnfix already ran the
+# fixed/prefix pair against each other on ONE protocol (0.7331 vs 0.7271, both
+# with validation negatives), so "does the fix beat dead attention" is already
+# answered and does not need paying for twice. What is NOT answered there is
+# what those architectures produce when the curve that selects best.pt is not
+# padded, and that is all this batch is for. The consequence to keep in mind:
+# nothing in attnpos isolates the attention fix on its own -- for that
+# comparison, read the attnfix pair.
+#
+# STILL CHECK THE ATTENTION SELECTED, per run, before believing any of it:
+#     sinkholes attention-probe --model outputs/<run>/checkpoints/best.pt \
+#       --partition assets/partition_geo_k10_clean.json --split val \
+#       --patches_dir "$DATA/patches" --control_lookback 10 \
+#       --require_selectivity 0.9
+#
+# THE THREE NEW CONFIGS. C_TATTN_T10 already existed; the temporal k10 hybrid
+# did not, because clean22 never ran one. It is the geo k10 hybrid's config on
+# the temporal partition and nothing else.
+C_HYBRID_T10="PARTITION=$TEMP_K10_CLEAN K_PREVS=10 POS_W=4 FUSE_SKIPS=0 RECURRENCE=convlstm HIDDEN=256"
+C_FIX_T10="$C_TATTN_T10 CONTRAST=yes QK_NORM=yes"
+C_FIX_HYBRID_T5="$C_HYBRID_T5 CONTRAST=yes QK_NORM=yes"
+C_FIX_HYBRID_T10="$C_HYBRID_T10 CONTRAST=yes QK_NORM=yes"
+
+# RESOURCES ARE MEASURED wherever a twin exists -- LSF Max Memory and the
+# trainer's own peak-VRAM line, per job. Host GB is the measured peak +~25%,
+# and walltime the measured seconds-per-epoch carried to the FULL 100 epochs
+# (none of these may early-stop where its twin did) with ~60% on top. Dropping
+# the validation negatives cuts the val set in half and validation runs at
+# batch size 1, so every walltime here is an upper bound -- measured on the two
+# runs that exist in both protocols, temporal_k5 convlstm went 513 -> 331
+# s/epoch, a 35% saving, purely from losing the negatives.
+#
+#   run                          LSF Max Memory / VRAM reserved / s per epoch
+#   geo_k10  fixed        768296  85187 MB   44.4 GiB   246   (attnfix)
+#   geo_k10  hybrid       768299  83998 MB   45.1 GiB   292   (attnfix)
+#   geo_k5   fixed        768298  55832 MB   25.8 GiB   374   (attnfix)
+#   temporal_k5 fixed     768300  69437 MB   25.8 GiB   416   (attnfix)
+#   temporal_k10 convlstm 372690  98729 MB   44.4 GiB   365   (clean22)
+#   temporal_k5 convlstm  664204  64888 MB   25.8 GiB   331   (valpos, pos-only)
+#
+# The two temporal arms with no twin at all are derived, not measured, and the
+# derivation is stated so it can be checked: the hybrid costs ~1.19x the plain
+# attention per epoch (292/246, measured on geo_k10), and temporal k10 costs
+# ~0.71x temporal k5 per epoch (365/513, measured on the clean22 ConvLSTMs --
+# k10 has a smaller pool). Host memory for a k10 temporal arm is taken from the
+# k10 ConvLSTM's measured 96.4 GB, since host RAM is dominated by the patch
+# grids in memory rather than by the model.
+#
+# gmem: 36G on the k5 arms, 48G on the k10 arms, and the split is forced by
+# measurement rather than chosen. Across all 15 runs that have ever reported a
+# peak, the two depths sit in two tight bands and nothing straddles them:
+#
+#   k5   (convlstm, tattn, hybrid)   25.7 - 25.8 GiB reserved
+#   k10  (convlstm, tattn, hybrid)   44.1 - 45.1 GiB reserved
+#
+# VRAM here is set by batch size and depth, NOT by pool size, which is why geo
+# and temporal arms of the same k measure the same and why the temporal k10
+# arms are sized off the geo k10 measurements without apology.
+#
+# The k5 arms were dropped 48G -> 36G on 2026-08-20 to stop them queueing for a
+# large-memory card they do not need: 25.8 GiB leaves 10 GiB of headroom at
+# 36G, and a 36G card is a far commoner slot. THE K10 ARMS CANNOT FOLLOW. At
+# 44-45 GiB measured they are 8-9 GiB OVER a 36G card, so a 36G request does
+# not make them schedule sooner -- it makes them wait for a slot and then die
+# on CUDA OOM partway through epoch 1. If they must fit 36G, the lever is
+# BATCH=64 (halves the activation memory), and that changes the experiment:
+# batch size is part of the strict resume fingerprint and moves the results.
+#
+#                            queue     hostGB vramG walltime
+RES_A_G10="long-gpu          104   48  11:00"   # 83.2 GB / 44.4 GiB / 246 s/ep
+RES_A_HYBRID_G10="long-gpu   104   48  13:00"   # 82.0 GB / 45.1 GiB / 292 s/ep
+RES_A_G5="long-gpu            72   36  17:00"   # 54.5 GB / 25.8 GiB / 374 s/ep
+RES_A_T5="long-gpu            88   36  19:00"   # 67.8 GB / 25.7 GiB / 416 s/ep
+RES_A_HYBRID_T5="long-gpu     88   36  22:00"   # 67.8 GB meas / 26.2 GiB (geo twin)
+RES_A_T10="long-gpu          120   48  14:00"   # 96.4 GB meas / ~296 s/ep est
+RES_A_HYBRID_T10="long-gpu   120   48  16:00"   # 96.4 GB meas / ~352 s/ep est
+RES_A_CONV_T10="long-gpu     120   48  17:00"   # 96.4 GB / 44.4 GiB / 365 s/ep
+
+# Submit order: the geo arms first because they are the axis the project is
+# steering toward and they are the cheapest, then the temporal block, longest
+# job last so it is not holding a slot while the readable ones queue behind it.
+job attnpos clean_geo_k10_tattn_fixed_ring3_valpos \
+    scripts/train/train_tattn.sh "$C_FIX_G10 $NEG_R3_1X $C_HYP" "$RES_A_G10" \
+    "the headline, on the protocol we keep: does selection beat averaging when the curve is not padded? (twin: 0.7331 @34, stopped 74)"
+job attnpos clean_geo_k5_tattn_fixed_ring3_valpos \
+    scripts/train/train_tattn.sh "$C_FIX_G5 $NEG_R3_1X $C_HYP" "$RES_A_G5" \
+    "k5 with selection: does the k10-over-k5 ordering survive both the fix and the protocol change? (twin: 0.7233 @48, stopped 88)"
+job attnpos clean_geo_k10_tattn_hybrid_fixed_ring3_valpos \
+    scripts/train/train_tattn.sh "$C_FIX_HYBRID_G10 $NEG_R3_1X $C_HYP" "$RES_A_HYBRID_G10" \
+    "best attnfix arm (0.7442 @56, stopped 96) -- and the arm whose checkpoint selection had the most room to move"
+job attnpos clean_temporal_k5_tattn_fixed_ring3_valpos \
+    scripts/train/train_tattn.sh "$C_FIX_T5 $NEG_R3_1X $C_HYP" "$RES_A_T5" \
+    "the artefact-suppression claim on the axis that stresses it; the only twin that ran all 100 epochs (0.7957 @75)"
+job attnpos clean_temporal_k10_tattn_fixed_ring3_valpos \
+    scripts/train/train_tattn.sh "$C_FIX_T10 $NEG_R3_1X $C_HYP" "$RES_A_T10" \
+    "NEW: does more history help on the axis where history is the whole claim? k5 vs k10 under working attention, temporal side"
+job attnpos clean_temporal_k5_tattn_hybrid_fixed_ring3_valpos \
+    scripts/train/train_tattn.sh "$C_FIX_HYBRID_T5 $NEG_R3_1X $C_HYP" "$RES_A_HYBRID_T5" \
+    "NEW: the hybrid carried geo; this is whether recurrence-plus-attention also carries the temporal axis at k5"
+job attnpos clean_temporal_k10_tattn_hybrid_fixed_ring3_valpos \
+    scripts/train/train_tattn.sh "$C_FIX_HYBRID_T10 $NEG_R3_1X $C_HYP" "$RES_A_HYBRID_T10" \
+    "NEW: completes the temporal 2x2 {attention, hybrid} x {k5, k10} -- a config clean22 never ran at all"
+job attnpos clean_temporal_k10_convlstm_ring3_valpos \
+    scripts/train/train_convlstm.sh "$C_T10 $NEG_R3_1X $C_HYP" "$RES_A_CONV_T10" \
+    "NEW: the non-attention reference at k10, so the temporal attention numbers are not read without one (k5's twin, 664204, is already done)"
+
 # ---- training: negatives in TRAIN ONLY (kind: valpos) -----------------------
-# Six of the fourteen clean22 runs, resubmitted with ONE change: $VALNEG is
-# dropped, so RING_NEGS=yes still puts background patches in TRAINING and the
-# validation split goes back to positives only.
+# Six of the fourteen clean22 runs, resubmitted with ONE change: the validation
+# negatives are dropped, so RING_NEGS=yes still puts background patches in
+# TRAINING and the validation split goes back to positives only.
+#
+# AS OF 2026-08-20 THIS IS NO LONGER A VARIANT -- it is what every job in this
+# file does, since --add_val_negatives was removed from all of them. The batch
+# is kept under its own name because it is the six runs that ANSWER the
+# question; the reasoning below is why the flag went away at all.
 #
 # WHY. clean22's val/dice landed at 0.72-0.80 against the 0.64-0.66 every
 # earlier batch produced, and that jump is an artefact of the metric, not a
@@ -1001,6 +1228,182 @@ job valpos clean_geo_k10_tattn_hybrid_ring3_valpos \
 job valpos clean_temporal_k5_convlstm_ring3_valpos \
     scripts/train/train_convlstm.sh "$C_T5 $NEG_R3_1X $C_HYP" "$RES_V_T5" \
     "one temporal arm so the geo five are not read without a cross-axis reference"
+
+# ---- training: the 2019-2022 archive (kind: pre23) --------------------------
+# ELEVEN RUNS on assets/partition_*_pre2023.json, generated 2026-08-20 -- six
+# ConvLSTM/control arms here and five attention arms in the block below. The
+# same generator, cut, AOI, seed and val share as the clean22 partitions -- ONE
+# factor differs: the archive stops at 2022-12-31.
+#
+# WHY. Scene-level false positives are concentrated in the post-2022
+# interferograms. docs/PLAN_CLEAN_BENCHMARK.md section 1 measured it on
+# geo_k5_convlstm_ring3_3x: object-level precision 0.91 on 2021 scenes, 0.44 on
+# 2024 and 2025, while recall holds at 0.91-0.93. The model finds the same
+# objects; the newer BACKGROUND generates the detections. Section 0a kept those
+# years anyway and recorded the mechanism as unexplained and the risk as
+# knowingly accepted. This batch is the other arm of that decision: train and
+# score with the suspect years absent, so "how much of the false-positive rate
+# is the newer archive" becomes a measurement instead of an argument.
+#
+# WHAT IT IS NOT. It is not a replacement for clean22 and its numbers do not
+# supersede anything. Read a pre23 run against its clean22 TWIN -- same
+# architecture, same negatives, same hyper-parameters -- and the difference is
+# the archive. Read one against a clean22 arm of a different architecture and
+# you have confounded the two.
+#
+# THE HOLD-OUT IS SMALLER, on both axes, and that is the price of the design:
+#
+#            train intfs / AOI positives      val            test
+#   geo_k5        90 / 21,432              24 / 2,576     34 / 3,686
+#   geo_k10       71 / 16,690              15 / 1,462     22 / 2,377
+#   temp_k5       77 / 24,817              15 / 6,078     48 / 5,652
+#   temp_k10      50 / 16,409               6 / 2,632     35 / 3,890
+#
+# TEMPORAL k10 VAL IS 6 INTERFEROGRAMS. That is the risk PLAN section 11 flags
+# as the plan's biggest, and the padding that used to hide it is gone --
+# --add_val_negatives was removed on 2026-08-20. Six scenes drive the plateau
+# schedule, early stopping and best.pt selection for that arm, so treat its
+# val/dice curve as noise and judge it at object level like everything else.
+# The documented fallback, if it proves unusable, is to let VAL-ONLY chains
+# reach back into train (PLAN section 5), which the generator does not do today.
+#
+# TEMPORAL BOUNDS ARE NOT THE clean22 ONES. 20240101/20250101 put every val and
+# test scene in years this archive does not contain. These files use
+# 20210101/20210701 -- train 2019-2020, val 2021H1, test 2021H2 onward -- which
+# is the layout PLAN section 5 chose from a sweep of all 320 viable monthly
+# boundary pairs, back when the archive ended in 2022. It is the right layout
+# for THIS archive and the wrong one for the full archive; section 5a explains
+# why, and the two must not be swapped.
+PRE23_G5=assets/partition_geo_k5_pre2023.json
+PRE23_G10=assets/partition_geo_k10_pre2023.json
+PRE23_T5=assets/partition_temporal_k5_pre2023.json
+PRE23_T10=assets/partition_temporal_k10_pre2023.json
+
+# $C_HYP verbatim from clean22 (LR=1e-5 EPOCHS=100 PATIENCE=40). Do not give
+# this batch hyper-parameters of its own: the comparison it exists to make is
+# pre23 against clean22, and a second moving factor destroys it.
+P_G5="PARTITION=$PRE23_G5  K_PREVS=5  POS_W=4"
+P_G10="PARTITION=$PRE23_G10 K_PREVS=10 POS_W=4"
+P_T5="PARTITION=$PRE23_T5  K_PREVS=5  POS_W=4"
+P_T10="PARTITION=$PRE23_T10 K_PREVS=10 POS_W=4"
+P_CTRL_G5="ARCH=single PARTITION=$PRE23_G5 K_PREVS=5 POS_W=4"
+P_CTRL_T5="ARCH=single PARTITION=$PRE23_T5 K_PREVS=5 POS_W=4"
+# CONTRAST/QK_NORM are the train_tattn.sh defaults since the attention fix, but
+# they are named here anyway: they are STRICT resume keys, and an arm whose
+# attention silently reverted would look like an archive effect.
+#
+# RECURRENCE=none is PURE attention -- the current frame attends over its own
+# history and there is no recurrent state. RECURRENCE=convlstm is the hybrid,
+# which carries both. Both are needed: the hybrid alone cannot separate "the
+# attention suppressed the artefact" from "the recurrence did", and separating
+# them is the whole reason attention is in this batch (see the block below).
+P_TATTN_G5="PARTITION=$PRE23_G5 K_PREVS=5 POS_W=4 FUSE_SKIPS=0 RECURRENCE=none CONTRAST=yes QK_NORM=yes"
+P_TATTN_G10="PARTITION=$PRE23_G10 K_PREVS=10 POS_W=4 FUSE_SKIPS=0 RECURRENCE=none CONTRAST=yes QK_NORM=yes"
+P_TATTN_T5="PARTITION=$PRE23_T5 K_PREVS=5 POS_W=4 FUSE_SKIPS=0 RECURRENCE=none CONTRAST=yes QK_NORM=yes"
+P_TATTN_T10="PARTITION=$PRE23_T10 K_PREVS=10 POS_W=4 FUSE_SKIPS=0 RECURRENCE=none CONTRAST=yes QK_NORM=yes"
+P_HYBRID_G10="PARTITION=$PRE23_G10 K_PREVS=10 POS_W=4 FUSE_SKIPS=0 RECURRENCE=convlstm HIDDEN=256 CONTRAST=yes QK_NORM=yes"
+
+# RESOURCES are the clean22 rungs SCALED BY THE TRAINING POOL, since host memory
+# tracks stored samples and epoch time tracks them almost linearly. Pool ratios
+# against the clean22 twin: geo_k5 0.66, geo_k10 0.61, temp_k5 0.58, temp_k10
+# 0.50. Applied to clean22's estimated peaks, then +25% headroom, then rounded
+# up to a rung. VRAM does NOT scale with pool size and is copied unchanged.
+#
+#                     queue    hostGB vramG walltime   est peak
+RES_P_G5="long-gpu       56   36  20:00"   # 39G  (clean22: 59G / 28:00)
+RES_P_G10="long-gpu      72   48  19:00"   # 52G  (clean22: 85G / 28:00)
+RES_P_T5="long-gpu       64   36  22:00"   # 44G  (clean22: 77G / 35:00)
+RES_P_T10="long-gpu      72   48  18:00"   # 51G  (clean22: 101G / 32:00)
+RES_P_CTRL_G5="long-gpu   24   24  10:00"  # 11G  (clean22: 17G / 13:00)
+RES_P_CTRL_T5="long-gpu   24   24   9:00"  # 13G  (clean22: 22G / 13:00)
+# The attention rungs. Host memory is a little above the ConvLSTM twin at the
+# same partition for the same reason it is in clean22 (88 vs 80 on geo_k5);
+# VRAM follows clean22's split -- 36G for pure attention at k5, 48G at k10 and
+# for anything carrying the recurrent state.
+RES_P_TATTN_G5="long-gpu    64   36  25:00"  # 39G  (clean22: 88G / 38:00)
+RES_P_TATTN_G10="long-gpu   72   48  23:00"  # 52G  (clean22: 112G / 38:00)
+RES_P_TATTN_T5="long-gpu    64   36  26:00"  # 44G  (clean22: 104G / 44:00)
+RES_P_TATTN_T10="long-gpu   72   48  22:00"  # 51G  (clean22: 128G / 44:00)
+RES_P_HYBRID_G10="long-gpu  72   48  29:00"  # 52G  (clean22: 85G / 44:00)
+#
+# RES_P_HYBRID_G10 asks 29:00 and RES_P_TATTN_T5 26:00, over the 24:00 that this
+# file warns may be long-gpu's hard cap. clean22 and attnfix both had accepted
+# requests above it (44:00, 51:00), so the cap is higher than 24 h in practice.
+# If one bounces, lower its -W here rather than splitting the run: it resumes
+# from resume.pt with
+#     RESUME=<run dir> bsub -J <same name> < scripts/train/train_tattn.sh
+
+# Order matters, the same rule as clean22: the geo_k5 ConvLSTM anchor first, so
+# a queue that clears one job clears the interpretable one.
+job pre23 pre23_geo_k5_convlstm_ring3 \
+    scripts/train/train_convlstm.sh "$P_G5 $NEG_R3_1X $C_HYP" "$RES_P_G5" \
+    "THE anchor: the exact clean_geo_k5_convlstm_ring3 config with 2023+ removed from the archive"
+job pre23 pre23_geo_k10_convlstm_ring3 \
+    scripts/train/train_convlstm.sh "$P_G10 $NEG_R3_1X $C_HYP" "$RES_P_G10" \
+    "k5 vs k10 on the geo axis, so the depth ordering can be read on this archive too"
+job pre23 pre23_geo_k5_single_ring3 \
+    scripts/train/train_control.sh "$P_CTRL_G5 $NEG_R3_1X $C_HYP" "$RES_P_CTRL_G5" \
+    "the temporal-context control: if the newer years were the false positives, the recurrence should buy LESS here, not more"
+job pre23 pre23_temporal_k5_convlstm_ring3 \
+    scripts/train/train_convlstm.sh "$P_T5 $NEG_R3_1X $C_HYP" "$RES_P_T5" \
+    "the temporal axis inside the old archive: train 2019-20, val 2021H1, test 2021H2+ -- a year shift with no suspect years in it"
+job pre23 pre23_temporal_k10_convlstm_ring3 \
+    scripts/train/train_convlstm.sh "$P_T10 $NEG_R3_1X $C_HYP" "$RES_P_T10" \
+    "k5 vs k10 there. Val is SIX interferograms: read this arm at object level only"
+job pre23 pre23_temporal_k5_single_ring3 \
+    scripts/train/train_control.sh "$P_CTRL_T5 $NEG_R3_1X $C_HYP" "$RES_P_CTRL_T5" \
+    "the control on the temporal axis, the missing half of the geo control -- clean22 carries both, so this batch must too"
+
+# ---- the attention arms of the pre23 batch ----------------------------------
+# FIVE ARMS, and they are the point of the batch rather than an extra.
+#
+# Attention's hypothesis IS the hypothesis this batch tests. Atmospheric and
+# decorrelation artefacts are temporally inconsistent while subsidence is
+# persistent, so a learned weighted average over the chain should be a matched
+# filter for the signal and a suppressor for the noise -- i.e. a PRECISION
+# claim, about exactly the false positives that section 1 measured piling up in
+# the post-2022 scenes. If the newer years' background is what the ConvLSTM was
+# flagging, attention is the architecture that should care most about their
+# removal, in either direction: it should either gain the least (it was already
+# suppressing them) or the most (it never could).
+#
+# PURE ATTENTION AT ALL FOUR CORNERS, plus the one hybrid. RECURRENCE=none is
+# the arm that isolates the claim; the hybrid carries a ConvLSTM as well, so on
+# its own it cannot say which half did the work. clean22 shipped both and its
+# top two arms were hybrids (0.7378 geo_k10, 0.7350 geo_k5) with pure attention
+# a few thousandths behind (0.7271, 0.7246) -- a margin small enough that the
+# question of which mechanism earns it is still open, and small enough that
+# reading it off one hybrid would be reading noise.
+#
+# Depth matters most here, which is why k10 is not skipped on either axis: a
+# longer history is more evidence for what is temporally persistent and what is
+# not, and that is the whole artefact-suppression argument. On the temporal
+# axis, note that pre23_temporal_k10_tattn_ring3 selects its checkpoint on SIX
+# validation interferograms (see the block above) -- queue it, but settle it
+# with scripts/eval/run_eval.sh, never with its val curve.
+#
+# All five at FUSE_SKIPS=0, matching every clean22 and attnfix arm they pair
+# with. FUSE_SKIPS=2 is one env var away and is deliberately not queued.
+#
+# Absent for symmetry: the temporal hybrids and the geo_k5 hybrid. Each is one
+# `job` line away. Left out because the batch already carries pure attention at
+# every corner and one hybrid to anchor it against clean22's best arm; adding
+# the other three hybrids is a ~90 h decision, not a free one.
+job pre23 pre23_geo_k5_tattn_ring3 \
+    scripts/train/train_tattn.sh "$P_TATTN_G5 $NEG_R3_1X $C_HYP" "$RES_P_TATTN_G5" \
+    "pure attention on the geo anchor: the precision claim, on an archive with the suspect years removed"
+job pre23 pre23_geo_k10_tattn_ring3 \
+    scripts/train/train_tattn.sh "$P_TATTN_G10 $NEG_R3_1X $C_HYP" "$RES_P_TATTN_G10" \
+    "the same at k=10, where a longer history is more evidence for what is temporally persistent"
+job pre23 pre23_geo_k10_tattn_hybrid_ring3 \
+    scripts/train/train_tattn.sh "$P_HYBRID_G10 $NEG_R3_1X $C_HYP" "$RES_P_HYBRID_G10" \
+    "the best clean22 arm (obj F1 0.7378) on the pre-2023 archive -- and the hybrid half of the k10 attention-vs-hybrid pair"
+job pre23 pre23_temporal_k5_tattn_ring3 \
+    scripts/train/train_tattn.sh "$P_TATTN_T5 $NEG_R3_1X $C_HYP" "$RES_P_TATTN_T5" \
+    "artefact suppression on the axis that stresses it, with no post-2022 scene on either side of the boundary"
+job pre23 pre23_temporal_k10_tattn_ring3 \
+    scripts/train/train_tattn.sh "$P_TATTN_T10 $NEG_R3_1X $C_HYP" "$RES_P_TATTN_T10" \
+    "the longest history under the year shift. SIX val interferograms: judge it at object level only"
 
 # ---- evaluation: the 2026-08-10 batch (kind: eval2) -------------------------
 # THIS IS THE BATCH THAT SETTLES 2026-08-10. Its own kind so it can be sent
@@ -1253,14 +1656,31 @@ RES_EVAL_S4_G10="long-gpu   208   48  12:00"   # est 161.5 GiB (was 144 -- died 
 RES_EVAL_S4_T5="long-gpu    160   36  16:00"   # UNMEASURED: geo k5 + larger AOI residual
 RES_EVAL_S4_CTRL="long-gpu   48   24   6:00"   # measured 27.8 GiB over many scenes (was 40)
 
-CLEAN_G5_CONVLSTM=outputs/2026-08-18/clean_geo_k5_convlstm_ring3_2026-08-18_14h56_lsf_372682
-CLEAN_G5_CONVLSTM_3X=outputs/2026-08-18/clean_geo_k5_convlstm_ring3_3x_2026-08-18_14h56_lsf_372683
-CLEAN_G5_SINGLE=outputs/2026-08-18/clean_geo_k5_single_ring3_2026-08-18_14h56_lsf_372686
-CLEAN_G5_TATTN=outputs/2026-08-18/clean_geo_k5_tattn_ring3_2026-08-18_14h56_lsf_372694
-CLEAN_G5_HYBRID=outputs/2026-08-18/clean_geo_k5_tattn_hybrid_ring3_2026-08-18_14h56_lsf_372696
-CLEAN_G10_HYBRID=outputs/2026-08-18/clean_geo_k10_tattn_hybrid_ring3_2026-08-18_14h56_lsf_372702
-CLEAN_T5_CONVLSTM=outputs/2026-08-18/clean_temporal_k5_convlstm_ring3_2026-08-18_14h56_lsf_372689
-CLEAN_T5_SINGLE=outputs/2026-08-18/clean_temporal_k5_single_ring3_2026-08-18_14h56_lsf_372693
+# RETIRED 2026-08-20 -- NONE OF THE EIGHT PATHS BELOW STILL RESOLVE TO WEIGHTS.
+# The whole 2026-08-18 batch validated against negatives (reporter.log: "Val
+# scored on N positive + N negative"), so best.pt was selected on a curve that
+# scores an empty prediction on an empty mask as dice 1.0. Those five run
+# directories keep results.csv, curves.png, logs/ and validation/; their
+# checkpoints were deleted. The other three (_372694, _372696, _372702) never
+# reached outputs/2026-08-18/ at all -- the clean22 tattn arms did not survive.
+#
+# Five of the eight WERE evaluated before the weights went, and those object
+# scores stand in outputs/predictions/clean_*/. Re-submitting this batch now
+# fails on a missing best.pt. Point it at positives-only runs instead --
+# outputs/2026-08-19/*_valpos -- and give those their own variables.
+# Renamed 2026-08-20 to carry the protocol: every clean22 arm validated against
+# negatives, so each surviving directory ends _valneg. These five resolve to a
+# run directory holding metrics ONLY -- the weights are gone.
+CLEAN_G5_CONVLSTM=outputs/2026-08-18/geo_k5_convlstm_ring3_valneg
+CLEAN_G5_CONVLSTM_3X=outputs/2026-08-18/geo_k5_convlstm_ring3_3x_valneg
+CLEAN_G5_SINGLE=outputs/2026-08-18/geo_k5_single_ring3_valneg
+CLEAN_T5_CONVLSTM=outputs/2026-08-18/temporal_k5_convlstm_ring3_valneg
+CLEAN_T5_SINGLE=outputs/2026-08-18/temporal_k5_single_ring3_valneg
+# These three never reached outputs/2026-08-18/ at all -- the clean22 tattn arms
+# did not survive, so there is no directory to rename and nothing to point at.
+CLEAN_G5_TATTN=outputs/2026-08-18/geo_k5_tattn_ring3_valneg                # MISSING
+CLEAN_G5_HYBRID=outputs/2026-08-18/geo_k5_tattn_hybrid_ring3_valneg        # MISSING
+CLEAN_G10_HYBRID=outputs/2026-08-18/geo_k10_tattn_hybrid_ring3_valneg      # MISSING
 
 # JOB_NAME names the OUTPUT DIRECTORY, separately from the LSF -J. outputs/README.md
 # fixes the convention at `scenes_geo` / `scenes_temporal` plus a suffix for a
@@ -1477,12 +1897,18 @@ job posonly posonly_t5_ring10 \
 WANT=all; SUBMIT=no; ONLY=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    train|tattn|control|valneg|clean22|valpos|attnfix|training|eval|eval2|eval3|eval4|eval5|posonly|blend|rescore|all) WANT="$1" ;;
+    train|tattn|control|clean22|valpos|attnfix|attnpos|pre23|training|eval|eval2|eval3|eval4|eval5|posonly|blend|rescore|all) WANT="$1" ;;
+    # Retired 2026-08-20 with negative validation itself. Rejected by name
+    # rather than left to select zero jobs, so the mistake is visible.
+    valneg)         echo "the 'valneg' batch is retired: validation is positives-only. See the retirement note above its section." >&2; exit 1 ;;
     --submit)       SUBMIT=yes ;;
     --only)         shift; [ $# -gt 0 ] || { echo "--only needs a value" >&2; exit 1; }
                     ONLY+=("$1") ;;
     --only=*)       ONLY+=("${1#--only=}") ;;
-    -h|--help)      sed -n '2,20p' "$0"; exit 0 ;;
+    # Print the whole usage block rather than a fixed line range: the range
+    # went stale every time a kind was added, and --help silently truncated
+    # mid-entry. The block ends at the --only paragraph.
+    -h|--help)      sed -n '2,/Combine with a kind to narrow within it\./p' "$0"; exit 0 ;;
     *)              echo "unknown argument '$1'" >&2; exit 1 ;;
   esac
   shift

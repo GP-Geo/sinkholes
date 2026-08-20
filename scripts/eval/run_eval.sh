@@ -100,6 +100,18 @@ RECON_TH="${RECON_TH:-0.25}"  # threshold eval-scenes writes _pred_th/polygons a
                             # probability. It does NOT affect the metrics --
                             # eval-outputs re-thresholds the saved confidence
                             # map itself -- only the shapefiles from stage 1.
+MIN_POS="${MIN_POS:-150}"   # SCENE GATE: skip interferograms with this many
+                            # positive patches or fewer (strictly more is kept).
+                            # Thin scenes make the object-level mean per-scene
+                            # precision/recall noisy -- every scene carries equal
+                            # weight, so one miss on a 4-positive scene moves its
+                            # recall by 0.25. The count is nonz_num, which is
+                            # WHOLE-SCENE and is NOT restricted to the AOI window.
+                            # 0 disables. CHANGES THE SCENE LIST, so a number
+                            # produced with it is a mean over fewer scenes than
+                            # any eval run before 2026-08-20: on geo_k10 it drops
+                            # val 23->17 and test 35->26.
+
 OL_TH="${OL_TH:-0.7}"       # object-level overlap threshold (eval-outputs)
 BUFFER="${BUFFER:-5}"       # object-matching buffer, pixels
 BLEND="${BLEND:-none}"      # none | hann -- how overlapping tile predictions are
@@ -287,6 +299,7 @@ python -m sinkholes eval-scenes \
   ${AOI_FLAGS[@]+"${AOI_FLAGS[@]}"} \
   ${SCENE_PROTO_FLAGS[@]+"${SCENE_PROTO_FLAGS[@]}"} \
   --add_lidar_mask \
+  --min_positives "$MIN_POS" \
   --save_confidence --merge_polygs \
   --job_name "$JOB" --output_dir "$OUTROOT"
 

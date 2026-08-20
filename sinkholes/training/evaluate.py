@@ -107,6 +107,13 @@ def object_level_evaluate(
         intersect_precision.append(min(precision_i, 1.0))
 
     batch_gt_area = float(np.sum(patch_gt_areas))
+    if batch_gt_area == 0.0:
+        # Nothing to score against: every object-level figure here is 0/0. NaN
+        # is the honest answer -- returning 0.0 would read as "the model found
+        # nothing", and 1.0 as "it found everything", and callers aggregating
+        # these must drop the scene rather than average it in. Said explicitly
+        # so it is a decision rather than a divide-by-zero warning.
+        return float("nan"), float("nan"), batch_gt_area, feature_lists
     ol_recall = _round(np.sum(np.array(intersect_recall) * np.array(patch_gt_areas)) / batch_gt_area)
     ol_precision = _round(np.sum(np.array(intersect_precision) * np.array(patch_gt_areas)) / batch_gt_area)
     return ol_recall, ol_precision, batch_gt_area, feature_lists
