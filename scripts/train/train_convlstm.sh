@@ -42,7 +42,15 @@ LR="${LR:-1e-6}"
 SCHEDULE="${SCHEDULE:-plateau}"           # plateau | cosine
 EPOCHS="${EPOCHS:-60}"
 BATCH="${BATCH:-128}"
-PATIENCE="${PATIENCE:-20}"
+PATIENCE="${PATIENCE:-20}"                # early stop; 0 = off (reporter.py:257)
+# plateau: epochs without val/dice improvement before the LR is cut. 5 is the
+# code default (train.py:259) and what EVERY run before 2026-09-03 used, since
+# this template did not expose the knob at all. train.py argues for keeping it
+# short -- on the k10split run the first cut is what broke a five-epoch plateau.
+# Raise it when a run is dying at a floored LR with epochs left to spend, and
+# say so in the run's row: it is an ADVISORY resume key (resume.py:88), so a
+# resume will report the change rather than refuse it.
+LR_PATIENCE="${LR_PATIENCE:-5}"
 
 # --- negative sampling ------------------------------------------------------
 # Positives-only training (--nonz_only, the code default and what every run
@@ -132,6 +140,7 @@ python -m sinkholes train \
   --batch_size "$BATCH" \
   --learning-rate "$LR" \
   --lr_schedule "$SCHEDULE" \
+  --lr_patience "$LR_PATIENCE" \
   --patches_dir /home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/patches \
   --partition_mode preset_by_intf \
   --partition_file "$PARTITION" \
