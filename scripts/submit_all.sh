@@ -175,6 +175,30 @@ job ampfix ampfix_ctx50_t5_convlstm_ring3_30e \
 # one allocation. Host memory is its 13G peak with headroom.
 RES_AMPFIX_SINGLE="long-gpu    24   24  12:00"   # 2m13s/epoch measured -> ~7h25m
 
+# THE NO-NEGATIVES TWIN OF THE 30e ARM, for reading the loss curve itself.
+# Identical to ampfix_ctx50_t5_convlstm_ring3_30e in every respect except
+# RING_NEGS=no, which drops --add_ring_negatives and leaves the train split
+# positives-only.
+#
+# THE ANSWER IS PARTLY KNOWN AND IT IS A TRAP. RESULTS.md 1 already measured
+# this on temporal_k5: baseline P 0.743 / R 0.451 / F1 0.561 against ring3's
+# 0.664 / 0.591 / 0.626. And on geo the ordering INVERTS between the two
+# metrics -- baseline takes the best dice (0.6558, 1st) and third F1, while
+# ring3 3:1 takes the worst dice (0.6386, last) and the best F1 (0.724, 1st).
+# So expect this arm to post a LOWER training loss and a BETTER dice while
+# being the WORSE detector. A lower loss here is not a better model; it is a
+# smaller, easier training set.
+#
+# WHY RUN IT ANYWAY: val is positives-only in both arms (VAL_NEGS defaults to
+# no), so val/dice stays directly comparable while train/loss does not -- and
+# the train/bce + train/dice columns are new. They say WHICH term the negatives
+# move, which none of the historical runs recorded. If the gap is nearly all
+# BCE, the negatives are costing background calibration; if it is the Dice
+# term, they are changing what the model is willing to predict at all.
+job ampfix ampfix_ctx50_t5_convlstm_base_30e \
+    scripts/train/train_convlstm.sh "$AMPFIX_T5 RING_NEGS=no $AMPFIX_CTX LR=1e-5 MOMENTUM=0.9 LR_PATIENCE=5 EPOCHS=30 PATIENCE=0" "$RES_AMPFIX_CTX_SHORT" \
+    "the 30e arm with the ring negatives removed: reads which HALF of the loss they move, against a val split that stays positives-only in both"
+
 job ampfix ampfix_t5_single_ring3_200e \
     scripts/train/train_control.sh "ARCH=single $AMPFIX_T5 $AMPFIX_NEG $AMPFIX_OPT EPOCHS=200 PATIENCE=0" "$RES_AMPFIX_SINGLE" \
     "the single-frame floor on corrected data: the only arm fixed on BOTH counts, and the one that says whether recurrence really buys what RESULTS.md 9 claims"
