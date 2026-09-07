@@ -257,6 +257,48 @@ job evalampfix evalampfix_ctx30 \
     scripts/eval/run_eval.sh "RUN=outputs/ampfix_ctx50_t5_convlstm_ring3_30e_2026-09-07_14h34_lsf_644948 $EVAL6_TEMP K_PREVS=5" "$RES_EVAL_AMPFIX" \
     "the ring-negative context arm -- its twin against base30, the pair that says what ring negatives buy at object level"
 
+# ---- evalctx: the context comparison, run entirely at DATA_STRIDE=2 ---------
+#
+#     submit_all.sh evalctx --submit       # 3 jobs
+#
+# WHY STRIDE 2 AND NOT eval6's 4. The context patch tree exists ONLY at strpp2
+# (1.7 TB, LSF 640831); there is no ctx50 tree at strpp4, which is what killed
+# LSF 680921/680926 in seconds. Building one would cost ~6.8 TB against 9.8 TB
+# free. Stride 2 costs three evaluations instead.
+#
+# SCORES DO NOT CROSS STRIDES, so this batch carries its OWN reference. Under
+# PROTOCOL=rth the pixel value IS the fraction of overlapping tiles voting
+# positive -- 16 votes per pixel at stride 4, 4 at stride 2 -- so the Confidence
+# Factor means a different thing and the sweep over 0.125/0.25/0.375/0.5 lands
+# elsewhere. The 0.7797 in RESULTS.md 9 is a STRIDE-4 number and this batch may
+# not be read against it. evalctx_baseline re-scores that same checkpoint at
+# stride 2 so the three arms have a valid common reference of their own.
+#
+# READ IT AS: baseline (legacy tree, no context) vs ctx30 (context + ring
+# negatives) vs base30 (context, no ring negatives). The first pair says whether
+# 300x200 of context buys anything; the second says what ring negatives buy once
+# context is present.
+#
+# The baseline checkpoint predates ab23b07 and cannot be RESUMED here, but it
+# evaluates fine: build_from_checkpoint defaults its data_contract to
+# legacy-row-v1 and strips it before load_state_dict, and nothing in scenes.py
+# gates on it. It is a ConvLSTM, so ARCH stays at run_eval.sh's default.
+EVAL_S2_TEMP="GEN=3 GROUP=temporal_k10 DATA_STRIDE=2 PROTOCOL=rth JOB_NAME=scenes_temporal_clean_rth_s2"
+
+# Stride 2 is a quarter of stride 4's tiles, so well inside evallong200's
+# measured 110G/71min even with the context tree's 3x pixels.
+RES_EVAL_S2="long-gpu   160   36  12:00"
+
+job evalctx evalctx_baseline \
+    scripts/eval/run_eval.sh "RUN=outputs/2026-08-20/temporal_k5_pre2023_convlstm_ring3 $EVAL_S2_TEMP K_PREVS=5" "$RES_EVAL_S2" \
+    "the reference the other two are read against: the 0.780 checkpoint re-scored at stride 2, because a stride-4 number cannot be compared with these"
+job evalctx evalctx_ctx30 \
+    scripts/eval/run_eval.sh "RUN=outputs/ampfix_ctx50_t5_convlstm_ring3_30e_2026-09-07_14h34_lsf_644948 $EVAL_S2_TEMP K_PREVS=5" "$RES_EVAL_S2" \
+    "300x200 of context with ring negatives -- the first object-level score of a large-context model in this project"
+job evalctx evalctx_base30 \
+    scripts/eval/run_eval.sh "RUN=outputs/ampfix_ctx50_t5_convlstm_base_30e_2026-09-07_14h41_lsf_646805 $EVAL_S2_TEMP K_PREVS=5" "$RES_EVAL_S2" \
+    "the same context arm without ring negatives: what they buy at object level, where RESULTS.md 1 says dice cannot see it"
+
 # ---- lrscan: find a step size the corrected gradients can live with --------
 #
 #     submit_all.sh lrscan --submit          # 5 jobs, ~30 min each
@@ -326,7 +368,7 @@ job lrscan lrscan_lr1e5_m000 \
 WANT=all; SUBMIT=no; ONLY=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    eval6ref|ampfix|lrscan|evalampfix|all)   WANT="$1" ;;
+    eval6ref|ampfix|lrscan|evalampfix|evalctx|all)   WANT="$1" ;;
     # Retired by name rather than left to select zero jobs, so the mistake is
     # visible instead of looking like an empty batch. See docs/EXPERIMENTS.md.
     long200|long500|ctx50|evallong200|\
