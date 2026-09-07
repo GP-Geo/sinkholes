@@ -203,6 +203,42 @@ job ampfix ampfix_t5_single_ring3_200e \
     scripts/train/train_control.sh "ARCH=single $AMPFIX_T5 $AMPFIX_NEG $AMPFIX_OPT EPOCHS=200 PATIENCE=0" "$RES_AMPFIX_SINGLE" \
     "the single-frame floor on corrected data: the only arm fixed on BOTH counts, and the one that says whether recurrence really buys what RESULTS.md 9 claims"
 
+# ---- evalampfix: object-level scores for the corrected-optimiser batch ------
+#
+#     submit_all.sh evalampfix --submit
+#
+# THE PROTOCOL IS eval6's, EXACTLY, because that is what produced the 0.7797
+# these have to be read against: GEN=3, GROUP=temporal_k10 for the shared
+# 20-scene list, DATA_STRIDE=4, PROTOCOL=rth, K_PREVS=5 naming the CHECKPOINT's
+# depth. Identical to the evallong200 row, which is what makes all of them
+# comparable.
+#
+# CONTEXT MODELS NEED NO EXTRA FLAG. scenes.py:292 loads the checkpoint before
+# scenes.py:294 reads the margin, so io_geometry sets args.context_margin and
+# the ctx50 patch tree is selected automatically. That only became true with
+# ab23b07; before it, evaluating a context model crashed in reconstruct_scene.
+# These are therefore the first scene evaluations of a large-context model.
+#
+# READ THEM AGAINST 0.7797, NOT AGAINST EACH OTHER'S DICE. val/dice ranked
+# long200 above the baseline and the object score reversed it (0.7529 vs
+# 0.7797); RESULTS.md 2 says that is the rule, not the exception.
+#
+# 208G because a ctx50 scene holds 3x the input pixels; evallong200 peaked at
+# 110G on plain patches in 71 minutes.
+RES_EVAL_AMPFIX="long-gpu   208   36  16:00"
+
+job evalampfix evalampfix_base30 \
+    scripts/eval/run_eval.sh "RUN=outputs/ampfix_ctx50_t5_convlstm_base_30e_2026-09-07_14h41_lsf_646805 $EVAL6_TEMP K_PREVS=5" "$RES_EVAL_AMPFIX" \
+    "the no-ring-negatives context arm, complete at 30/30 -- and the first object-level score of any large-context model"
+
+job evalampfix evalampfix_single \
+    scripts/eval/run_eval.sh "RUN=outputs/ampfix_t5_single_ring3_200e_2026-09-07_14h33_lsf_644255 $EVAL6_TEMP K_PREVS=5" "$RES_EVAL_AMPFIX" \
+    "the single-frame floor on corrected data: the number that says what recurrence is really worth, against RESULTS.md 9's confounded +0.047"
+
+job evalampfix evalampfix_ctx30 \
+    scripts/eval/run_eval.sh "RUN=outputs/ampfix_ctx50_t5_convlstm_ring3_30e_2026-09-07_14h34_lsf_644948 $EVAL6_TEMP K_PREVS=5" "$RES_EVAL_AMPFIX" \
+    "the ring-negative context arm -- its twin against base30, the pair that says what ring negatives buy at object level"
+
 # ---- lrscan: find a step size the corrected gradients can live with --------
 #
 #     submit_all.sh lrscan --submit          # 5 jobs, ~30 min each
@@ -272,7 +308,7 @@ job lrscan lrscan_lr1e5_m000 \
 WANT=all; SUBMIT=no; ONLY=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    eval6ref|ampfix|lrscan|all)   WANT="$1" ;;
+    eval6ref|ampfix|lrscan|evalampfix|all)   WANT="$1" ;;
     # Retired by name rather than left to select zero jobs, so the mistake is
     # visible instead of looking like an empty batch. See docs/EXPERIMENTS.md.
     long200|long500|ctx50|evallong200|\
