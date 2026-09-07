@@ -227,14 +227,32 @@ job ampfix ampfix_t5_single_ring3_200e \
 # 110G on plain patches in 71 minutes.
 RES_EVAL_AMPFIX="long-gpu   208   36  16:00"
 
+# BLOCKED: needs data_patches_H200_W100_ctx50x50_strpp4_11days_Aligned, which
+# does not exist -- the context tree was only ever built at strpp2 (1.7 TB, LSF
+# 640831). EVAL6_TEMP sets DATA_STRIDE=4, so this fails in seconds on
+# FileNotFoundError (LSF 680921/680926). Either generate the stride-4 context
+# tree (~6.8 TB: 4x the tiles of strpp2) or move the whole context comparison to
+# DATA_STRIDE=2, which needs the 0.7797 baseline re-scored at stride 2 as well --
+# tile density changes the Confidence Factor, so scores do not cross strides.
 job evalampfix evalampfix_base30 \
     scripts/eval/run_eval.sh "RUN=outputs/ampfix_ctx50_t5_convlstm_base_30e_2026-09-07_14h41_lsf_646805 $EVAL6_TEMP K_PREVS=5" "$RES_EVAL_AMPFIX" \
     "the no-ring-negatives context arm, complete at 30/30 -- and the first object-level score of any large-context model"
 
+# ARCH=single, NOT the convlstm default of run_eval.sh:89. This checkpoint is a
+# plain U-Net and build_from_checkpoint refuses the mismatch outright (LSF
+# 680392/680924: "checkpoint looks like 'unet' but 'convlstm_unet' was
+# requested"), which is the check doing its job.
 job evalampfix evalampfix_single \
-    scripts/eval/run_eval.sh "RUN=outputs/ampfix_t5_single_ring3_200e_2026-09-07_14h33_lsf_644255 $EVAL6_TEMP K_PREVS=5" "$RES_EVAL_AMPFIX" \
+    scripts/eval/run_eval.sh "RUN=outputs/ampfix_t5_single_ring3_200e_2026-09-07_14h33_lsf_644255 $EVAL6_TEMP ARCH=single K_PREVS=5" "$RES_EVAL_AMPFIX" \
     "the single-frame floor on corrected data: the number that says what recurrence is really worth, against RESULTS.md 9's confounded +0.047"
 
+# BLOCKED: needs data_patches_H200_W100_ctx50x50_strpp4_11days_Aligned, which
+# does not exist -- the context tree was only ever built at strpp2 (1.7 TB, LSF
+# 640831). EVAL6_TEMP sets DATA_STRIDE=4, so this fails in seconds on
+# FileNotFoundError (LSF 680921/680926). Either generate the stride-4 context
+# tree (~6.8 TB: 4x the tiles of strpp2) or move the whole context comparison to
+# DATA_STRIDE=2, which needs the 0.7797 baseline re-scored at stride 2 as well --
+# tile density changes the Confidence Factor, so scores do not cross strides.
 job evalampfix evalampfix_ctx30 \
     scripts/eval/run_eval.sh "RUN=outputs/ampfix_ctx50_t5_convlstm_ring3_30e_2026-09-07_14h34_lsf_644948 $EVAL6_TEMP K_PREVS=5" "$RES_EVAL_AMPFIX" \
     "the ring-negative context arm -- its twin against base30, the pair that says what ring negatives buy at object level"
