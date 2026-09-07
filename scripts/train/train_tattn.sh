@@ -53,6 +53,9 @@ K_PREVS="${K_PREVS:-5}"                   # temporal depth; MUST match the parti
 POS_W="${POS_W:-4}"                       # BCE positive weight (code default is 1)
 SEED="${SEED:-42}"
 MOMENTUM="${MOMENTUM:-0.999}"             # see lrscan: 0.999 diverges on corrected clipping
+WEIGHT_DECAY="${WEIGHT_DECAY:-1e-8}"      # 1e-8 is historical and is barely regularisation
+                                          # at all; 1e-4..1e-2 is the usual range
+AUGMENT="${AUGMENT:-none}"                # none | h | v | hv -- random flips, TRAIN split only
 LR_PATIENCE="${LR_PATIENCE:-5}"
 LR="${LR:-1e-6}"
 SCHEDULE="${SCHEDULE:-plateau}"           # plateau | cosine
@@ -207,6 +210,8 @@ python -m sinkholes train \
   --lr_schedule "$SCHEDULE" \
   --lr_patience "$LR_PATIENCE" \
   --momentum "$MOMENTUM" \
+  --weight_decay "$WEIGHT_DECAY" \
+  --augment_flips "$AUGMENT" \
   --patches_dir /home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/patches \
   --partition_mode preset_by_intf \
   --partition_file "$PARTITION" \

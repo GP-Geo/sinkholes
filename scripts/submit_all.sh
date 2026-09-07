@@ -266,13 +266,11 @@ job evalampfix evalampfix_ctx30 \
 # LSF 680921/680926 in seconds. Building one would cost ~6.8 TB against 9.8 TB
 # free. Stride 2 costs three evaluations instead.
 #
-# SCORES DO NOT CROSS STRIDES, so this batch carries its OWN reference. Under
-# PROTOCOL=rth the pixel value IS the fraction of overlapping tiles voting
-# positive -- 16 votes per pixel at stride 4, 4 at stride 2 -- so the Confidence
-# Factor means a different thing and the sweep over 0.125/0.25/0.375/0.5 lands
-# elsewhere. The 0.7797 in RESULTS.md 9 is a STRIDE-4 number and this batch may
-# not be read against it. evalctx_baseline re-scores that same checkpoint at
-# stride 2 so the three arms have a valid common reference of their own.
+# THIS BATCH IS SELF-CONTAINED and shares no number with RESULTS.md. It differs
+# from eval6 on BOTH axes -- stride 2 rather than 4, and prob rather than rth --
+# so the 0.7797 is not a reference for anything here. evalctx_baseline re-scores
+# that same checkpoint under these exact settings to supply the only reference
+# the three arms are allowed to use.
 #
 # READ IT AS: baseline (legacy tree, no context) vs ctx30 (context + ring
 # negatives) vs base30 (context, no ring negatives). The first pair says whether
@@ -283,7 +281,15 @@ job evalampfix evalampfix_ctx30 \
 # evaluates fine: build_from_checkpoint defaults its data_contract to
 # legacy-row-v1 and strips it before load_state_dict, and nothing in scenes.py
 # gates on it. It is a ConvLSTM, so ARCH stays at run_eval.sh's default.
-EVAL_S2_TEMP="GEN=3 GROUP=temporal_k10 DATA_STRIDE=2 PROTOCOL=rth JOB_NAME=scenes_temporal_clean_rth_s2"
+# PROTOCOL=prob, NOT rth. run_eval.sh:241 refuses rth at any stride but 4, and
+# it is right to: under rth the pixel value is the fraction of SIXTEEN
+# overlapping tiles voting positive, and the paper's 0.125/0.25/0.5 literally
+# mean 2/4/8 of 16. At stride 2 there are four tiles and those thresholds stop
+# meaning anything. LSF 688878/688879/688880 died on exactly that check.
+# prob -- the mean predicted probability over the covering tiles, cut at
+# probability thresholds -- carries no such dependence and is what every
+# number before 2026-08-19 used.
+EVAL_S2_TEMP="GEN=3 GROUP=temporal_k10 DATA_STRIDE=2 PROTOCOL=prob JOB_NAME=scenes_temporal_clean_prob_s2"
 
 # Stride 2 is a quarter of stride 4's tiles, so well inside evallong200's
 # measured 110G/71min even with the context tree's 3x pixels.
@@ -298,6 +304,52 @@ job evalctx evalctx_ctx30 \
 job evalctx evalctx_base30 \
     scripts/eval/run_eval.sh "RUN=outputs/ampfix_ctx50_t5_convlstm_base_30e_2026-09-07_14h41_lsf_646805 $EVAL_S2_TEMP K_PREVS=5" "$RES_EVAL_S2" \
     "the same context arm without ring negatives: what they buy at object level, where RESULTS.md 1 says dice cannot see it"
+
+# ---- reg: stop the model memorising its training set -----------------------
+#
+#     submit_all.sh reg --submit             # 4 jobs
+#     submit_all.sh reg --only=wd --submit
+#
+# THE PROBLEM. Every corrected-optimiser arm peaks early and then decays while
+# train/loss keeps falling -- ampfix_ctx50_ring3 reached train/loss 0.045 by
+# epoch 22 with val/F1 peaking at 14, and ampfix_t5_single peaked at val/F1
+# epoch 20 and spent the next 70 epochs drifting down. That is memorisation,
+# and no amount of extra epochs fixes it.
+#
+# WHY IT WAS INEVITABLE. weight_decay was hardcoded at 1e-8 (train.py, before
+# it was exposed) -- four orders of magnitude below the usual 1e-4..1e-2, i.e.
+# effectively none. And there was no augmentation anywhere in the data path.
+# The model had 43M parameters, no regularisation, and one look at each patch.
+#
+# READ val/F1, NOT val/dice. RESULTS.md 2 is explicit and this batch is exactly
+# the case it warns about: ring negatives are added to the TRAIN split only, so
+# validation stays positives-only and dice cannot see the false positives being
+# suppressed. On every ring-negative arm so far F1 peaked 8-11 epochs AFTER
+# dice did.
+#
+# ONE LEVER PER ARM, all against ampfix_t5_convlstm_ring3_200e (LSF 644244),
+# which is this exact config with none of them. Changing four things at once
+# would leave no way to tell which one worked.
+REG_BASE="PARTITION=assets/partition_temporal_k5_pre2023.json K_PREVS=5 POS_W=4"
+REG_NEG="RING_NEGS=yes NEG_RING_OUTER=3 NEG_PER_POS=1.0"
+REG_OPT="LR=1e-5 MOMENTUM=0.9 LR_PATIENCE=20 EPOCHS=100 PATIENCE=0"
+
+# 100 epochs at long200's measured 3m31s is ~5h50m; the newer nodes have been
+# running this config at ~1m22s, so 12:00 covers either.
+RES_REG="long-gpu    90   36  12:00"
+
+job reg reg_wd1e4 \
+    scripts/train/train_convlstm.sh "$REG_BASE $REG_NEG $REG_OPT WEIGHT_DECAY=1e-4" "$RES_REG" \
+    "weight decay 1e-8 -> 1e-4: the setting that was hardcoded out of reach, at four orders of magnitude below normal"
+job reg reg_aughv \
+    scripts/train/train_convlstm.sh "$REG_BASE $REG_NEG $REG_OPT AUGMENT=hv" "$RES_REG" \
+    "random horizontal and vertical flips on the train split: roughly 4x the effective data, and the standard answer to memorisation"
+job reg reg_wd_aug \
+    scripts/train/train_convlstm.sh "$REG_BASE $REG_NEG $REG_OPT WEIGHT_DECAY=1e-4 AUGMENT=hv" "$RES_REG" \
+    "both together -- worth its own arm because they regularise different things and may not simply add"
+job reg reg_ring10 \
+    scripts/train/train_convlstm.sh "$REG_BASE RING_NEGS=yes NEG_RING_OUTER=10 NEG_PER_POS=1.0 $REG_OPT" "$RES_REG" \
+    "far negatives instead of near: RESULTS.md 1 measured F1 0.698 vs ring3's 0.626 on this partition, the largest gain the project has recorded, and no current arm uses it"
 
 # ---- lrscan: find a step size the corrected gradients can live with --------
 #
@@ -368,7 +420,7 @@ job lrscan lrscan_lr1e5_m000 \
 WANT=all; SUBMIT=no; ONLY=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    eval6ref|ampfix|lrscan|evalampfix|evalctx|all)   WANT="$1" ;;
+    eval6ref|ampfix|lrscan|evalampfix|evalctx|reg|all)   WANT="$1" ;;
     # Retired by name rather than left to select zero jobs, so the mistake is
     # visible instead of looking like an empty batch. See docs/EXPERIMENTS.md.
     long200|long500|ctx50|evallong200|\

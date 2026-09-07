@@ -41,6 +41,9 @@ SEED="${SEED:-42}"
 LR="${LR:-1e-6}"
 SCHEDULE="${SCHEDULE:-plateau}"
 MOMENTUM="${MOMENTUM:-0.999}"            # RMSprop momentum; 0.999 is historical and diverges
+WEIGHT_DECAY="${WEIGHT_DECAY:-1e-8}"      # 1e-8 is historical and is barely regularisation
+                                          # at all; 1e-4..1e-2 is the usual range
+AUGMENT="${AUGMENT:-none}"                # none | h | v | hv -- random flips, TRAIN split only
                                           # on corrected clipping -- see docs/EXPERIMENTS.md lrscan
 LR_PATIENCE="${LR_PATIENCE:-5}"           # was never exposed here; 5 is the code default,
                                           # so every earlier control run is unchanged
@@ -140,6 +143,8 @@ python -m sinkholes train \
   --lr_schedule "$SCHEDULE" \
   --lr_patience "$LR_PATIENCE" \
   --momentum "$MOMENTUM" \
+  --weight_decay "$WEIGHT_DECAY" \
+  --augment_flips "$AUGMENT" \
   --patches_dir /home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/patches \
   --partition_mode preset_by_intf \
   --partition_file "$PARTITION" \

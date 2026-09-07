@@ -106,6 +106,15 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--aoi_selection_version", choices=["coordinates-v2", "legacy-v1"],
                    default="coordinates-v2", help="coordinates-v2 filters all single-frame "
                    "splits by AOI; legacy-v1 reproduces the historical positives-only bypass")
+    p.add_argument("--weight_decay", type=float, default=1e-8,
+                   help="RMSprop weight decay. 1e-8 is the historical hardcoded value and is "
+                        "effectively no regularisation at all -- 1e-4 to 1e-2 is the usual "
+                        "range. Raise it when val/F1 peaks early while train/loss keeps "
+                        "falling, which is what overfitting looks like here.")
+    p.add_argument("--augment_flips", choices=["none", "h", "v", "hv"], default="none",
+                   help="random flips on the TRAIN split only: h (left-right), v (up-down), "
+                        "hv (both, independently). Image and mask flip together. Free extra "
+                        "data for a model that memorises its training set.")
     p.add_argument("--momentum", type=float, default=0.999,
                    help="RMSprop momentum. 0.999 is the historical hardcoded value and "
                         "amplifies each update by 1/(1-m) = 1000x at steady state. That was "
@@ -454,6 +463,7 @@ def build_datasets(args, rep):
         raise SystemExit("no usable interferograms left after filtering")
 
     dataset_kwargs = dict(
+        augment_flips=getattr(args, "augment_flips", "none"),
         preprocessing_version=getattr(args, "preprocessing_version", "frame-v2"),
         aoi_selection_version=getattr(args, "aoi_selection_version", "coordinates-v2"),
         patch_size=(H, W),
@@ -705,7 +715,8 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, batch_size=1,
                             num_workers=1, pin_memory=True)
 
-    optimizer = optim.RMSprop(model.parameters(), lr=args.lr, weight_decay=1e-8,
+    optimizer = optim.RMSprop(model.parameters(), lr=args.lr,
+                              weight_decay=args.weight_decay,
                               momentum=args.momentum, foreach=True)
     # 'plateau' reacts to val/dice, so a noisy validation curve can trigger a cut
     # that has nothing to do with real progress; 'cosine' follows a fixed path and

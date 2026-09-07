@@ -161,6 +161,7 @@ class SubsiDataset(Dataset):
         context_size: Optional[Tuple[int, int]] = None,
         stride: int = 2,
         mode: str = "train",
+        augment_flips: str = "none",
         nonz_only: bool = True,
         temporal: bool = False,
         seq_dict: Optional[Dict[str, Any]] = None,
@@ -224,8 +225,11 @@ class SubsiDataset(Dataset):
             context_margin(self.patch_size, self.context_size)   # validates symmetry
         self._grid_stride = (patch_size[0] // stride, patch_size[1] // stride)
 
+        if augment_flips not in ("none", "h", "v", "hv"):
+            raise ValueError(f"augment_flips must be none|h|v|hv, got {augment_flips!r}")
         self.ids = list(intf_ids)
         self.mode = mode
+        self.augment_flips = augment_flips
         self.temporal = temporal
         self.seq_dict = seq_dict
         # Index at which validity channels begin (== T), or None when the
@@ -683,6 +687,21 @@ class SubsiDataset(Dataset):
                 f"image {img.shape[-2:]} is not this dataset's context size {self.context_size}"
             assert tuple(msk.shape[-2:]) == tuple(self.patch_size), \
                 f"target {msk.shape[-2:]} is not the patch size {self.patch_size}"
+
+        # Flip augmentation. TRAIN SPLIT ONLY -- val and test must stay a fixed
+        # target or the curve stops being comparable between epochs. Image and
+        # mask are flipped about the SAME axis, so a context sample's centre
+        # crop still describes the same ground afterwards.
+        #
+        # torch.rand, not np.random: PyTorch reseeds torch's generator in every
+        # DataLoader worker but leaves numpy's alone, so numpy would hand every
+        # worker the identical flip sequence.
+        flips = getattr(self, "augment_flips", "none")
+        if flips != "none" and self.mode == "train":
+            if flips in ("h", "hv") and bool(torch.rand(()) < 0.5):
+                img, msk = img[..., ::-1], msk[..., ::-1]
+            if flips in ("v", "hv") and bool(torch.rand(()) < 0.5):
+                img, msk = img[..., ::-1, :], msk[..., ::-1, :]
 
         if getattr(self, "temporal", False):
             img_t = torch.as_tensor(img.copy()).float().contiguous()
