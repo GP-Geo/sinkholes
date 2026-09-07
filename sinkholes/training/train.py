@@ -106,6 +106,12 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--aoi_selection_version", choices=["coordinates-v2", "legacy-v1"],
                    default="coordinates-v2", help="coordinates-v2 filters all single-frame "
                    "splits by AOI; legacy-v1 reproduces the historical positives-only bypass")
+    p.add_argument("--momentum", type=float, default=0.999,
+                   help="RMSprop momentum. 0.999 is the historical hardcoded value and "
+                        "amplifies each update by 1/(1-m) = 1000x at steady state. That was "
+                        "survivable only while the AMP clipping bug crushed every gradient "
+                        "to a fixed tiny norm; with unscaled-v2 clipping it is far too hot "
+                        "(activations blow up inside one epoch). PyTorch's own default is 0.")
     p.add_argument("--epochs", "-e", type=int, default=5)
     p.add_argument("--batch_size", "-b", type=int, default=1)
     p.add_argument("--accum_steps", type=int, default=1,
@@ -700,7 +706,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                             num_workers=1, pin_memory=True)
 
     optimizer = optim.RMSprop(model.parameters(), lr=args.lr, weight_decay=1e-8,
-                              momentum=0.999, foreach=True)
+                              momentum=args.momentum, foreach=True)
     # 'plateau' reacts to val/dice, so a noisy validation curve can trigger a cut
     # that has nothing to do with real progress; 'cosine' follows a fixed path and
     # keeps runs comparable. Both stop at --min_lr rather than decaying to nothing.

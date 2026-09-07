@@ -174,11 +174,58 @@ job ampfix ampfix_t5_single_ring3_200e \
     scripts/train/train_control.sh "ARCH=single $AMPFIX_T5 $AMPFIX_NEG LR=1e-5 LR_PATIENCE=20 EPOCHS=200 PATIENCE=0" "$RES_AMPFIX_SINGLE" \
     "the single-frame floor on corrected data: the only arm fixed on BOTH counts, and the one that says whether recurrence really buys what RESULTS.md 9 claims"
 
+# ---- lrscan: find a step size the corrected gradients can live with --------
+#
+#     submit_all.sh lrscan --submit          # 5 jobs, ~30 min each
+#
+# WHY THIS EXISTS. ampfix (LSF 612826/612827/612828) died identically on both
+# the plain and the context arm: epoch 1 healthy (dice 0.469, clip 3.1%, AMP
+# scale steady at 65536), then nan on the FIRST step of epoch 2. best.pt from
+# epoch 1 is finite but carries a BatchNorm running_var of 1.576e+08 -- the
+# activations were already exploding, and the next forward pass overflowed fp16.
+#
+# It is NOT gradient explosion: median true gradient norm was 0.124 and the clip
+# fired on 3.1% of steps. It is STEP SIZE. RMSprop runs at momentum=0.999, which
+# amplifies every update by 1/(1-m) = 1000x at steady state. That was survivable
+# only while the clipping bug crushed every gradient to a fixed ~1.5e-5 norm.
+# With unscaled-v2 clipping the real gradients arrive and the same 1000x
+# amplification is far too hot. lr and momentum were co-adapted to the bug.
+#
+# TWO AXES, because either fixes the step size and they are not equivalent:
+# dropping lr scales every update uniformly; dropping momentum shortens the
+# window the updates are accumulated over, which also removes the lag that makes
+# a 1000x buffer dangerous near a curved minimum. 0.9 is a conventional RMSprop
+# momentum and 0 is PyTorch's own default.
+#
+# READ IT FROM results.csv: an arm is alive if amp/scale stays 65536, the
+# non-finite warning never appears, and val/dice climbs. An arm that dies does
+# so by epoch 2, so 8 epochs is more than enough to tell.
+LRSCAN_BASE="PARTITION=assets/partition_temporal_k5_pre2023.json K_PREVS=5 POS_W=4"
+LRSCAN_NEG="RING_NEGS=yes NEG_RING_OUTER=3 NEG_PER_POS=1.0"
+LRSCAN_LEN="LR_PATIENCE=20 EPOCHS=8 PATIENCE=0"
+RES_LRSCAN="long-gpu    90   36   2:00"   # 8 x 3m31s = ~28m
+
+job lrscan lrscan_lr1e6_m999 \
+    scripts/train/train_convlstm.sh "$LRSCAN_BASE $LRSCAN_NEG $LRSCAN_LEN LR=1e-6 MOMENTUM=0.999" "$RES_LRSCAN" \
+    "lr axis: 10x down from the setting that blew up, momentum left at its historical 0.999"
+job lrscan lrscan_lr1e7_m999 \
+    scripts/train/train_convlstm.sh "$LRSCAN_BASE $LRSCAN_NEG $LRSCAN_LEN LR=1e-7 MOMENTUM=0.999" "$RES_LRSCAN" \
+    "lr axis: 100x down"
+job lrscan lrscan_lr1e8_m999 \
+    scripts/train/train_convlstm.sh "$LRSCAN_BASE $LRSCAN_NEG $LRSCAN_LEN LR=1e-8 MOMENTUM=0.999" "$RES_LRSCAN" \
+    "lr axis: 1000x down -- roughly the factor momentum contributes, so the floor of this axis"
+job lrscan lrscan_lr1e5_m090 \
+    scripts/train/train_convlstm.sh "$LRSCAN_BASE $LRSCAN_NEG $LRSCAN_LEN LR=1e-5 MOMENTUM=0.9" "$RES_LRSCAN" \
+    "momentum axis: long200's own lr, momentum 0.999 -> 0.9, so the amplification drops 1000x -> 10x"
+job lrscan lrscan_lr1e5_m000 \
+    scripts/train/train_convlstm.sh "$LRSCAN_BASE $LRSCAN_NEG $LRSCAN_LEN LR=1e-5 MOMENTUM=0" "$RES_LRSCAN" \
+    "momentum axis: long200's own lr with no momentum at all -- PyTorch's RMSprop default, and the cleanest reading of what the gradients alone do"
+
 # ---- argument parsing -------------------------------------------------------
 WANT=all; SUBMIT=no; ONLY=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    eval6ref|ampfix|all)   WANT="$1" ;;
+    eval6ref|ampfix|lrscan|all)   WANT="$1" ;;
     # Retired by name rather than left to select zero jobs, so the mistake is
     # visible instead of looking like an empty batch. See docs/EXPERIMENTS.md.
     long200|long500|ctx50|evallong200|\

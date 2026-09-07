@@ -57,6 +57,7 @@ PATIENCE="${PATIENCE:-20}"                # early stop; 0 = off (reporter.py:257
 # say so in the run's row: it is an ADVISORY resume key (resume.py:88), so a
 # resume will report the change rather than refuse it.
 LR_PATIENCE="${LR_PATIENCE:-5}"
+MOMENTUM="${MOMENTUM:-0.999}"        # RMSprop momentum; 0.999 is historical, see --momentum
 
 # --- spatial context --------------------------------------------------------
 # Empty = the plain 200x100 tree, which is every run before 2026-09-07.
@@ -169,6 +170,7 @@ python -m sinkholes train \
   --learning-rate "$LR" \
   --lr_schedule "$SCHEDULE" \
   --lr_patience "$LR_PATIENCE" \
+  --momentum "$MOMENTUM" \
   --patches_dir /home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/patches \
   --partition_mode preset_by_intf \
   --partition_file "$PARTITION" \
