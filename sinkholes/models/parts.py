@@ -72,3 +72,36 @@ class OutConv(nn.Module):
 
     def forward(self, x):
         return self.conv(x)
+
+
+class CentreCropOutput:
+    """Mixin: crop a model's logits to ``predict_size`` before they leave forward.
+
+    ``predict_size`` is a plain attribute, not a constructor parameter, so
+    state-dict keys are untouched and every existing checkpoint keeps loading.
+    ``None`` (the default) means "predict everything", which is the plain
+    200x100 behaviour and is what an old checkpoint gets.
+
+    The crop lives in the model on purpose: eval-scenes, test-patches, predict
+    and the attention probe all call ``forward`` and would otherwise each need
+    to remember the geometry. ``build_from_checkpoint`` sets this from the
+    checkpoint's ``io_geometry``, so none of them can get it wrong.
+    """
+
+    predict_size = None
+
+    def crop_output(self, logits):
+        ps = getattr(self, "predict_size", None)
+        if ps is None:
+            return logits
+        ph, pw = ps
+        h, w = logits.shape[-2:]
+        if (h, w) == (ph, pw):
+            return logits
+        dy, dx = h - ph, w - pw
+        if dy < 0 or dx < 0:
+            raise ValueError(f"predict_size {ps} is larger than the logits {(h, w)}")
+        if dy % 2 or dx % 2:
+            raise ValueError(f"logits {(h, w)} minus predict_size {ps} = {(dy, dx)}; "
+                             "both must be even for a centred crop")
+        return logits[..., dy // 2: dy // 2 + ph, dx // 2: dx // 2 + pw]

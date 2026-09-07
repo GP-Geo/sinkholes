@@ -32,6 +32,7 @@ from ..meta import (
     lidar_source_for,
     load_coord_dict,
 )
+from ..dataprep.context import context_size
 from ..normalise import SCENE_RANGE_TOL, normalise_phase
 from ..paths import DEFAULT_PREDICTIONS_DIR
 from ..polygons import mask_array_to_polygons, pixel_polygons_to_lonlat
@@ -78,6 +79,11 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--unioned_mask", action="store_true",
                    help="ground truth = union of masks over the temporal stack")
 
+    p.add_argument("--context_margin", nargs=2, type=int, default=[0, 0], metavar=("MY", "MX"),
+                   help="read the large-context patch tree with this margin. It selects the "
+                        "directory, so it is needed before the checkpoint is opened; it is then "
+                        "checked against the checkpoint's io_geometry and a disagreement -- "
+                        "including omitting it for a large-context checkpoint -- is an error")
     p.add_argument("--add_lidar_mask", action=argparse.BooleanOptionalAction, default=True,
                    help="predict only tiles inside the LiDAR coverage of every timestep")
     p.add_argument("--aoi_window", nargs=4, type=float, default=None,
@@ -214,6 +220,35 @@ def load_model(args, device):
         treat_nodata_regions=args.treat_nodata_regions,
     )
     logging.info(f"architecture {loaded.architecture} ({loaded.n_channels} in-channels)")
+    # Geometry comes from the checkpoint, never from a flag, so a large-context
+    # model cannot be evaluated at 200x100 by forgetting to pass something. The
+    # model already crops its own logits (build_from_checkpoint set
+    # predict_size); this records what the tile loader must feed it.
+    args._context_size = None
+    ckpt_ctx = (tuple(loaded.context_size)
+                if loaded.context_size and tuple(loaded.context_size) != tuple(loaded.predict_size or ())
+                else None)
+    cli_margin = tuple(getattr(args, "context_margin", (0, 0)) or (0, 0))
+    cli_ctx = context_size(tuple(args.patch_size), cli_margin) if cli_margin != (0, 0) else None
+    if ckpt_ctx != cli_ctx:
+        raise SystemExit(
+            f"geometry mismatch: the checkpoint was trained on "
+            f"{ckpt_ctx or 'no context (plain patches)'} but --context_margin "
+            f"{list(cli_margin)} selects {cli_ctx or 'the plain tree'}.\n"
+            "The margin picks the patch directory, so it is read before the checkpoint; "
+            "this check is what stops the two from disagreeing. Pass the margin the model "
+            "was trained with."
+        )
+    if ckpt_ctx is not None:
+        args._context_size = ckpt_ctx
+        if tuple(loaded.predict_size) != tuple(args.patch_size):
+            raise SystemExit(
+                f"checkpoint predicts {tuple(loaded.predict_size)} but --patch_size is "
+                f"{tuple(args.patch_size)}. The reconstruction canvas is built from "
+                f"--patch_size, so these must agree."
+            )
+        logging.info(f"large-context checkpoint: feeding {args._context_size}, "
+                     f"predicting the centre {tuple(loaded.predict_size)}")
     num_c = (args.k_prevs + 1) * (2 if args.treat_nodata_regions else 1)
     # Skipped for the sequence models: their n_channels counts one timestep, so
     # comparing it against the flat T*C the loader produces always disagrees.
@@ -272,8 +307,10 @@ def main(args) -> None:
     patch_h, patch_w = args.patch_size
     from ..dataprep.patchify import patch_dir_name, patch_file_name
 
+    cli_margin = tuple(getattr(args, "context_margin", (0, 0)) or (0, 0))
     data_dir = os.path.join(args.input_patch_dir,
-                            patch_dir_name("data", patch_h, patch_w, args.data_stride, args.days_diff))
+                            patch_dir_name("data", patch_h, patch_w, args.data_stride,
+                                           args.days_diff, cli_margin))
     mask_dir = os.path.join(args.input_patch_dir,
                             patch_dir_name("mask", patch_h, patch_w, args.data_stride, args.days_diff))
 
@@ -347,8 +384,13 @@ def main(args) -> None:
         # Crop every timestep to the common grid, then normalise per scene.
         ny = min(p.shape[0] for p in arrays_newest_first)
         nx = min(p.shape[1] for p in arrays_newest_first)
+        # A large-context tree stores bigger cells on the SAME grid, so (ny, nx)
+        # and the stamping below are untouched -- only how much of each cell is
+        # kept changes. reconstruct_scene stamps a prediction of patch_size at
+        # the cell's own location regardless, because the model crops its logits.
+        ctx_h, ctx_w = getattr(args, "_context_size", None) or (patch_h, patch_w)
         arrays_newest_first = [
-            normalise_phase(p[:ny, :nx, :patch_h, :patch_w].astype(np.float32, copy=False),
+            normalise_phase(p[:ny, :nx, :ctx_h, :ctx_w].astype(np.float32, copy=False),
                             range_tol=SCENE_RANGE_TOL)
             for p in arrays_newest_first
         ]

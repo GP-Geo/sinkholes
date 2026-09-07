@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .parts import DoubleConv, Down, OutConv, Up
+from .parts import CentreCropOutput, DoubleConv, Down, OutConv, Up
 
 
 class ChannelSelfAttention(nn.Module):
@@ -45,7 +45,7 @@ class ChannelSelfAttention(nn.Module):
         return self.gamma * out + x
 
 
-class UNet(nn.Module):
+class UNet(CentreCropOutput, nn.Module):
     def __init__(self, n_channels, n_classes, bilinear=False, add_attn=False):
         super().__init__()
         self.n_channels = n_channels
@@ -79,7 +79,8 @@ class UNet(nn.Module):
         x = self.up2(x, x3)
         x = self.up3(x, x2)
         x = self.up4(x, x1)
-        return self.outc(x)
+        # Centre-crop to predict_size when this is a large-context model; a no-op otherwise.
+        return self.crop_output(self.outc(x))
 
     def get_num_params(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

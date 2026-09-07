@@ -7,6 +7,7 @@ Sequential indices its checkpoints use (``double_conv.4/5`` instead of
 architectures apart, so do not "deduplicate" these blocks into parts.py.
 """
 
+from .parts import CentreCropOutput
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -94,7 +95,7 @@ class OutConv(nn.Module):
         return self.conv(x)
 
 
-class AttentionUNet(nn.Module):
+class AttentionUNet(CentreCropOutput, nn.Module):
     def __init__(self, n_channels, n_classes, bilinear=False):
         super().__init__()
         self.n_channels = n_channels
@@ -123,7 +124,8 @@ class AttentionUNet(nn.Module):
         x = self.up2(x, x3)
         x = self.up3(x, x2)
         x = self.up4(x, x1)
-        return self.outc(x)
+        # Centre-crop to predict_size when this is a large-context model; a no-op otherwise.
+        return self.crop_output(self.outc(x))
 
     def get_num_params(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

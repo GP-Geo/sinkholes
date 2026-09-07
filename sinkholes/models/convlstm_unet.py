@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from .parts import DoubleConv, Down, OutConv, Up
+from .parts import CentreCropOutput, DoubleConv, Down, OutConv, Up
 from .temporal import (
     SUPPORTED_CHANNELS_PER_TIMESTEP,  # re-exported; callers still import it from here
     at_latest_timestep,
@@ -141,7 +141,7 @@ class ConvLSTMCell(nn.Module):
         return h_next, c_next
 
 
-class ConvLSTMUNet(nn.Module):
+class ConvLSTMUNet(CentreCropOutput, nn.Module):
     """U-Net with a ConvLSTM bottleneck over a temporal interferogram sequence.
 
     The number of timesteps T is deliberately *not* an architectural parameter:
@@ -263,7 +263,8 @@ class ConvLSTMUNet(nn.Module):
         decoded = self.up2(decoded, skip3)
         decoded = self.up3(decoded, skip2)
         decoded = self.up4(decoded, skip1)
-        return self.outc(decoded)
+        # Centre-crop to predict_size when this is a large-context model; a no-op otherwise.
+        return self.crop_output(self.outc(decoded))
 
     # -- checkpoint interface ----------------------------------------------------------
 

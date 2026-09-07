@@ -41,6 +41,7 @@ from torch.utils.data import Dataset
 
 from ..geo import FRAME_ORIGINS, grid_window
 from ..normalise import PATCH_RANGE_TOL, normalise_channels
+from .context import context_margin
 from .patchify import patch_file_name
 
 #: Validity is derived from raw values: a pixel is data iff |raw| > this.
@@ -157,6 +158,7 @@ class SubsiDataset(Dataset):
         intf_ids: Sequence[str],
         *,
         patch_size: Tuple[int, int] = (200, 100),
+        context_size: Optional[Tuple[int, int]] = None,
         stride: int = 2,
         mode: str = "train",
         nonz_only: bool = True,
@@ -206,6 +208,12 @@ class SubsiDataset(Dataset):
         self.aoi_window = tuple(aoi_window) if aoi_window is not None else None
         self.coord_dict = coord_dict
         self.patch_size = tuple(patch_size)
+        # What the network is FED. The target stays ``patch_size`` and the grid
+        # stays the plain grid, so nothing about sample selection, negatives,
+        # partitions or the AOI window changes when this grows.
+        self.context_size = tuple(context_size) if context_size else self.patch_size
+        if self.context_size != self.patch_size:
+            context_margin(self.patch_size, self.context_size)   # validates symmetry
         self._grid_stride = (patch_size[0] // stride, patch_size[1] // stride)
 
         self.ids = list(intf_ids)
@@ -364,7 +372,12 @@ class SubsiDataset(Dataset):
         # the common intersection so (i, j) means the same ground in all of them.
         ny = min(p.shape[0] for p in img_pa)
         nx = min(p.shape[1] for p in img_pa)
-        img_pa = [p[:ny, :nx, :H, :W] for p in img_pa]
+        CH, CW = getattr(self, "context_size", (H, W))
+        # Images carry the context margin; masks are the plain target. Cropping
+        # them to different sizes is the whole difference a context run makes to
+        # this function -- coordinates, negatives and the AOI window below are
+        # indexed on the grid, which a margin does not move.
+        img_pa = [p[:ny, :nx, :CH, :CW] for p in img_pa]
         msk_pa = [p[:ny, :nx, :H, :W] for p in msk_pa]
 
         # Sample coordinates come from whichever interferograms define the
@@ -461,8 +474,9 @@ class SubsiDataset(Dataset):
 
         ny = min([p.shape[0] for p in msk_pa] + [img.shape[0]])
         nx = min([p.shape[1] for p in msk_pa] + [img.shape[1]])
-        img = img[:ny, :nx, :H, :W]
-        msk_pa = [p[:ny, :nx, :H, :W] for p in msk_pa]
+        CH, CW = getattr(self, "context_size", (H, W))
+        img = img[:ny, :nx, :CH, :CW]            # image carries the margin
+        msk_pa = [p[:ny, :nx, :H, :W] for p in msk_pa]   # target is the plain patch
         msk = msk_pa[-1]  # tids ends with intf_id
 
         # Mirrors _load_temporal's window handling exactly: the single-frame
@@ -629,8 +643,15 @@ class SubsiDataset(Dataset):
                               n_value_channels=getattr(self, "n_value_channels", None))
         msk = self.preprocess(self.mask_values, msk, 1)
 
-        assert img.shape[-2:] == msk.shape[-2:], \
-            f"spatial size mismatch: image {img.shape} vs mask {msk.shape}"
+        # A context sample is deliberately larger than its target, but only by a
+        # symmetric margin: anything else means the image and the mask describe
+        # different ground, which no downstream shape check would catch.
+        if img.shape[-2:] != msk.shape[-2:]:
+            context_margin(tuple(msk.shape[-2:]), tuple(img.shape[-2:]))
+            assert tuple(img.shape[-2:]) == tuple(getattr(self, "context_size", img.shape[-2:])), \
+                f"image {img.shape[-2:]} is not this dataset's context size {self.context_size}"
+            assert tuple(msk.shape[-2:]) == tuple(self.patch_size), \
+                f"target {msk.shape[-2:]} is not the patch size {self.patch_size}"
 
         if getattr(self, "temporal", False):
             img_t = torch.as_tensor(img.copy()).float().contiguous()

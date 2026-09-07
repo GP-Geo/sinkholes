@@ -70,6 +70,7 @@ STRICT_CONFIG_KEYS: Sequence[str] = (
     "tattn_qk_norm",
     "bilinear",
     "patch_size",
+    "context_margin",
     "stride",
     "partition",
     "dataset",
@@ -192,6 +193,11 @@ def run_config(args) -> Dict[str, Any]:
         "tattn_qk_norm": bool(args.tattn_qk_norm) if tattn else None,
         "bilinear": bool(args.bilinear),
         "patch_size": f"{H}x{W}",
+        # Emitted only when it is set, so every checkpoint written before large
+        # context keeps its existing fingerprint and stays resumable.
+        "context_margin": (f"{args.context_margin[0]}x{args.context_margin[1]}"
+                           if tuple(getattr(args, "context_margin", (0, 0)) or (0, 0)) != (0, 0)
+                           else None),
         "stride": int(args.stride),
         "partition": _partition_signature(args),
         "dataset": _dataset_signature(args),

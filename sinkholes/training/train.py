@@ -49,6 +49,7 @@ from ..dataprep.partition import (
     split_preset_21,
     split_random_by_intf,
 )
+from ..dataprep.context import context_size, io_geometry
 from ..dataprep.patchify import patch_file_name, resolve_patch_dirs
 from ..device import get_device, memory_format_for
 from ..meta import find_11day_sequences, load_coord_dict
@@ -108,7 +109,14 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--amp", action="store_true", help="mixed precision")
     p.add_argument("--bilinear", action="store_true", help="bilinear upsampling")
     p.add_argument("--classes", "-c", type=int, default=1)
-    p.add_argument("--patch_size", nargs=2, type=int, default=[200, 100], metavar=("H", "W"))
+    p.add_argument("--patch_size", nargs=2, type=int, default=[200, 100], metavar=("H", "W"),
+                   help="the TARGET size: what is supervised, scored and reconstructed")
+    p.add_argument("--context_margin", nargs=2, type=int, default=[0, 0], metavar=("MY", "MX"),
+                   help="read the large-context patch tree with this margin and feed the network "
+                        "patch_size + 2*margin, cropping the logits back to patch_size before the "
+                        "loss. '50 50' feeds 300x200 and supervises the centre 200x100. The grid, "
+                        "the targets, sample selection, ring negatives, the AOI window and the "
+                        "evaluation protocol are all unchanged -- only what surrounds each target")
     p.add_argument("--stride", type=int, default=2, help="strides per patch window")
     p.add_argument("--pos_w", type=float, default=1, help="BCE positive-class weight")
     p.add_argument("--seed", type=int, default=None,
@@ -323,6 +331,18 @@ def build_model(args, device):
         model = UNet(n_channels=num_c, n_classes=args.classes, bilinear=args.bilinear,
                      add_attn=args.add_attn)
 
+    # Large context: the network is fed patch_size + 2*margin and its logits are
+    # cropped back to patch_size inside forward(), so the loss, the metrics and
+    # the sample grid all see the target and never the margin. predict_size is a
+    # plain attribute, so no state-dict key changes and every old checkpoint
+    # still loads. _context_size is what gets written into io_geometry.
+    margin = tuple(getattr(args, "context_margin", (0, 0)) or (0, 0))
+    if margin != (0, 0):
+        model._context_size = context_size(tuple(args.patch_size), margin)
+        model.predict_size = tuple(args.patch_size)
+        logging.info(f"model predicts the centre {model.predict_size} of "
+                     f"{model._context_size}")
+
     model = model.to(memory_format=memory_format_for(device))
     model.to(device=device)
     return model, num_c
@@ -373,10 +393,15 @@ def _log_val_composition(val_set, val_ring) -> None:
 def build_datasets(args, rep):
     """Interferogram discovery, filtering, partitioning -> (train, val, test) sets."""
     H, W = args.patch_size
+    margin = tuple(getattr(args, "context_margin", (0, 0)) or (0, 0))
     days = 11 if args.train_on_11d_diff else None
     image_dir, mask_dir = resolve_patch_dirs(args.patches_dir, (H, W), args.stride,
-                                             days_diff=days, cleaned=args.use_cleaned_patches)
+                                             days_diff=days, cleaned=args.use_cleaned_patches,
+                                             context_margin=margin)
     logging.info(f"patch directories: {image_dir} | {mask_dir}")
+    if margin != (0, 0):
+        logging.info(f"large context: network sees {context_size((H, W), margin)}, "
+                     f"supervised on the centre {(H, W)}")
 
     spatial = args.partition_mode == "spatial"
     coord_dict = load_coord_dict(args.intf_dict_path)
@@ -410,6 +435,7 @@ def build_datasets(args, rep):
 
     dataset_kwargs = dict(
         patch_size=(H, W),
+        context_size=context_size((H, W), margin) if margin != (0, 0) else None,
         stride=args.stride,
         nonz_only=args.nonz_only,
         temporal=args.add_temporal,
@@ -801,6 +827,10 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
     def checkpoint_state():
         state = model.state_dict()
         state["mask_values"] = mask_values_of(train_set)
+        # Geometry travels with the weights: eval-scenes, test-patches, predict
+        # and the probe all read it, so a large-context checkpoint cannot be
+        # silently evaluated at 200x100.
+        state["io_geometry"] = io_geometry(getattr(model, "_context_size", None), tuple(args.patch_size))
         # Any architecture that describes itself gets its blob written, keyed by
         # the class rather than by an isinstance chain that has to be updated in
         # step with every new model.
@@ -818,6 +848,8 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                 config=config, elapsed=elapsed_before + (time.time() - run_start),
                 early_stopped=early_stopped,
                 extra={"mask_values": mask_values_of(train_set),
+                       "io_geometry": io_geometry(getattr(model, "_context_size", None),
+                                                  tuple(args.patch_size)),
                        "job_name": args.job_name, "run_dir": str(outpath)},
             ),
             resume_path,

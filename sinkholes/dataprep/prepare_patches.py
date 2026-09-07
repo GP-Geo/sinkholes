@@ -20,6 +20,7 @@ import numpy as np
 
 from ..geo import FRAME_ORIGINS, X_CROP_COLS, X_CROP_OFFSET, crop_to_start_xy
 from ..meta import intf_id_from_filename, intf_meta, parse_intf_id
+from .context import assert_centre_matches, context_size
 from .patchify import patch_dir_name, patch_file_name, patch_strides, patchify
 
 
@@ -29,8 +30,18 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--gt_polygon_file_path", type=str, required=True,
                    help="ground-truth subsidence polygons (shapefile)")
     p.add_argument("--patch_size", nargs=2, type=int, default=[200, 100], metavar=("H", "W"))
+    p.add_argument("--context_margin", nargs=2, type=int, default=[0, 0], metavar=("MY", "MX"),
+                   help="grow every DATA patch by this many pixels on each side, keeping the "
+                        "grid and the 200x100 target unchanged. '50 50' writes a ctx50x50 tree "
+                        "whose cells are 300x200 and whose centre is bit-identical to the plain "
+                        "cell. Masks are never margined, so --write_masks can be turned off and "
+                        "the plain mask tree reused")
+    p.add_argument("--write_masks", action=argparse.BooleanOptionalAction, default=True,
+                   help="write the mask tree. Off for a context run whose plain mask tree "
+                        "already exists — the targets are identical, and rewriting them is "
+                        "142 GB of I/O for bit-identical files")
     p.add_argument("--strides_per_patch", type=int, default=2,
-                   help="2 means a half-window step (50% overlap)")
+                   help="2 means a half-window step (50%% overlap)")
     p.add_argument("--days_diff", type=int, default=11,
                    help="only process interferograms of exactly this duration")
     p.add_argument("--by_list", type=str, default=None, help="comma list of ids to process")
@@ -50,11 +61,16 @@ def main(args) -> None:
     gdf = gpd.read_file(args.gt_polygon_file_path)
     patch_h, patch_w = args.patch_size
 
+    margin = tuple(args.context_margin)
     data_out = Path(args.output_dir) / patch_dir_name(
-        "data", patch_h, patch_w, args.strides_per_patch, args.days_diff)
+        "data", patch_h, patch_w, args.strides_per_patch, args.days_diff, margin)
     mask_out = Path(args.output_dir) / patch_dir_name(
         "mask", patch_h, patch_w, args.strides_per_patch, args.days_diff)
-    for d in (data_out, mask_out):
+    if margin != (0, 0):
+        ch, cw = context_size((patch_h, patch_w), margin)
+        logging.info(f"context tree: cells are {ch}x{cw}, target stays {patch_h}x{patch_w}, "
+                     f"grid and nonz_indices unchanged -> {data_out.name}")
+    for d in ((data_out,) if not args.write_masks else (data_out, mask_out)):
         if d.exists():
             logging.info(f"{d} already exists — existing grids will be overwritten by id")
         d.mkdir(parents=True, exist_ok=True)
@@ -103,14 +119,31 @@ def main(args) -> None:
         grids = patchify(
             data, (patch_h, patch_w),
             patch_strides((patch_h, patch_w), args.strides_per_patch),
-            mask_array=mask, offset=args.offset_x, nx=args.nx,
+            mask_array=mask, offset=args.offset_x, nx=args.nx, margin=margin,
         )
         data_patches, mask_patches, data_nonz, mask_nonz, nonz_indices = grids
+
+        if margin != (0, 0):
+            # Prove the invariant on the grid we just cut, not on a unit-test
+            # fixture: the centre of every context cell must be the plain cell.
+            plain = patchify(
+                data, (patch_h, patch_w),
+                patch_strides((patch_h, patch_w), args.strides_per_patch),
+                mask_array=None, offset=args.offset_x, nx=args.nx,
+            )
+            ny_, nx_ = data_patches.shape[:2]
+            checked = [(0, 0), (ny_ // 2, nx_ // 2), (ny_ - 1, nx_ - 1)]
+            for (ci, cj) in checked:
+                assert_centre_matches(data_patches[ci, cj], plain[ci, cj],
+                                      (patch_h, patch_w), where=f"{intf_id} cell ({ci},{cj})")
+            logging.info(f"{intf_id}: centre-alignment verified on cells {checked}")
         nonz_by_intf[intf_id] = nonz_indices
         logging.info(f"{intf_id}: grid {data_patches.shape[:2]}, {len(nonz_indices)} positive patches")
 
-        for kind, nonz, array in (("data", False, data_patches), ("mask", False, mask_patches),
-                                  ("data", True, data_nonz), ("mask", True, mask_nonz)):
+        outputs = [("data", False, data_patches), ("data", True, data_nonz)]
+        if args.write_masks:
+            outputs += [("mask", False, mask_patches), ("mask", True, mask_nonz)]
+        for kind, nonz, array in outputs:
             out_dir = data_out if kind == "data" else mask_out
             np.save(out_dir / patch_file_name(kind, intf_id, patch_h, patch_w,
                                               args.strides_per_patch, nonz=nonz), array)

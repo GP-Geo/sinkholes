@@ -38,7 +38,7 @@ import torch
 import torch.nn as nn
 
 from .convlstm_unet import DEFAULT_CONVLSTM_HIDDEN_CHANNELS, ConvLSTMCell
-from .parts import DoubleConv, Down, OutConv, Up
+from .parts import CentreCropOutput, DoubleConv, Down, OutConv, Up
 from .temporal import (
     at_latest_timestep,
     check_channels_per_timestep,
@@ -71,7 +71,7 @@ MAX_FUSED_SKIPS = 4
 SKIP_WIDTHS = (64, 128, 256, 512)
 
 
-class TemporalAttentionUNet(nn.Module):
+class TemporalAttentionUNet(CentreCropOutput, nn.Module):
     """U-Net whose bottleneck attends over time, past-only, with fused skips.
 
     As with ``ConvLSTMUNet``, the number of timesteps T is deliberately *not* an
@@ -305,7 +305,8 @@ class TemporalAttentionUNet(nn.Module):
         decoded = self.up2(decoded, skip3)
         decoded = self.up3(decoded, skip2)
         decoded = self.up4(decoded, skip1)
-        return self.outc(decoded), weights
+        # Centre-crop to predict_size when this is a large-context model; a no-op otherwise.
+        return self.crop_output(self.outc(decoded)), weights
 
     def forward(self, x: torch.Tensor, offsets: Optional[torch.Tensor] = None,
                 valid: Optional[torch.Tensor] = None) -> torch.Tensor:

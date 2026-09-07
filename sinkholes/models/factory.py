@@ -35,9 +35,17 @@ from .unet import UNet
 
 logger = logging.getLogger(__name__)
 
+#: Checkpoint key recording what the network was fed and what it predicted:
+#: ``{"context": [H, W], "predict": [H, W]}``. Architecture-independent on
+#: purpose -- every consumer (eval-scenes, test-patches, predict, the attention
+#: probe) reads geometry from this one key instead of a per-command flag, so a
+#: large-context checkpoint cannot be silently evaluated at 200x100.
+IO_GEOMETRY_KEY = "io_geometry"
+
 #: Keys a checkpoint carries that are not model parameters and must be removed
 #: before ``load_state_dict``.
-NON_PARAMETER_KEYS: Tuple[str, ...] = ("mask_values", CONVLSTM_CONFIG_KEY, TATTN_CONFIG_KEY)
+NON_PARAMETER_KEYS: Tuple[str, ...] = ("mask_values", CONVLSTM_CONFIG_KEY, TATTN_CONFIG_KEY,
+                                       IO_GEOMETRY_KEY)
 
 #: First encoder convolution, shared by every architecture here. Its shape[1]
 #: is the input channel count the checkpoint was trained with.
@@ -83,6 +91,10 @@ class LoadedModel:
     architecture: str
     n_channels: Optional[int]
     mask_values: Any = field(default_factory=lambda: [0, 1])
+    #: (H, W) the checkpoint was fed, and (H, W) it predicts. Both None for a
+    #: checkpoint written before large context, which means 200x100 -> 200x100.
+    context_size: Optional[Tuple[int, int]] = None
+    predict_size: Optional[Tuple[int, int]] = None
 
 
 _REGISTRY: list[Architecture] = []
@@ -155,6 +167,21 @@ def strip_non_parameters(state_dict: Dict[str, Any]) -> Dict[str, Any]:
     immediately afterwards.
     """
     return {k: state_dict.pop(k) for k in NON_PARAMETER_KEYS if k in state_dict}
+
+
+def io_geometry_of(extras: Dict[str, Any], predict_default=(200, 100)):
+    """(context, predict) from a checkpoint's popped non-parameter keys.
+
+    A checkpoint without the key predates large context and is 200x100 in,
+    200x100 out -- which is exactly what ``predict_size = None`` means, so old
+    checkpoints need no migration.
+    """
+    geo = extras.get(IO_GEOMETRY_KEY)
+    if not geo:
+        return None, None
+    ctx = tuple(geo.get("context") or predict_default)
+    pred = tuple(geo.get("predict") or predict_default)
+    return ctx, pred
 
 
 # -- builders --------------------------------------------------------------------------
@@ -352,11 +379,20 @@ def build_from_checkpoint(
         "architecture %s (%s from weights), %s input channels",
         chosen, "detected" if arch is None else "forced", n_channels,
     )
+    # Apply the stored geometry to the model itself, so every caller of
+    # forward() crops correctly without knowing this key exists.
+    ctx, pred = io_geometry_of(removed)
+    if pred is not None:
+        model.predict_size = None if ctx == pred else tuple(pred)
+        logger.info("io_geometry: context %s -> predict %s", tuple(ctx), tuple(pred))
+
     return LoadedModel(
         model=model,
         architecture=chosen,
         n_channels=n_channels,
         mask_values=removed.get("mask_values", [0, 1]),
+        context_size=ctx,
+        predict_size=pred,
     )
 
 
