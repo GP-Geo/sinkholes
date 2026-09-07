@@ -124,6 +124,11 @@ job eval6ref eval6ref_t5_convlstm \
 # these runs need reading again before anything is concluded from them.
 AMPFIX_T5="PARTITION=assets/partition_temporal_k5_pre2023.json K_PREVS=5 POS_W=4"
 AMPFIX_NEG="RING_NEGS=yes NEG_RING_OUTER=3 NEG_PER_POS=1.0"
+# lrscan settled this: momentum 0.999 is DEAD on corrected clipping (LSF 636709,
+# nan from epoch 1), and 0.9 was the best of the five survivors -- 0.666 in 8
+# epochs, above long200's 0.6622 over 200, and the only arm still clipping (12.6%)
+# at epoch 8 rather than starved to 0%.
+AMPFIX_OPT="LR=1e-5 MOMENTUM=0.9 LR_PATIENCE=20"
 AMPFIX_CTX="CTX_MY=50 CTX_MX=50 BATCH=64 ACCUM=2"
 
 # Plain 200x100, long200's config exactly: LR 1e-5, LR_PATIENCE 20, early
@@ -138,13 +143,13 @@ RES_AMPFIX_CTX_LONG="long-gpu   180   56  18:00"   # 200 ep = ~35h10m, ~2 requeu
 RES_AMPFIX_CTX_SHORT="long-gpu   180   56  18:00"  # 30 ep = ~5h20m, one allocation
 
 job ampfix ampfix_t5_convlstm_ring3_200e \
-    scripts/train/train_convlstm.sh "$AMPFIX_T5 $AMPFIX_NEG LR=1e-5 LR_PATIENCE=20 EPOCHS=200 PATIENCE=0" "$RES_AMPFIX_PLAIN" \
+    scripts/train/train_convlstm.sh "$AMPFIX_T5 $AMPFIX_NEG $AMPFIX_OPT EPOCHS=200 PATIENCE=0" "$RES_AMPFIX_PLAIN" \
     "the control: long200's exact config on corrected clipping -- the number every other arm here is read against"
 job ampfix ampfix_ctx50_t5_convlstm_ring3_200e \
-    scripts/train/train_convlstm.sh "$AMPFIX_T5 $AMPFIX_NEG $AMPFIX_CTX LR=1e-5 LR_PATIENCE=20 EPOCHS=200 PATIENCE=0" "$RES_AMPFIX_CTX_LONG" \
+    scripts/train/train_convlstm.sh "$AMPFIX_T5 $AMPFIX_NEG $AMPFIX_CTX $AMPFIX_OPT EPOCHS=200 PATIENCE=0" "$RES_AMPFIX_CTX_LONG" \
     "the matched context arm: identical to the control except 300x200 of context and the batch split that pays for it"
 job ampfix ampfix_ctx50_t5_convlstm_ring3_30e \
-    scripts/train/train_convlstm.sh "$AMPFIX_T5 $AMPFIX_NEG $AMPFIX_CTX LR=1e-5 LR_PATIENCE=5 EPOCHS=30 PATIENCE=0" "$RES_AMPFIX_CTX_SHORT" \
+    scripts/train/train_convlstm.sh "$AMPFIX_T5 $AMPFIX_NEG $AMPFIX_CTX LR=1e-5 MOMENTUM=0.9 LR_PATIENCE=5 EPOCHS=30 PATIENCE=0" "$RES_AMPFIX_CTX_SHORT" \
     "the fast read: 30 epochs at LR_PATIENCE=5, enough to see the corrected clip% and whether context moves the early curve at all"
 
 # THE SINGLE-FRAME FLOOR, AND THE ONE ARM THAT CHANGES ON BOTH COUNTS.
@@ -171,7 +176,7 @@ job ampfix ampfix_ctx50_t5_convlstm_ring3_30e \
 RES_AMPFIX_SINGLE="long-gpu    24   24  12:00"   # 2m13s/epoch measured -> ~7h25m
 
 job ampfix ampfix_t5_single_ring3_200e \
-    scripts/train/train_control.sh "ARCH=single $AMPFIX_T5 $AMPFIX_NEG LR=1e-5 LR_PATIENCE=20 EPOCHS=200 PATIENCE=0" "$RES_AMPFIX_SINGLE" \
+    scripts/train/train_control.sh "ARCH=single $AMPFIX_T5 $AMPFIX_NEG $AMPFIX_OPT EPOCHS=200 PATIENCE=0" "$RES_AMPFIX_SINGLE" \
     "the single-frame floor on corrected data: the only arm fixed on BOTH counts, and the one that says whether recurrence really buys what RESULTS.md 9 claims"
 
 # ---- lrscan: find a step size the corrected gradients can live with --------

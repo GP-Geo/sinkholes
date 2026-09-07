@@ -71,9 +71,14 @@ def masked_ce_plus_softdice_multiclass(logits, y_long, V):
 
 # -- the training objective -------------------------------------------------------------
 
-def segmentation_loss(logits, images, true_masks, *, n_classes, treat_nodata_regions, criterion):
+def segmentation_loss(logits, images, true_masks, *, n_classes, treat_nodata_regions, criterion,
+                      components=None):
     """The per-batch objective. Validation calls this same function, so
     val/loss is directly comparable with train/loss.
+
+    Pass a dict as ``components`` to receive the individual terms (detached)
+    under "bce" and "dice". The total is the only thing training uses; the split
+    is what says WHICH term a plateau is stuck on, which the total cannot.
 
     ``images`` is (B, T, H, W) — or (B, 2T, H, W) with validity channels, in
     which case the second half is the per-time validity block and ``V_any``
@@ -112,11 +117,16 @@ def segmentation_loss(logits, images, true_masks, *, n_classes, treat_nodata_reg
                 bce_fp = (bce_fp * M_fp).sum() / M_fp.sum().clamp(min=1.0)
             else:
                 bce_fp = logits.new_tensor(0.0)
+            if components is not None:
+                components["bce"] = (loss_bce + lam * bce_fp).detach()
+                components["dice"] = loss_dice.detach()
             return loss_bce + loss_dice + lam * bce_fp
 
-        loss = criterion(logits.squeeze(1), y_float.squeeze(1))
-        loss += dice_loss(torch.sigmoid(logits.squeeze(1)), y_float.squeeze(1), multiclass=False)
-        return loss
+        bce = criterion(logits.squeeze(1), y_float.squeeze(1))
+        dice = dice_loss(torch.sigmoid(logits.squeeze(1)), y_float.squeeze(1), multiclass=False)
+        if components is not None:
+            components["bce"], components["dice"] = bce.detach(), dice.detach()
+        return bce + dice
 
     if treat_nodata_regions:
         return masked_ce_plus_softdice_multiclass(logits, true_masks, V_any)

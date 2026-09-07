@@ -52,6 +52,8 @@ PARTITION="${PARTITION:?set PARTITION=assets/partition_<axis>_k<k>[_clean].json 
 K_PREVS="${K_PREVS:-5}"                   # temporal depth; MUST match the partition's k
 POS_W="${POS_W:-4}"                       # BCE positive weight (code default is 1)
 SEED="${SEED:-42}"
+MOMENTUM="${MOMENTUM:-0.999}"             # see lrscan: 0.999 diverges on corrected clipping
+LR_PATIENCE="${LR_PATIENCE:-5}"
 LR="${LR:-1e-6}"
 SCHEDULE="${SCHEDULE:-plateau}"           # plateau | cosine
 EPOCHS="${EPOCHS:-60}"
@@ -203,6 +205,8 @@ python -m sinkholes train \
   --batch_size "$BATCH" \
   --learning-rate "$LR" \
   --lr_schedule "$SCHEDULE" \
+  --lr_patience "$LR_PATIENCE" \
+  --momentum "$MOMENTUM" \
   --patches_dir /home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/patches \
   --partition_mode preset_by_intf \
   --partition_file "$PARTITION" \

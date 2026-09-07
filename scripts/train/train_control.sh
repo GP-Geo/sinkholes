@@ -40,6 +40,8 @@ POS_W="${POS_W:-8}"
 SEED="${SEED:-42}"
 LR="${LR:-1e-6}"
 SCHEDULE="${SCHEDULE:-plateau}"
+MOMENTUM="${MOMENTUM:-0.999}"            # RMSprop momentum; 0.999 is historical and diverges
+                                          # on corrected clipping -- see docs/EXPERIMENTS.md lrscan
 LR_PATIENCE="${LR_PATIENCE:-5}"           # was never exposed here; 5 is the code default,
                                           # so every earlier control run is unchanged
 EPOCHS="${EPOCHS:-60}"
@@ -137,6 +139,7 @@ python -m sinkholes train \
   --learning-rate "$LR" \
   --lr_schedule "$SCHEDULE" \
   --lr_patience "$LR_PATIENCE" \
+  --momentum "$MOMENTUM" \
   --patches_dir /home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/patches \
   --partition_mode preset_by_intf \
   --partition_file "$PARTITION" \

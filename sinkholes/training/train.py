@@ -745,10 +745,10 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
     criterion = (nn.CrossEntropyLoss() if model.n_classes > 1
                  else nn.BCEWithLogitsLoss(pos_weight=torch.tensor([args.pos_w], device=device)))
 
-    def loss_of(logits, images, true_masks):
+    def loss_of(logits, images, true_masks, components=None):
         return segmentation_loss(logits, images, true_masks, n_classes=model.n_classes,
                                  treat_nodata_regions=args.treat_nodata_regions,
-                                 criterion=criterion)
+                                 criterion=criterion, components=components)
 
     n_train, n_val = len(train_set), len(val_set)
     rep = setup_logger(REPORTER_NAME) if args.reporter else None
@@ -846,7 +846,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
         )
         columns = ["epoch", "time", "train/loss", "val/loss", "val/dice",
                    "val/IoU", "val/F1", "val/P", "val/R", "lr",
-                   "grad/norm", "grad/clip%", "amp/scale"]
+                   "train/bce", "train/dice", "grad/norm", "grad/clip%", "amp/scale"]
         table = EpochTable(columns, rep, header_every=25)
         # Resuming keeps epochs 1..completed and appends from there; a fresh run
         # starts the file over exactly as before.
@@ -921,6 +921,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
             n_batches = 0
             micro = 0          # position in the current accumulation group
             grad_stats.clear()
+            loss_parts: dict = {}
             with tqdm(total=n_train, desc=f"{epoch}/{args.epochs}", unit="img", leave=False) as pbar:
                 for batch in train_loader:
                     images, true_masks = batch["image"], batch["mask"]
@@ -945,7 +946,8 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                     with torch.autocast(device.type if device.type != "mps" else "cpu",
                                         enabled=args.amp):
                         logits = model(images)
-                    loss = loss_of(logits, images, true_masks)
+                    parts = {}
+                    loss = loss_of(logits, images, true_masks, parts)
 
                     # Accumulate over `accum` batches, then step once. Dividing
                     # the loss makes the accumulated gradient the MEAN over the
@@ -972,6 +974,9 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                     else:
                         epoch_loss += loss_val
                         n_batches += 1
+                        # Summed on-device: no .item() here, so no extra sync.
+                        for k, v in parts.items():
+                            loss_parts[k] = v if k not in loss_parts else loss_parts[k] + v
                     logging.info(f"step {global_step} epoch {epoch} train loss {loss_val:.8f}")
                     pbar.set_postfix(**{"loss (batch)": loss_val})
 
@@ -1035,6 +1040,10 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                 "val/R": round(val_metrics["recall"], 4) if val_metrics else float("nan"),
                 "lr": optimizer.param_groups[0]["lr"],
             }
+
+            for key in ("bce", "dice"):
+                row[f"train/{key}"] = (round(float(loss_parts[key]) / max(n_batches, 1), 6)
+                                       if key in loss_parts else float("nan"))
 
             g_steps = grad_stats.get("steps", 0)
             g_norms = grad_stats.get("norms", [])
