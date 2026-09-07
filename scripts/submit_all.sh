@@ -205,6 +205,24 @@ LRSCAN_NEG="RING_NEGS=yes NEG_RING_OUTER=3 NEG_PER_POS=1.0"
 LRSCAN_LEN="LR_PATIENCE=20 EPOCHS=8 PATIENCE=0"
 RES_LRSCAN="long-gpu    90   36   2:00"   # 8 x 3m31s = ~28m
 
+# THE NEGATIVE CONTROL, and it is expected to FAIL. lr 1e-5 with momentum 0.999
+# is exactly what ampfix ran (LSF 612826) before it went nan, so this arm is the
+# origin of the grid: every other arm changes one axis away from it.
+#
+# It is worth a GPU slot for a reason beyond completeness. --momentum was added
+# in 3a64c5d with a default of 0.999 to reproduce the value that had been
+# hardcoded at train.py:702. This arm is what PROVES that default is faithful.
+# If it trains happily, the divergence was never about momentum and the whole
+# reading of ampfix is wrong -- so a pass here is the informative outcome, not
+# the failure.
+#
+# Expect: epoch 1 clean (ampfix reached dice 0.469 with a BatchNorm running_var
+# already at 1.576e+08), epoch 2 flooded with non-finite gradients and amp/scale
+# collapsed to 0, loss nan from epoch 3. It dies well inside the 8.
+job lrscan lrscan_lr1e5_m999 \
+    scripts/train/train_convlstm.sh "$LRSCAN_BASE $LRSCAN_NEG $LRSCAN_LEN LR=1e-5 MOMENTUM=0.999" "$RES_LRSCAN" \
+    "the negative control: the exact ampfix setting that diverged, re-run to confirm it still does and that --momentum 0.999 reproduces the old hardcoded value"
+
 job lrscan lrscan_lr1e6_m999 \
     scripts/train/train_convlstm.sh "$LRSCAN_BASE $LRSCAN_NEG $LRSCAN_LEN LR=1e-6 MOMENTUM=0.999" "$RES_LRSCAN" \
     "lr axis: 10x down from the setting that blew up, momentum left at its historical 0.999"
