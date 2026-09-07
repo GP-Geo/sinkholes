@@ -113,10 +113,19 @@ LR five times and ended at 3.13e-07, live the whole way. It landed in the same
 place regardless, so **the floored LR was not what limited the original** — a
 clean negative result about the schedule.
 
-What is *not* settled: long200 took its best on the FINAL epoch (and set a new
-best at 198), so its own curve has not flattened. That is what `long500` is for.
-And **it has no object-level score at all** — `evallong200` is that job. Until it
-runs, every statement above is about the metric RESULTS.md ② rules out.
+**Settled 2026-09-07 by `evallong200`** (LSF 580743): object F1 **0.7529**
+against `temporal_k5_pre2023_convlstm_ring3`'s **0.7797**, on the convention
+RESULTS.md ⑨ quotes (`ith0.7_b5`, threshold 0.25, mean of per-scene). That is
+**−0.0268**, more than four times the ±0.006 noise floor, in the wrong
+direction. long200's rising dice curve — best on the final epoch, a new best at
+198 — did *not* correspond to a better detector, which is RESULTS.md ② holding
+once more: dice ranks these models backwards.
+
+At the looser tolerance (`ith0.5_b10`) long200 *wins* at low vote thresholds
+(+0.018 at 0.125, +0.011 at 0.25) and loses at 0.5. It finds more and localises
+worse. Both figures belong to the pre-`ab23b07` tree, where AMP clipping
+renormalised nearly every step, so they rank two models against each other and
+say nothing about either in absolute terms.
 
 ---
 
@@ -131,7 +140,7 @@ runs, every statement above is about the metric RESULTS.md ② rules out.
 | `probe` | selectivity of all 12 attention arms | done 2026-09-02 |
 | `eval7` | the 11 `pre23` arms on their own era | done 2026-09-02, LSF 261436–261464 |
 | `eval6ref` | 4 positives-only anchors | **LIVE** |
-| `evallong200` | long200 on the `eval6` protocol | **LIVE** |
+| `evallong200` | long200 on the `eval6` protocol | done 2026-09-07, LSF 580743 — **0.7529 vs 0.780** |
 
 ### `eval6` (2026-09-01)
 
@@ -171,6 +180,16 @@ See [PREDICTIONS.md §3c](PREDICTIONS.md). The decisive test — same scenes,
 ---
 
 ## Retired, and why
+
+**`long500`, `ctx50`, `evallong200`** (2026-09-07). `evallong200` completed and
+is recorded above. `long500` and the first `ctx50` pair were submitted (LSF
+580750/580752/580753) and **killed the same morning**, unrun, when the
+correctness hotfix `ab23b07` landed: it corrects AMP gradient clipping, and
+`check_config_compatible` refuses to resume an `--amp` checkpoint written
+without `gradient_clipping=unscaled-v2`. Those runs could not have been
+continued on this tree, and their premise changed anyway — `long500` existed to
+spend more epochs on long200's rising curve, which `evallong200` has since shown
+buys nothing. Replaced by `ampfix`.
 
 **`blend`** (Hann-window stitching, 2 jobs). Both checkpoints —
 `outputs/2026-08-11/geo_k5_tattn_ring3` and
