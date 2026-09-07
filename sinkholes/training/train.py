@@ -714,6 +714,28 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
     grad_scaler = torch.amp.GradScaler(enabled=args.amp)
     # Micro-batches per optimiser step. 1 is the historical path exactly.
     accum = max(1, int(getattr(args, "accum_steps", 1) or 1))
+
+    # Per-epoch gradient diagnostics. Purely observational: `clip_grad_norm_`
+    # already computes the pre-clip total norm and returns it, so recording it
+    # costs no extra pass over the gradients and changes no computation.
+    #
+    # The unscale_ lives here so both clip sites stay identical and neither can
+    # drift from the other. Because it runs FIRST, the norm that comes back is
+    # already in true units and must NOT be divided by the scale -- the bug this
+    # instrument exists to watch for. `amp/scale` is recorded separately: the
+    # scaler's factor still drifts, and still decides whether a step is taken.
+    grad_stats: dict = {}
+
+    def clip_and_record() -> None:
+        grad_scaler.unscale_(optimizer)          # no-op when --amp is off
+        norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0))
+        grad_stats["steps"] = grad_stats.get("steps", 0) + 1
+        if math.isfinite(norm):
+            grad_stats.setdefault("norms", []).append(norm)
+            if norm + 1e-6 > 1.0:                # clip_coef < 1, so the clip bit
+                grad_stats["clipped"] = grad_stats.get("clipped", 0) + 1
+        else:
+            grad_stats["nonfinite"] = grad_stats.get("nonfinite", 0) + 1
     criterion = (nn.CrossEntropyLoss() if model.n_classes > 1
                  else nn.BCEWithLogitsLoss(pos_weight=torch.tensor([args.pos_w], device=device)))
 
@@ -817,7 +839,8 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
             output_dir=outpath,
         )
         columns = ["epoch", "time", "train/loss", "val/loss", "val/dice",
-                   "val/IoU", "val/F1", "val/P", "val/R", "lr"]
+                   "val/IoU", "val/F1", "val/P", "val/R", "lr",
+                   "grad/norm", "grad/clip%", "amp/scale"]
         table = EpochTable(columns, rep, header_every=25)
         # Resuming keeps epochs 1..completed and appends from there; a fresh run
         # starts the file over exactly as before.
@@ -891,6 +914,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
             epoch_loss = 0.0
             n_batches = 0
             micro = 0          # position in the current accumulation group
+            grad_stats.clear()
             with tqdm(total=n_train, desc=f"{epoch}/{args.epochs}", unit="img", leave=False) as pbar:
                 for batch in train_loader:
                     images, true_masks = batch["image"], batch["mask"]
@@ -927,8 +951,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                     grad_scaler.scale(loss / accum).backward()
                     micro += 1
                     if micro == accum:
-                        grad_scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                        clip_and_record()
                         grad_scaler.step(optimizer)
                         grad_scaler.update()
                         micro = 0
@@ -950,8 +973,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                 # away. Retain the historical loss/accum weighting for this
                 # shorter group; unscale once at the optimiser boundary.
                 if micro:
-                    grad_scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    clip_and_record()
                     grad_scaler.step(optimizer)
                     grad_scaler.update()
                     optimizer.zero_grad(set_to_none=True)
@@ -1007,6 +1029,20 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                 "val/R": round(val_metrics["recall"], 4) if val_metrics else float("nan"),
                 "lr": optimizer.param_groups[0]["lr"],
             }
+
+            g_steps = grad_stats.get("steps", 0)
+            g_norms = grad_stats.get("norms", [])
+            g_clipped = grad_stats.get("clipped", 0)
+            row["grad/norm"] = round(float(np.median(g_norms)), 8) if g_norms else float("nan")
+            row["grad/clip%"] = round(100.0 * g_clipped / g_steps, 1) if g_steps else float("nan")
+            row["amp/scale"] = grad_scaler.get_scale() if args.amp else 1.0
+            if epoch == start_epoch and rep is not None and g_steps:
+                rep.info(f"  gradients: clip bit on {row['grad/clip%']:.1f}% of "
+                         f"{g_steps} steps, median true norm {row['grad/norm']:.3g}, "
+                         f"AMP scale {row['amp/scale']:g}")
+            if grad_stats.get("nonfinite") and rep is not None:
+                rep.warning(f"  epoch {epoch}: {grad_stats['nonfinite']} step(s) had a "
+                            f"non-finite gradient norm")
 
             # One deferred-signal window for the whole per-epoch record: weights,
             # the results row, the best checkpoint and finally resume.pt. A
