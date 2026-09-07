@@ -79,6 +79,28 @@ for d in "${runs[@]}"; do
   # noisy-data archive already separate the eras, so it is redundant in a name.
   clean="${clean#clean_}"
 
+  # The pre23_ prefix is NOT redundant -- it marks a different TRAINING SET (the
+  # archive truncated at 2022-12-31), which is the one thing about those runs
+  # that changes what their numbers mean. But a leading batch tag is not what
+  # outputs/README.md specifies, and it sorts the archive arms away from the
+  # partition they belong to. It belongs where the partition is named:
+  #     pre23_geo_k5_convlstm_ring3  ->  geo_k5_pre2023_convlstm_ring3
+  # so `geo_k5` and `geo_k5_pre2023` read as the two partitions they are.
+  if [[ "$clean" == pre23_* ]]; then
+    clean="${clean#pre23_}"
+    if [[ "$clean" =~ ^((geo|temporal)_k[0-9]+)(.*)$ ]]; then
+      clean="${BASH_REMATCH[1]}_pre2023${BASH_REMATCH[3]}"
+    else
+      echo "NOTE  $n -- pre23_ run with no <axis>_k<N> token; left as ${clean}"
+    fi
+  fi
+
+  # `_fixed` marked contrast+qk_norm when only some arms carried it. Every arm
+  # of both 2026-08-20 batches carries it, so by the "defaults are not in the
+  # name" rule of outputs/README.md it is no longer a variant. The dated folder
+  # separates these from the pre-fix runs that still need the distinction.
+  clean="${clean//_fixed/}"
+
   log="$d/logs/reporter.log"
   if [ "$FORCE" = 0 ]; then
     if [ ! -f "$log" ]; then

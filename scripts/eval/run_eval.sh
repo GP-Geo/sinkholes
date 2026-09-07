@@ -52,6 +52,17 @@ GEN="${GEN:-2}"             # PARTITION GENERATION -- assets/PARTITIONS.md.
                             #     (lat 31.25-31.75 / lon 35.38-35.46, geo cut at
                             #     31.4). Carries a per-split aoi_window, which is
                             #     passed to BOTH stages below -- see AOI_FLAGS.
+                            # p23 = partition_<group>_pre2023.json, the 2019-2022
+                            #     archive. Same generator, cut, AOI and seed as
+                            #     generation 3 with the archive stopped at
+                            #     2022-12-31, so it carries an aoi_window too and
+                            #     is scored on the same ground. THE REASON TO USE
+                            #     IT: its test split is entirely inside
+                            #     assets/lidar_intf_mask.txt (which ends
+                            #     20240605), so every scene is gated on its own
+                            #     LiDAR epoch. The generation-3 temporal test
+                            #     split is 0 of 22 -- every scene falls back to
+                            #     LiDAR2022 and carries that false-positive load.
                             # Generations are NOT comparable: different scene
                             # lists AND different scored ground.
 DATA_STRIDE="${DATA_STRIDE:-2}"  # strides per patch of the reconstruction grid.
@@ -143,9 +154,10 @@ cd "$REPO" || { echo "cannot cd to $REPO" >&2; exit 1; }
 # (sinkholes/inference/scenes.py). To evaluate a TEST split we therefore point
 # it at the _testeval variant, whose "val" is exactly the parent's "test" list.
 case "$GEN" in
-  2) GEN_SUFFIX="" ;;
-  3) GEN_SUFFIX="_clean" ;;
-  *) echo "GEN must be 2 or 3, got '$GEN'" >&2; exit 1 ;;
+  2)   GEN_SUFFIX="" ;;
+  3)   GEN_SUFFIX="_clean" ;;
+  p23) GEN_SUFFIX="_pre2023" ;;
+  *)   echo "GEN must be 2, 3 or p23, got '$GEN'" >&2; exit 1 ;;
 esac
 case "$SPLIT" in
   val)  PARTITION="assets/partition_${GROUP}${GEN_SUFFIX}.json" ;;
@@ -170,9 +182,11 @@ esac
 # rather than mis-scoring, which is the intended failure (partition.py:161).
 #
 # Generation 2 carries no window; load_partition_window returns None and the
-# whole canvas is scored, which is how those numbers were produced.
+# whole canvas is scored, which is how those numbers were produced. p23 is
+# generation 3's generator with a truncated archive, so it carries the same
+# per-split window and takes the same flags.
 AOI_FLAGS=()
-if [ "$GEN" = 3 ]; then
+if [ "$GEN" = 3 ] || [ "$GEN" = p23 ]; then
   AOI_FLAGS=(--aoi_from_partition "$PARTITION" --aoi_split val)
 fi
 
@@ -279,7 +293,7 @@ echo "partition $PARTITION  ($SPLIT split of $GROUP, generation $GEN)"
 echo "arch      $ARCH (k_prevs ${K_PREVS})"
 echo "stride    $DATA_STRIDE strides/patch$([ "$DATA_STRIDE" = 4 ] && echo " -- the paper's 16 tiles/pixel geometry")"
 echo "protocol  $PROTOCOL$([ "$PROTOCOL" = rth ] && echo " -- Confidence Factor + RTh 0.125/0.25/0.375/0.5, ITh 0.7/b5 and 0.5/b10" || echo " (mean probability)")"
-echo "aoi       $([ "$GEN" = 3 ] && echo "from $PARTITION [val]" || echo "none (whole canvas)")"
+echo "aoi       $([ ${#AOI_FLAGS[@]} -gt 0 ] && echo "from $PARTITION [val]" || echo "none (whole canvas)")"
 echo "blend     $BLEND$([ "$BLEND" = hann ] && echo " (gamma $GAMMA)")"
 echo "output    $OUTROOT/${CKPT%.pt}/${JOB}_<ts>"
 
