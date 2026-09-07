@@ -147,6 +147,33 @@ job ampfix ampfix_ctx50_t5_convlstm_ring3_30e \
     scripts/train/train_convlstm.sh "$AMPFIX_T5 $AMPFIX_NEG $AMPFIX_CTX LR=1e-5 LR_PATIENCE=5 EPOCHS=30 PATIENCE=0" "$RES_AMPFIX_CTX_SHORT" \
     "the fast read: 30 epochs at LR_PATIENCE=5, enough to see the corrected clip% and whether context moves the early curve at all"
 
+# THE SINGLE-FRAME FLOOR, AND THE ONE ARM THAT CHANGES ON BOTH COUNTS.
+# Every ConvLSTM arm above is affected by the clipping fix ALONE, because a
+# temporal stack always had real frames to normalise over. This one is affected
+# by the frame-v2 normalisation fix as well: a single 200x100 patch has no
+# channel axis, so normalise_channels looped over ROWS and decided the
+# "radians or already 0-1?" question 200 times per patch, once per row of 100
+# pixels -- which means one patch could be part-converted and part-not.
+#
+# That makes the recorded single-vs-recurrent gap (RESULTS.md 9: +0.047
+# temporal, +0.038 geo) UNSAFE TO QUOTE: some of it may be the U-Net running on
+# mangled input rather than recurrence being worth anything. This arm is what
+# re-measures that gap honestly, so it is worth more than either context arm.
+#
+# Config is temporal_k5_pre2023_single_ring3's (which scored 0.733), moved onto
+# the control's schedule: LR_PATIENCE=20 and 200 epochs with early stopping off,
+# matching ampfix_t5_convlstm_ring3_200e exactly so the two are readable against
+# each other. The original ran at LR_PATIENCE=5 (the code default; the template
+# never exposed the knob until now) and early-stopped at 87/100.
+#
+# 2m13s/epoch measured from that run (87 epochs in 3h13m), so 200 is ~7h25m in
+# one allocation. Host memory is its 13G peak with headroom.
+RES_AMPFIX_SINGLE="long-gpu    24   24  12:00"   # 2m13s/epoch measured -> ~7h25m
+
+job ampfix ampfix_t5_single_ring3_200e \
+    scripts/train/train_control.sh "ARCH=single $AMPFIX_T5 $AMPFIX_NEG LR=1e-5 LR_PATIENCE=20 EPOCHS=200 PATIENCE=0" "$RES_AMPFIX_SINGLE" \
+    "the single-frame floor on corrected data: the only arm fixed on BOTH counts, and the one that says whether recurrence really buys what RESULTS.md 9 claims"
+
 # ---- argument parsing -------------------------------------------------------
 WANT=all; SUBMIT=no; ONLY=()
 while [ $# -gt 0 ]; do
