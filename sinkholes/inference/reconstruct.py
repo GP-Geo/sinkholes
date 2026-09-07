@@ -185,6 +185,14 @@ def reconstruct_scene(
                          "the Confidence Factor counts unweighted tile votes")
     patch_h, patch_w = patch_size
     T = len(stack)
+    from ..dataprep.context import centre_slices
+
+    if not stack:
+        raise ValueError("reconstruction needs at least one input frame")
+    input_shape = stack[0].shape
+    if len(input_shape) != 4 or any(p.shape != input_shape for p in stack):
+        raise ValueError("all input frames must share (ny, nx, context_h, context_w)")
+    centre_rows, centre_cols = centre_slices(input_shape[-2:], patch_size)
     ny, nx = stack[0].shape[:2]
     out_h, out_w = canvas_shape(ny, nx, patch_size, stride)
     step_y, step_x = patch_h // stride, patch_w // stride
@@ -213,7 +221,7 @@ def reconstruct_scene(
 
             if image is not None:
                 for t in range(T):
-                    image[t, y0:y1, x0:x1] += stack[t][i, j] / (stride**2)
+                    image[t, y0:y1, x0:x1] += stack[t][i, j, centre_rows, centre_cols] / (stride**2)
             if gt is not None:
                 gt[y0:y1, x0:x1] += gt_grid[i, j] / (stride**2)
 
@@ -246,6 +254,8 @@ def reconstruct_scene(
             batch = torch.from_numpy(x_np[None]).to(device=device, memory_format=memory_format)
             with torch.no_grad():
                 prob = torch.sigmoid(net(batch)).squeeze().cpu().numpy().astype(np.float32)
+            if prob.shape != (patch_h, patch_w):
+                raise ValueError(f"model output {prob.shape} does not match target grid {patch_size}")
 
             if use_hann:
                 pred_num[y0:y1, x0:x1] += prob * window

@@ -13,6 +13,7 @@ import argparse
 import json
 import logging
 import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -50,6 +51,39 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--nx", type=int, default=X_CROP_COLS,
                    help="columns kept after the aligned crop")
     p.add_argument("--intf_dict_path", type=str, default=None)
+    p.add_argument("--index_mode", choices=["merge", "replace"], default="merge",
+                   help="merge updates processed scenes and preserves other index entries; "
+                        "replace rebuilds the index after a successful unfiltered full pass")
+
+
+def read_nonz_index(path):
+    if not path.exists():
+        return {}
+    with path.open() as fh:
+        index = json.load(fh)
+    if not isinstance(index, dict):
+        raise ValueError(f"{path} must contain a scene-to-coordinates dictionary")
+    return index
+
+
+def write_nonz_index_atomic(path, index):
+    """Publish a complete index on the same filesystem; never expose partial JSON.
+
+    Regeneration is a single-writer operation; this is crash protection, not a
+    concurrent dataset writer/reader transaction across the separate arrays.
+    """
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent,
+                                         prefix=f".{path.name}.", delete=False) as fh:
+            tmp = Path(fh.name)
+            json.dump(index, fh, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
 
 
 def main(args) -> None:
@@ -58,6 +92,9 @@ def main(args) -> None:
     from rasterio.features import geometry_mask
 
     logging.basicConfig(level=logging.INFO)
+    index_mode = getattr(args, "index_mode", "merge")
+    if index_mode == "replace" and (args.by_list is not None or args.year_range is not None):
+        raise ValueError("--index_mode replace requires an unfiltered full pass; use merge for subsets")
     gdf = gpd.read_file(args.gt_polygon_file_path)
     patch_h, patch_w = args.patch_size
 
@@ -76,7 +113,11 @@ def main(args) -> None:
         d.mkdir(parents=True, exist_ok=True)
 
     wanted = set(args.by_list.split(",")) if args.by_list else None
-    nonz_by_intf = {}
+    out_json = data_out / "nonz_indices.json"
+    # Validate existing metadata before overwriting any arrays.
+    previous_index = read_nonz_index(out_json)
+    nonz_by_intf = previous_index if index_mode == "merge" else {}
+    processed = 0
 
     for filename in sorted(os.listdir(args.input_dir)):
         if not filename.endswith(".unw"):
@@ -137,7 +178,6 @@ def main(args) -> None:
                 assert_centre_matches(data_patches[ci, cj], plain[ci, cj],
                                       (patch_h, patch_w), where=f"{intf_id} cell ({ci},{cj})")
             logging.info(f"{intf_id}: centre-alignment verified on cells {checked}")
-        nonz_by_intf[intf_id] = nonz_indices
         logging.info(f"{intf_id}: grid {data_patches.shape[:2]}, {len(nonz_indices)} positive patches")
 
         outputs = [("data", False, data_patches), ("data", True, data_nonz)]
@@ -147,11 +187,16 @@ def main(args) -> None:
             out_dir = data_out if kind == "data" else mask_out
             np.save(out_dir / patch_file_name(kind, intf_id, patch_h, patch_w,
                                               args.strides_per_patch, nonz=nonz), array)
+        nonz_by_intf[intf_id] = [[int(i), int(j)] for i, j in nonz_indices]
+        processed += 1
+        if index_mode == "merge":
+            write_nonz_index_atomic(out_json, nonz_by_intf)
 
-    out_json = data_out / "nonz_indices.json"
-    with open(out_json, "w") as fh:
-        json.dump({k: [[int(i), int(j)] for i, j in v] for k, v in nonz_by_intf.items()}, fh)
-    logging.info(f"wrote {out_json}")
+    if index_mode == "replace":
+        if not processed:
+            raise ValueError("no scenes processed; refusing to replace the index with an empty one")
+        write_nonz_index_atomic(out_json, nonz_by_intf)
+    logging.info(f"{index_mode}: {processed} scenes processed; index at {out_json}")
 
 
 if __name__ == "__main__":

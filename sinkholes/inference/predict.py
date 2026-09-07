@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from ..geo import PREDICT_X_OFFSET, crop_to_start_xy
+from ..dataprep.context import context_margin
 from ..meta import find_11day_sequences, intf_meta, load_coord_dict
 from ..normalise import SCENE_RANGE_TOL, normalise_phase
 from ..polygons import mask_array_to_polygons, pixel_polygons_to_lonlat
@@ -71,12 +72,23 @@ def read_unw_scene(intfs_dir: str, intf_id: str, meta) -> np.ndarray:
     return data
 
 
-def tile_view(scene: np.ndarray, patch_size, stride) -> np.ndarray:
-    """A zero-copy (ny, nx, H, W) sliding-window view over a full scene."""
+def tile_view(scene: np.ndarray, patch_size, stride, *, context_size=None) -> np.ndarray:
+    """Tile raw input around the unchanged target grid, retaining real context.
+
+    Padding is raw no-data (zero), matching prepare-patches at the edges of
+    the already cropped scene. Context never changes the number of target cells.
+    """
     patch_h, patch_w = patch_size
     step_y, step_x = patch_h // stride, patch_w // stride
-    windows = np.lib.stride_tricks.sliding_window_view(scene, (patch_h, patch_w))
-    return windows[::step_y, ::step_x]
+    ctx = tuple(context_size or patch_size)
+    my, mx = context_margin(tuple(patch_size), ctx)
+    ny = (scene.shape[0] - patch_h) // step_y + 1
+    nx = (scene.shape[1] - patch_w) // step_x + 1
+    if ny <= 0 or nx <= 0:
+        raise ValueError("scene/column window is smaller than the target patch")
+    padded = np.pad(scene, ((my, my), (mx, mx))) if (my or mx) else scene
+    windows = np.lib.stride_tricks.sliding_window_view(padded, ctx)
+    return windows[::step_y, ::step_x][:ny, :nx]
 
 
 def build_unified_gt_polygons(gdf, intf_ids):
@@ -167,6 +179,7 @@ def main(args) -> None:
         treat_nodata_regions=args.treat_nodata_regions,
     )
     net = loaded.model
+    input_size = loaded.input_size_for((patch_h, patch_w))
     net.to(device=device)
     net.load_state_dict(state_dict)
     net.eval()
@@ -207,7 +220,19 @@ def main(args) -> None:
             normalise_phase(s[:h, :w].astype(np.float32, copy=False), range_tol=SCENE_RANGE_TOL)
             for s in cropped
         ]
-        stack = [tile_view(s, (patch_h, patch_w), args.strdpp) for s in cropped]
+        if input_size == (patch_h, patch_w):
+            stack = [tile_view(s, (patch_h, patch_w), args.strdpp) for s in cropped]
+        else:
+            # Tile RAW aligned scenes before normalising, as prepare-patches +
+            # eval-scenes do, including zero-padding at the model column boundary.
+            # Intersect TARGET grids after tiling. A larger history scene can
+            # have real context beyond the shared targets' last row/column.
+            grids = [tile_view(s[:, args.x_pxls_offset:], (patch_h, patch_w), args.strdpp,
+                               context_size=input_size) for s in aligned]
+            common_ny = min(p.shape[0] for p in grids)
+            common_nx = min(p.shape[1] for p in grids)
+            stack = [normalise_phase(p[:common_ny, :common_nx].astype(np.float32, copy=False),
+                                     range_tol=SCENE_RANGE_TOL) for p in grids]
         ny, nx = stack[0].shape[:2]
 
         x_start = common_x0 + args.x_pxls_offset * meta.dx

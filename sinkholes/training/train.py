@@ -100,6 +100,12 @@ REPORTER_NAME = "sinkholes.train"
 
 
 def add_arguments(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--preprocessing_version", choices=["frame-v2", "legacy-row-v1"],
+                   default="frame-v2", help="frame-v2 normalises a single frame as one channel; "
+                   "legacy-row-v1 reproduces historical single-frame patch preprocessing")
+    p.add_argument("--aoi_selection_version", choices=["coordinates-v2", "legacy-v1"],
+                   default="coordinates-v2", help="coordinates-v2 filters all single-frame "
+                   "splits by AOI; legacy-v1 reproduces the historical positives-only bypass")
     p.add_argument("--epochs", "-e", type=int, default=5)
     p.add_argument("--batch_size", "-b", type=int, default=1)
     p.add_argument("--accum_steps", type=int, default=1,
@@ -442,6 +448,8 @@ def build_datasets(args, rep):
         raise SystemExit("no usable interferograms left after filtering")
 
     dataset_kwargs = dict(
+        preprocessing_version=getattr(args, "preprocessing_version", "frame-v2"),
+        aoi_selection_version=getattr(args, "aoi_selection_version", "coordinates-v2"),
         patch_size=(H, W),
         context_size=context_size((H, W), margin) if margin != (0, 0) else None,
         stride=args.stride,
@@ -647,9 +655,11 @@ def build_datasets(args, rep):
             test_imgs.append(te_i)
             test_msks.append(te_m)
         train_set = SubsiDataset.from_arrays(np.concatenate(train_imgs),
-                                             np.concatenate(train_msks), intf_list, mode="train")
+                                             np.concatenate(train_msks), intf_list, mode="train",
+                                             preprocessing_version=dataset_kwargs["preprocessing_version"])
         test_set = SubsiDataset.from_arrays(np.concatenate(test_imgs),
-                                            np.concatenate(test_msks), intf_list, mode="test")
+                                            np.concatenate(test_msks), intf_list, mode="test",
+                                            preprocessing_version=dataset_kwargs["preprocessing_version"])
         return train_set, test_set, test_set, "random_by_patch (non-overlapping)"
 
     dataset = SubsiDataset(image_dir, mask_dir, intf_list, mode="train",
@@ -724,6 +734,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
     global_step = 0
     elapsed_before = 0.0
     if resuming:
+        check_config_compatible(checkpoint.get("config", {}), run_config(args), "resume state")
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
@@ -830,6 +841,9 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
     last_path = dir_checkpoint / "last.pt"
     resume_path = dir_checkpoint / RESUME_NAME
     config = run_config(args)
+    logging.info("patch preprocessing=%s; AOI selection=%s; gradient clipping=%s",
+                 config["preprocessing_version"], config["aoi_selection_version"],
+                 config["gradient_clipping"])
     interrupted = False
     partial_epoch = None
     early_stopped = False
@@ -838,6 +852,8 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
     def checkpoint_state():
         state = model.state_dict()
         state["mask_values"] = mask_values_of(train_set)
+        state["data_contract"] = {key: config[key] for key in
+                                  ("preprocessing_version", "aoi_selection_version")}
         # Geometry travels with the weights: eval-scenes, test-patches, predict
         # and the probe all read it, so a large-context checkpoint cannot be
         # silently evaluated at 200x100.
@@ -859,6 +875,8 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                 config=config, elapsed=elapsed_before + (time.time() - run_start),
                 early_stopped=early_stopped,
                 extra={"mask_values": mask_values_of(train_set),
+                       "data_contract": {key: config[key] for key in
+                                         ("preprocessing_version", "aoi_selection_version")},
                        "io_geometry": io_geometry(getattr(model, "_context_size", None),
                                                   tuple(args.patch_size)),
                        "job_name": args.job_name, "run_dir": str(outpath)},
@@ -909,6 +927,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                     grad_scaler.scale(loss / accum).backward()
                     micro += 1
                     if micro == accum:
+                        grad_scaler.unscale_(optimizer)
                         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                         grad_scaler.step(optimizer)
                         grad_scaler.update()
@@ -928,8 +947,10 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                     pbar.set_postfix(**{"loss (batch)": loss_val})
 
                 # A partial group at the end of an epoch is stepped, not thrown
-                # away: its gradient is real, just averaged over fewer batches.
+                # away. Retain the historical loss/accum weighting for this
+                # shorter group; unscale once at the optimiser boundary.
                 if micro:
+                    grad_scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     grad_scaler.step(optimizer)
                     grad_scaler.update()

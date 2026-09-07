@@ -510,6 +510,9 @@ def main(args) -> None:
     device = torch.device(args.device) if args.device else get_device()
     state = torch.load(args.model, map_location="cpu", weights_only=False)
     loaded = build_from_checkpoint(state, n_classes=1)
+    if loaded.input_size_for(tuple(args.patch_size)) != tuple(args.patch_size):
+        raise SystemExit("attention-probe does not yet support context patches; "
+                         "use eval-scenes/test-patches for context checkpoints")
     if loaded.architecture != "tattn_unet":
         raise SystemExit(
             f"{args.model} is a {loaded.architecture!r} checkpoint. This probe reads "

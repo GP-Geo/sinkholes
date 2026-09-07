@@ -40,7 +40,7 @@ from scipy.ndimage import binary_dilation
 from torch.utils.data import Dataset
 
 from ..geo import FRAME_ORIGINS, grid_window
-from ..normalise import PATCH_RANGE_TOL, normalise_channels
+from ..normalise import PATCH_RANGE_TOL, PREPROCESSING_VERSIONS, normalise_channels
 from .context import context_margin
 from .patchify import patch_file_name
 
@@ -174,8 +174,16 @@ class SubsiDataset(Dataset):
         thresh_lat: float = 31.4,
         coord_dict: Optional[Dict[str, Any]] = None,
         aoi_window: Optional[Tuple[float, float, float, float]] = None,
+        preprocessing_version: str = "frame-v2",
+        aoi_selection_version: str = "coordinates-v2",
     ):
         super().__init__()
+        if preprocessing_version not in PREPROCESSING_VERSIONS:
+            raise ValueError(f"unknown preprocessing version {preprocessing_version!r}")
+        if aoi_selection_version not in ("coordinates-v2", "legacy-v1"):
+            raise ValueError(f"unknown AOI selection version {aoi_selection_version!r}")
+        self.preprocessing_version = preprocessing_version
+        self.aoi_selection_version = aoi_selection_version
         self.image_dir = Path(image_dir)
         self.mask_dir = Path(mask_dir)
         if not (self.image_dir.exists() and self.mask_dir.exists()):
@@ -240,6 +248,7 @@ class SubsiDataset(Dataset):
         # sampling and negatives all index into the (ny, nx, H, W) grid.
         use_nonz_files = (nonz_only and not spatial and not add_nulls_to_train
                           and not temporal and negatives is None)
+        filter_single_aoi = self.aoi_window is not None and aoi_selection_version == "coordinates-v2"
 
         def path_of(kind, tid, nonz):
             d = self.image_dir if kind == "data" else self.mask_dir
@@ -251,7 +260,7 @@ class SubsiDataset(Dataset):
         # not their (i, j) positions, and an annulus cannot be drawn without
         # positions.
         nonz_indices: Dict[str, Any] = {}
-        if temporal or negatives is not None:
+        if temporal or negatives is not None or (filter_single_aoi and nonz_only and not add_nulls_to_train):
             with open(self.image_dir / "nonz_indices.json") as fh:
                 nonz_indices = json.load(fh)
 
@@ -279,6 +288,13 @@ class SubsiDataset(Dataset):
                 image_data, mask_data = self._load_single_ring(
                     intf_id, path_of, patch_size, nonz_indices, negatives,
                 )
+            elif filter_single_aoi:
+                image_data, mask_data = self._load_single_ring(
+                    intf_id, path_of, patch_size, nonz_indices, None,
+                    nonz_only=nonz_only and not add_nulls_to_train,
+                )
+                if image_data is not None and nonz_only and add_nulls_to_train:
+                    image_data, mask_data = self._add_null_patches(image_data, mask_data)
             elif use_nonz_files:
                 image_data = np.load(path_of("data", intf_id, nonz=True))
                 mask_data = np.load(path_of("mask", intf_id, nonz=True))
@@ -438,7 +454,8 @@ class SubsiDataset(Dataset):
 
         return image, target
 
-    def _load_single_ring(self, intf_id, path_of, patch_size, nonz_indices, negatives):
+    def _load_single_ring(self, intf_id, path_of, patch_size, nonz_indices, negatives,
+                          *, nonz_only=True):
         """One interferogram's positive patches plus negatives, single frame.
 
         This exists so a single-frame U-Net can be trained on the *same* data a
@@ -485,7 +502,9 @@ class SubsiDataset(Dataset):
         # architecture comparison this path exists to make.
         window = self._window_for(intf_id, ny, nx)
         rc, seen = [], set()
-        for ij in nonz_indices.get(intf_id, []):
+        coordinates = (nonz_indices.get(intf_id, []) if nonz_only
+                       else ((i, j) for i in range(ny) for j in range(nx)))
+        for ij in coordinates:
             i, j = int(ij[0]), int(ij[1])
             if not (0 <= i < ny and 0 <= j < nx) or (i, j) in seen:
                 continue
@@ -497,11 +516,12 @@ class SubsiDataset(Dataset):
         if not rc:
             return None, None
 
-        union_grid = np.zeros((ny, nx), dtype=bool)
-        for m in msk_pa:
-            union_grid |= (m > 0).any(axis=(-2, -1))
-        rc = rc + negatives.sample(rc, union_grid,
-                                   allowed=self._allowed_grid(window, ny, nx))
+        if negatives is not None:
+            union_grid = np.zeros((ny, nx), dtype=bool)
+            for m in msk_pa:
+                union_grid |= (m > 0).any(axis=(-2, -1))
+            rc = rc + negatives.sample(rc, union_grid,
+                                       allowed=self._allowed_grid(window, ny, nx))
 
         image = np.stack([img[i, j] for (i, j) in rc], axis=0).astype(np.float32)
         target = np.stack([msk[i, j] for (i, j) in rc], axis=0).astype(np.float32)
@@ -591,13 +611,17 @@ class SubsiDataset(Dataset):
         return np.array(keep_img), np.array(keep_msk)
 
     @classmethod
-    def from_arrays(cls, image_data, mask_data, ids=None, mode="test") -> "SubsiDataset":
+    def from_arrays(cls, image_data, mask_data, ids=None, mode="test",
+                    *, preprocessing_version="frame-v2") -> "SubsiDataset":
         """A dataset directly over in-memory (N, H, W) arrays (non-overlap splits)."""
         self = cls.__new__(cls)
         Dataset.__init__(self)
         self.ids = list(ids or [])
         self.mode = mode
         self.temporal = False
+        if preprocessing_version not in PREPROCESSING_VERSIONS:
+            raise ValueError(f"unknown preprocessing version {preprocessing_version!r}")
+        self.preprocessing_version = preprocessing_version
         self.n_value_channels = None
         self.image_data = [np.expand_dims(image_data, axis=0)]
         self.mask_data = [np.expand_dims(mask_data, axis=0)]
@@ -613,7 +637,8 @@ class SubsiDataset(Dataset):
         return len(self.index_map)
 
     @staticmethod
-    def preprocess(mask_values, img, is_mask, n_value_channels=None):
+    def preprocess(mask_values, img, is_mask, n_value_channels=None,
+                   preprocessing_version="frame-v2"):
         """Normalise an image patch, or map a mask's values to class indices.
 
         For images, normalisation runs over axis 0 — timesteps of a (T, H, W)
@@ -628,7 +653,8 @@ class SubsiDataset(Dataset):
                 else:
                     mask[(img == v).all(-1)] = i
             return mask
-        return normalise_channels(img, range_tol=PATCH_RANGE_TOL, n_channels=n_value_channels)
+        return normalise_channels(img, range_tol=PATCH_RANGE_TOL, n_channels=n_value_channels,
+                                  version=preprocessing_version)
 
     def __getitem__(self, sample):
         intf_idx, patch_idx = self.index_map[sample]
@@ -640,8 +666,13 @@ class SubsiDataset(Dataset):
             msk = self.mask_data[intf_idx][0, patch_idx].astype(np.float32)
 
         img = self.preprocess(self.mask_values, img, 0,
-                              n_value_channels=getattr(self, "n_value_channels", None))
+                              n_value_channels=getattr(self, "n_value_channels", None),
+                              # Old pickles have no version: retain their row-wise path.
+                              preprocessing_version=getattr(self, "preprocessing_version", "legacy-row-v1"))
         msk = self.preprocess(self.mask_values, msk, 1)
+
+        if tuple(img.shape[-2:]) != tuple(getattr(self, "context_size", img.shape[-2:])):
+            raise ValueError(f"patch input {img.shape[-2:]} does not match context {self.context_size}")
 
         # A context sample is deliberately larger than its target, but only by a
         # symmetric margin: anything else means the image and the mask describe

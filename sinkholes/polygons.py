@@ -6,7 +6,8 @@ import geopandas as gpd
 import numpy as np
 from affine import Affine
 from rasterio.features import geometry_mask, shapes
-from shapely.geometry import Polygon, shape
+from shapely.affinity import affine_transform
+from shapely.geometry import shape
 
 
 def mask_array_to_polygons(mask_array: np.ndarray) -> gpd.GeoDataFrame:
@@ -36,9 +37,9 @@ def pixel_polygons_to_lonlat(
     """
     out = []
     for polyg in polyg_gdf["geometry"]:
-        out.append(
-            Polygon([(x_start + x * dx, y0 - y * dy) for x, y in polyg.exterior.coords])
-        )
+        # Transform the complete geometry, including every Polygon interior and
+        # every component of a MultiPolygon. Preserve the historical y sign.
+        out.append(affine_transform(polyg, [dx, 0, 0, -dy, x_start, y0]))
     return gpd.GeoDataFrame(geometry=out, crs="EPSG:4326")
 
 

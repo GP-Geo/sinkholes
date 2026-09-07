@@ -53,6 +53,9 @@ RESUME_NAME = "resume.pt"
 #: a change to any of these would silently produce a run that is neither the
 #: old experiment nor a clean new one, so it is refused.
 STRICT_CONFIG_KEYS: Sequence[str] = (
+    "preprocessing_version",
+    "aoi_selection_version",
+    "gradient_clipping",
     "architecture",
     "n_classes",
     "add_temporal",
@@ -172,6 +175,9 @@ def run_config(args) -> Dict[str, Any]:
     temporal = bool(args.add_temporal)
     H, W = args.patch_size
     return {
+        "preprocessing_version": getattr(args, "preprocessing_version", "frame-v2"),
+        "aoi_selection_version": getattr(args, "aoi_selection_version", "coordinates-v2"),
+        "gradient_clipping": "unscaled-v2",
         "architecture": architecture_name(args),
         "n_classes": int(args.classes),
         "add_temporal": temporal,
@@ -229,10 +235,22 @@ def check_config_compatible(saved: Mapping[str, Any], current: Mapping[str, Any]
                             checkpoint_path) -> list[str]:
     """Refuse an incompatible resume; return advisory differences as messages.
 
-    Keys absent from ``saved`` (a checkpoint written by an older version) are
-    skipped rather than treated as a mismatch — silence about a setting that
-    was never recorded is not evidence that it differed.
+    Unknown keys absent from old checkpoints are skipped. The patch policies
+    and AMP clipping have known historical defaults and are guarded explicitly.
     """
+    # These omissions have KNOWN historical semantics, unlike unknown optional
+    # keys below. Never continue an old run with a different population or
+    # preprocessing policy just because it predates the version fields.
+    saved = dict(saved)
+    if "dataset" in saved:
+        saved.setdefault("preprocessing_version", "legacy-row-v1")
+        saved.setdefault("aoi_selection_version", "legacy-v1")
+    if saved.get("amp") and saved.get("gradient_clipping") != "unscaled-v2":
+        raise IncompatibleResume(
+            f"cannot resume {checkpoint_path}: legacy AMP clipped scaled gradients. "
+            "Continue that run only with its original source tree; the fixed branch "
+            "must start a new experiment (model-only weights may be used explicitly)."
+        )
     missing = object()
     breaking = [
         (key, saved.get(key, missing), current.get(key))

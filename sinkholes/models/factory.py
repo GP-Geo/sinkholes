@@ -45,7 +45,7 @@ IO_GEOMETRY_KEY = "io_geometry"
 #: Keys a checkpoint carries that are not model parameters and must be removed
 #: before ``load_state_dict``.
 NON_PARAMETER_KEYS: Tuple[str, ...] = ("mask_values", CONVLSTM_CONFIG_KEY, TATTN_CONFIG_KEY,
-                                       IO_GEOMETRY_KEY)
+                                       IO_GEOMETRY_KEY, "data_contract")
 
 #: First encoder convolution, shared by every architecture here. Its shape[1]
 #: is the input channel count the checkpoint was trained with.
@@ -95,6 +95,19 @@ class LoadedModel:
     #: checkpoint written before large context, which means 200x100 -> 200x100.
     context_size: Optional[Tuple[int, int]] = None
     predict_size: Optional[Tuple[int, int]] = None
+    data_contract: Dict[str, str] = field(default_factory=lambda: {
+        "preprocessing_version": "legacy-row-v1", "aoi_selection_version": "legacy-v1"})
+
+    def input_size_for(self, predict_size) -> Tuple[int, int]:
+        """Validate the target grid and return the checkpoint's input footprint."""
+        from ..dataprep.context import context_margin
+
+        target = tuple(predict_size)
+        if self.predict_size is not None and tuple(self.predict_size) != target:
+            raise ValueError(f"checkpoint predicts {self.predict_size}, but target grid is {target}")
+        context = tuple(self.context_size or target)
+        context_margin(target, context)
+        return context
 
 
 _REGISTRY: list[Architecture] = []
@@ -393,6 +406,8 @@ def build_from_checkpoint(
         mask_values=removed.get("mask_values", [0, 1]),
         context_size=ctx,
         predict_size=pred,
+        data_contract=removed.get("data_contract", {
+            "preprocessing_version": "legacy-row-v1", "aoi_selection_version": "legacy-v1"}),
     )
 
 

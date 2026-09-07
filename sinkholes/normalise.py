@@ -39,13 +39,24 @@ def normalise_phase(channel: np.ndarray, *, range_tol: float) -> np.ndarray:
     return out
 
 
-def normalise_channels(stack: np.ndarray, *, range_tol: float, n_channels: int | None = None) -> np.ndarray:
+PREPROCESSING_VERSIONS = ("frame-v2", "legacy-row-v1")
+
+
+def normalise_channels(stack: np.ndarray, *, range_tol: float, n_channels: int | None = None,
+                       version: str = "frame-v2") -> np.ndarray:
     """Normalise the leading `n_channels` channels of `stack` (all when None).
 
     Channels at or after `n_channels` are validity maps and must stay strictly
     {0, 1} — running them through the 0 -> 0.5 remap would make the masked loss
     see no invalid pixels at all.
+
+    A 2-D input is one frame under frame-v2. legacy-row-v1 retains the old
+    accidental row-wise range test, solely for historical patch reproducibility.
     """
+    if version not in PREPROCESSING_VERSIONS:
+        raise ValueError(f"unknown preprocessing version {version!r}")
+    if stack.ndim == 2 and version == "frame-v2":
+        return normalise_phase(stack, range_tol=range_tol)
     out = stack.copy()
     stop = out.shape[0] if n_channels is None else int(n_channels)
     for c in range(stop):

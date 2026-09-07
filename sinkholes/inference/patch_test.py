@@ -45,6 +45,10 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--convlstm_unet", action="store_true")
     p.add_argument("--tattn_unet", action="store_true")
     p.add_argument("--treat_nodata_regions", action="store_true")
+    p.add_argument("--preprocessing_version", choices=["frame-v2", "legacy-row-v1"],
+                   default=None, help="default: saved checkpoint policy, legacy-row-v1 for old weights")
+    p.add_argument("--aoi_selection_version", choices=["coordinates-v2", "legacy-v1"],
+                   default=None, help="default: saved checkpoint policy, legacy-v1 for old weights")
 
     # -- building the split in place from a partition JSON ---------------------------
     # These mirror the train.py flag names exactly so they can be pasted out of
@@ -89,7 +93,8 @@ def build_split_from_partition(args):
     negatives (``dataprep/dataset.py``).
     """
     from ..dataprep.dataset import SubsiDataset
-    from ..dataprep.partition import load_partition_split
+    from ..dataprep.partition import load_partition_split, load_partition_window
+    from ..dataprep.context import context_margin
     from ..dataprep.patchify import resolve_patch_dirs
     from ..meta import find_11day_sequences, load_coord_dict
 
@@ -101,16 +106,18 @@ def build_split_from_partition(args):
                  f"{len(intf_list)} interferograms")
 
     H, W = args.patch_size
+    ctx = tuple(getattr(args, "_context_size", None) or (H, W))
     image_dir, mask_dir = resolve_patch_dirs(
         args.patches_dir, (H, W), args.stride,
         days_diff=11 if args.train_on_11d_diff else None,
         cleaned=args.use_cleaned_patches,
+        context_margin=context_margin((H, W), ctx),
     )
     logging.info(f"patch directories: {image_dir} | {mask_dir}")
 
     seq_dict = None
+    coord_dict = load_coord_dict(args.intf_dict_path)
     if args.add_temporal:
-        coord_dict = load_coord_dict(args.intf_dict_path)
         seq_dict, with_chains = find_11day_sequences(coord_dict, k_prev=args.k_prevs,
                                                      restrict_to=intf_list)
         dropped = sorted(set(intf_list) - set(with_chains))
@@ -130,6 +137,15 @@ def build_split_from_partition(args):
     return SubsiDataset(
         image_dir, mask_dir, intf_list, mode="test",
         patch_size=(H, W), stride=args.stride,
+        context_size=ctx,
+        coord_dict=coord_dict,
+        # Before this hotfix, test-patches did not pass an AOI for ANY model.
+        # Keep that separate historical command behavior for legacy weights.
+        aoi_window=(load_partition_window(args.partition_file, args.split)
+                    if (getattr(args, "aoi_selection_version", None) or "coordinates-v2") == "coordinates-v2"
+                    else None),
+        preprocessing_version=getattr(args, "preprocessing_version", None) or "frame-v2",
+        aoi_selection_version=getattr(args, "aoi_selection_version", None) or "coordinates-v2",
         nonz_only=args.nonz_only,
         temporal=args.add_temporal, seq_dict=seq_dict,
         treat_nodata_regions=args.treat_nodata_regions,
@@ -165,23 +181,13 @@ def resolve_test_data(args):
 
 def main(args) -> None:
     import torch
-    from torch.utils.data import DataLoader
+    from torch.utils.data import DataLoader, Subset
 
     from ..device import get_device
     from ..models.factory import architecture_from_flags, build_from_checkpoint
     from ..training.evaluate import evaluate
 
     logging.basicConfig(level=logging.INFO)
-    test_data, source = resolve_test_data(args)
-    if getattr(test_data, "n_negative", 0):
-        logging.warning(f"{test_data.n_negative} of {len(test_data)} patches are empty — "
-                        f"this is not a positives-only set")
-    else:
-        logging.info("positives-only protocol: every patch contains subsidence. These "
-                     "numbers compare against the paper, NOT against full-scene ones, "
-                     "and must never be used to select a model (docs/RESULTS.md)")
-    test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False)
-
     device = get_device()
     state_dict = torch.load(args.model, map_location=device)
     loaded = build_from_checkpoint(
@@ -201,6 +207,40 @@ def main(args) -> None:
     net.eval()
     logging.info(f"architecture {loaded.architecture} ({loaded.n_channels} in-channels) on {device}")
 
+    args._context_size = loaded.input_size_for(tuple(args.patch_size))
+    for key in ("preprocessing_version", "aoi_selection_version"):
+        requested = getattr(args, key, None)
+        saved = loaded.data_contract[key]
+        if requested is None:
+            setattr(args, key, saved)
+        elif requested != saved:
+            logging.warning(f"explicit {key} override: {saved} -> {requested}; "
+                            "this can change historical patch metrics")
+    logging.info(f"patch policies: {args.preprocessing_version}, {args.aoi_selection_version}")
+    test_data, source = resolve_test_data(args)
+    if getattr(test_data, "n_negative", 0):
+        logging.warning(f"{test_data.n_negative} of {len(test_data)} patches are empty — "
+                        f"this is not a positives-only set")
+    else:
+        logging.info("positives-only protocol: every patch contains subsidence. These "
+                     "numbers compare against the paper, NOT against full-scene ones, "
+                     "and must never be used to select a model (docs/RESULTS.md)")
+    test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False)
+
+    if len(test_data):
+        sample = test_data[0]
+        if tuple(sample["image"].shape[-2:]) != args._context_size:
+            raise SystemExit("test dataset input geometry does not match checkpoint context")
+        if tuple(sample["mask"].shape[-2:]) != tuple(args.patch_size):
+            raise SystemExit("test dataset target geometry does not match checkpoint")
+        base_data = test_data
+        while isinstance(base_data, Subset):
+            base_data = base_data.dataset
+        actual = getattr(base_data, "preprocessing_version", "legacy-row-v1")
+        if actual != args.preprocessing_version:
+            raise SystemExit(f"pickled dataset uses {actual}, requested {args.preprocessing_version}; "
+                             "build a split from --partition_file with the desired policy")
+
     metrics: dict = {}
     dice = evaluate(net, test_loader, device, amp=False, mode="test",
                     th=args.th, buffer=args.b, metrics_out=metrics)
@@ -210,6 +250,9 @@ def main(args) -> None:
         results = dict(metrics.get("test", {}))
         results.update(
             source=source, model=args.model, patches=len(test_data),
+            preprocessing_version=args.preprocessing_version,
+            aoi_selection_version=args.aoi_selection_version,
+            input_size=list(args._context_size), target_size=list(args.patch_size),
             positives_only=bool(getattr(test_data, "n_negative", 0) == 0),
             th=args.th, buffer=args.b,
         )
