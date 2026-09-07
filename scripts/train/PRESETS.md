@@ -13,7 +13,8 @@ Both templates ship with these, so an empty delta means "submit as-is":
 
     PARTITION=assets/partition_geo_k10.json   K_PREVS=10   HIDDEN=256
     POS_W=8   SEED=42   LR=1e-6   SCHEDULE=plateau
-    EPOCHS=60   BATCH=128   PATIENCE=20
+    EPOCHS=60   BATCH=128   ACCUM=1   PATIENCE=20   LR_PATIENCE=5
+    CTX_MY=     CTX_MX=
     RING_NEGS=no   NEG_RING_INNER=1   NEG_RING_OUTER=3   NEG_PER_POS=1.0
     VAL_NEGS=no
     RESUME=auto
@@ -28,6 +29,32 @@ and are not meant to be resubmitted.
 Plus, fixed in both templates and not normally changed: `--patch_size 200 100`,
 `--stride 2`, `--partition_mode preset_by_intf`, `--amp`, `--save_best_only`,
 `--resume auto`.
+
+### `ACCUM`, and why `BATCH` alone no longer describes a run
+
+`BATCH x ACCUM` is the **effective** batch, and the effective batch is what one
+run is comparable to another on. Both are STRICT resume keys, so a resume
+cannot quietly change either.
+
+Raise `ACCUM` and lower `BATCH` by the same factor when the activations stop
+fitting — which is exactly what a large-context run does. `BATCH=64 ACCUM=2`
+gives the optimiser the gradient `BATCH=128` would have produced, so the run
+stays readable against every 128 preset above. One difference does survive:
+BatchNorm sees one micro-batch at a time.
+
+### `CTX_MY` / `CTX_MX` — spatial context
+
+Empty (the default) reads the plain 200x100 patch tree, which is every run
+before 2026-09-07. `CTX_MY=50 CTX_MX=50` reads
+`data_patches_H200_W100_ctx50x50_strpp2_11days_Aligned` and feeds the network
+300x200, **still supervising, scoring and reconstructing the centre 200x100**.
+The grid, the targets, sample selection, ring negatives, the AOI window and the
+evaluation protocol are all unchanged; only what surrounds each target.
+
+Set both or neither — the template refuses one alone. Costs ~3x the activations
+(hence `ACCUM`) and ~3x the host memory, because the dataset still materialises
+every sample's pixels. `eval-scenes` takes the same `--context_margin`, and
+refuses a value that disagrees with the checkpoint's `io_geometry`.
 
 ## `train_convlstm.sh`
 

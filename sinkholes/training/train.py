@@ -102,6 +102,14 @@ REPORTER_NAME = "sinkholes.train"
 def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--epochs", "-e", type=int, default=5)
     p.add_argument("--batch_size", "-b", type=int, default=1)
+    p.add_argument("--accum_steps", type=int, default=1,
+                   help="accumulate gradients over this many batches before stepping, so the "
+                        "EFFECTIVE batch is batch_size*accum_steps. This is what lets a "
+                        "large-context run hold the effective batch of its 200x100 twin when "
+                        "the activations no longer fit: the optimiser sees the gradient a "
+                        "single batch that size would have produced, so a difference between "
+                        "the two runs is the context and not the optimiser. BatchNorm still "
+                        "sees one micro-batch at a time")
     p.add_argument("--learning-rate", "-l", dest="lr", type=float, default=1e-5)
     p.add_argument("--validation", "-v", dest="val", type=float, default=10.0,
                    help="validation share of the data, percent")
@@ -694,6 +702,8 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
             optimizer, "max", factor=args.lr_factor, patience=args.lr_patience,
             min_lr=args.min_lr)
     grad_scaler = torch.amp.GradScaler(enabled=args.amp)
+    # Micro-batches per optimiser step. 1 is the historical path exactly.
+    accum = max(1, int(getattr(args, "accum_steps", 1) or 1))
     criterion = (nn.CrossEntropyLoss() if model.n_classes > 1
                  else nn.BCEWithLogitsLoss(pos_weight=torch.tensor([args.pos_w], device=device)))
 
@@ -774,7 +784,8 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
             device=device.type,
             epochs=(f"{args.epochs} total (resuming at {start_epoch})"
                     if resuming else args.epochs),
-            batch_size=args.batch_size,
+            batch_size=(f"{args.batch_size} x {accum} accum = {args.batch_size * accum} effective"
+                        if accum > 1 else args.batch_size),
             learning_rate=args.lr,
             patch_size=f"{args.patch_size[0]}x{args.patch_size[1]} (stride {args.stride})",
             channels=channels,
@@ -861,6 +872,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
             model.train()
             epoch_loss = 0.0
             n_batches = 0
+            micro = 0          # position in the current accumulation group
             with tqdm(total=n_train, desc=f"{epoch}/{args.epochs}", unit="img", leave=False) as pbar:
                 for batch in train_loader:
                     images, true_masks = batch["image"], batch["mask"]
@@ -887,11 +899,20 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                         logits = model(images)
                     loss = loss_of(logits, images, true_masks)
 
-                    optimizer.zero_grad(set_to_none=True)
-                    grad_scaler.scale(loss).backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    grad_scaler.step(optimizer)
-                    grad_scaler.update()
+                    # Accumulate over `accum` batches, then step once. Dividing
+                    # the loss makes the accumulated gradient the MEAN over the
+                    # effective batch, which is what a single batch that size
+                    # would have produced. At accum == 1 every line below is the
+                    # original single-batch step, so no existing run changes.
+                    if micro == 0:
+                        optimizer.zero_grad(set_to_none=True)
+                    grad_scaler.scale(loss / accum).backward()
+                    micro += 1
+                    if micro == accum:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                        grad_scaler.step(optimizer)
+                        grad_scaler.update()
+                        micro = 0
 
                     pbar.update(images.shape[0])
                     global_step += 1
@@ -905,6 +926,15 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                         n_batches += 1
                     logging.info(f"step {global_step} epoch {epoch} train loss {loss_val:.8f}")
                     pbar.set_postfix(**{"loss (batch)": loss_val})
+
+                # A partial group at the end of an epoch is stepped, not thrown
+                # away: its gradient is real, just averaged over fewer batches.
+                if micro:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    grad_scaler.step(optimizer)
+                    grad_scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
+                    micro = 0
 
             dir_validation.mkdir(parents=True, exist_ok=True)
             dir_checkpoint.mkdir(parents=True, exist_ok=True)

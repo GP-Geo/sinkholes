@@ -4,7 +4,9 @@
 #
 #      scripts/submit_all.sh                     # list every live job (DRY RUN)
 #      scripts/submit_all.sh eval6ref            # list one kind
-#      scripts/submit_all.sh long200             # the 200-epoch temporal rerun
+#      scripts/submit_all.sh long500             # 500-epoch temporal rerun
+#      scripts/submit_all.sh ctx50               # the two 300x200 context arms
+#      scripts/submit_all.sh evallong200         # score long200 on scenes
 #      scripts/submit_all.sh eval6ref --submit   # send it
 #      scripts/submit_all.sh --only g5_single    # narrow by name, AND-ed with the kind
 #
@@ -85,69 +87,127 @@ job eval6ref eval6ref_t5_convlstm \
     scripts/eval/run_eval.sh "RUN=$R_T5_CONVLSTM $EVAL6_TEMP K_PREVS=5" "$RES_EVAL_S4_T5" \
     "the temporal anchor, completing the pair for every temporal row in eval6"
 
-# ---- long200: the temporal ConvLSTM taken to 200 epochs, early stopping off --
+# ---- long500: does long200's curve actually have more to give? -------------
 #
-#     submit_all.sh long200 --submit     # 1 job
+#     submit_all.sh long500 --submit     # 1 job
 #
-# pre23_temporal_k5_convlstm_ring3 is the best temporal model on record
-# (obj F1 0.780, RESULTS.md finding 9). Its 2026-08-20 run never finished: the
-# log stops mid-epoch at 91/100 with no early-stopping line and no completion
-# line, so best.pt is from an interrupted run, not a converged one. This is the
-# same config carried to 200 epochs with early stopping switched off.
+# long200 (LSF 643128, 2026-09-04) ran all 200 epochs and took its best val/dice
+# ON THE LAST ONE -- 0.6622 @ 200, having set a new best at 198 as well. Read on
+# its own that curve has not flattened, which is the reason for this arm.
 #
-# EVERY HYPER-PARAMETER IS THE ORIGINAL except EPOCHS, PATIENCE and LR_PATIENCE,
-# recovered from `git show d708fba:scripts/submit_all.sh` ($P_T5 $NEG_R3_1X
-# $C_HYP): LR 1e-5, POS_W 4, ring negatives 1..3 at 1:1, HIDDEN 256, BATCH 128,
-# plateau, SEED 42.
+# READ THE COMPARISON HONESTLY. long200's 0.6622 does NOT beat the run it was
+# meant to improve on: the original pre23_temporal_k5_convlstm_ring3 hit 0.6626
+# at epoch 51, and 200 epochs bought -0.0004 -- inside the +/-0.006 noise floor
+# (RESULTS.md 1). Its best.pt sitting on the final epoch is what argues for
+# more epochs; the flat 200-vs-51 result is what argues that they will not buy
+# object F1. This arm settles that, and its verdict is the object-level score,
+# not the dice curve (RESULTS.md 2).
 #
-# PATIENCE=0 IS how early stopping is disabled -- reporter.py:257 gates the
-# stop on `bool(self.patience)`, so 0 means never stop. It is also train.py's
-# own default; the templates set 20.
+# WHAT CHANGES FROM long200: EPOCHS 200->500, PATIENCE 0->200, LR_PATIENCE
+# 20->35. Everything else is long200's config exactly.
 #
-# LR_PATIENCE=20 IS A REAL CHANGE, AND THE ONE THAT MAKES THE EPOCHS WORTH
-# BUYING. The original died flat: by epoch 91 the plateau schedule had taken lr
-# to 1.95e-08 -- the --min_lr floor -- and val/dice had sat in the fourth
-# decimal for ~30 epochs. At LR_PATIENCE=5 another 100 epochs would run at an lr
-# that cannot move the weights. 20 cuts the LR roughly a quarter as often, so
-# the run spends its epochs at a live lr instead of on the floor.
-#
-# It cuts BOTH ways and the comparison should be read knowing it. train.py:259
-# argues the short patience is deliberate -- on the k10split run the first cut
-# is what broke a five-epoch plateau -- so a longer one can also just sit on a
-# plateau it should have escaped. This arm therefore differs from its eval6 row
-# by two factors, not one, and a difference in object F1 cannot be attributed to
-# the epoch count alone. That is an acceptable trade for a run whose purpose is
-# a converged model rather than a controlled comparison, but it does mean this
-# is a NEW experiment and not a re-run of the old one.
-#
-# This template did not expose --lr_patience before 2026-09-03; the knob was
-# added for this job, defaulting to the code's 5, so no other job moves.
-LONG200_T5="PARTITION=assets/partition_temporal_k5_pre2023.json K_PREVS=5 POS_W=4"
-LONG200_NEG="RING_NEGS=yes NEG_RING_OUTER=3 NEG_PER_POS=1.0"
-LONG200_HYP="LR=1e-5 EPOCHS=200 PATIENCE=0 LR_PATIENCE=20"
+# PATIENCE=200 rather than 0 (off) is deliberate: 200 epochs of no improvement
+# is a real plateau by any reading, and it returns the walltime instead of
+# burning 300 more epochs to prove it. LR_PATIENCE=35 continues what long200
+# established -- at 20 the schedule cut five times and still ended at 3.13e-07,
+# well clear of the 1.95e-08 floor the ORIGINAL died on, so the lr stayed live
+# the whole way. 35 cuts less often again.
+LONG500_T5="PARTITION=assets/partition_temporal_k5_pre2023.json K_PREVS=5 POS_W=4"
+LONG500_NEG="RING_NEGS=yes NEG_RING_OUTER=3 NEG_PER_POS=1.0"
+LONG500_HYP="LR=1e-5 EPOCHS=500 PATIENCE=200 LR_PATIENCE=35"
 
-# Measured from the original run, not estimated: 91 epochs in 5h01m = 3.31
-# min/epoch, so 200 epochs is ~11h02m. 18:00 is that plus 60% headroom.
-#
-# HOST MEMORY IS 90GB BY REQUEST, not by measurement. The pre23 batch estimated
-# this arm's peak at 44G and asked RES_P_T5=64G, and nothing in this job changes
-# the memory profile -- same partition, same ring negatives, same batch 128, and
-# epoch count does not affect stored samples. 90G is deliberate headroom over
-# that, cheap on long-gpu and harmless if unused. VRAM stays at RES_P_T5's 36G.
-RES_LONG200_T5="long-gpu    90   36  18:00"   # 11h02m measured; 90G host by request (est peak 44G)
+# Measured from long200, not estimated: 200 epochs in 11h44m = 3m31s/epoch, so
+# 500 epochs is ~29h20m. THAT DOES NOT FIT ONE ALLOCATION. -W 18:00 is the
+# longest walltime this project has had granted; --resume auto (the template
+# default) finds the run directory by LSF job id and continues from the last
+# completed epoch, so expect ~2 requeues. VRAM is long200's measured 25.8 GiB
+# reserved rounded up; host memory is long200's 90G, and epoch count does not
+# change the resident sample count.
+RES_LONG500_T5="long-gpu    90   36  18:00"   # 3m31s/epoch measured; ~2 requeues expected
 
-job long200 long200_t5_convlstm_ring3_200e \
-    scripts/train/train_convlstm.sh "$LONG200_T5 $LONG200_NEG $LONG200_HYP" "$RES_LONG200_T5" \
-    "the best temporal model rerun to completion: pre23_temporal_k5_convlstm_ring3 config, 200 epochs, early stopping off, LR_PATIENCE 5->20 so the epochs run at a live lr"
+job long500 long500_t5_convlstm_ring3_500e \
+    scripts/train/train_convlstm.sh "$LONG500_T5 $LONG500_NEG $LONG500_HYP" "$RES_LONG500_T5" \
+    "long200 set its best on the final epoch, so the epochs may not be spent: 500 of them, early stopping at 200, LR_PATIENCE 20->35"
+
+# ---- ctx50: 300x200 of context, supervising the same centre 200x100 ---------
+#
+#     submit_all.sh ctx50 --submit       # 2 jobs
+#
+# The first runs on data_patches_H200_W100_ctx50x50_strpp2_11days_Aligned
+# (437/437 interferograms, 1.7 TB, LSF 640831). The network is fed 300x200 and
+# its logits are cropped back to 200x100 inside forward(), so the loss, the
+# metrics, the sample grid, the partitions, the ring negatives, the AOI window
+# and the whole evaluation protocol are untouched. Only what surrounds each
+# target changes, which is what makes these two arms readable against long200.
+#
+# EVERY HYPER-PARAMETER IS long200's except the context and the batch split.
+# The comparator is therefore long200's OWN CURVE at the same epoch -- same
+# partition, same negatives, same LR, same seed, same effective batch.
+#
+# BATCH=64 ACCUM=2, NOT BATCH=64. 300x200 is 3x the activations, so 128 does not
+# fit; but batch_size is a STRICT resume key and every preset is 128, so halving
+# it alone would confound the context with the optimiser (PLAN_LARGE_CONTEXT.md
+# 6). Accumulation holds the effective batch at 128 and gives the optimiser the
+# gradient a single batch of 128 would have produced. One difference survives
+# and is not removable: BatchNorm sees one micro-batch at a time, so 384 samples
+# per step (B x T, T=6) instead of 768.
+#
+# 50 px IS UNDER WHAT THE ARCHITECTURE COULD USE. The receptive field measured
+# in PLAN_LARGE_CONTEXT.md 1 is 220 px for ConvLSTM-current, i.e. a usable
+# margin of +/-110. This is the cheap arm at 3x, not the plan's 400x300 (6x) or
+# 600x400 (12x); a null result here bounds the cheap end and does not settle
+# whether a margin at the receptive-field limit would help.
+CTX50_T5="PARTITION=assets/partition_temporal_k5_pre2023.json K_PREVS=5 POS_W=4"
+CTX50_NEG="RING_NEGS=yes NEG_RING_OUTER=3 NEG_PER_POS=1.0"
+CTX50_GEOM="CTX_MY=50 CTX_MX=50 BATCH=64 ACCUM=2"
+CTX50_HYP="LR=1e-5 LR_PATIENCE=20"
+
+# HOST MEMORY IS THE RISK HERE, not VRAM. SubsiDataset still materialises every
+# sample's pixels (the lazy loader PLAN_LARGE_CONTEXT.md 3 calls for was NOT
+# built), and those pixels are now 3x larger: long200's ~44G estimated peak
+# becomes ~90G, since the images scale and the 200x100 masks do not. 180G is
+# deliberate headroom over that -- the eval jobs above already run at 208G.
+# VRAM: long200 measured 25.8 GiB reserved at 128x200x100; half the batch at
+# three times the pixels is ~1.5x that, ~39 GiB, so 56G carries ~40% headroom.
+# WALLTIME: 3x the pixels is ~10m33s/epoch off long200's measured 3m31s.
+RES_CTX50_SHORT="long-gpu   180   56  18:00"   # 60 ep x ~10m33s = ~10h33m, one allocation
+RES_CTX50_LONG="long-gpu    180   56  18:00"   # 200 ep = ~35h10m, ~2 requeues via --resume auto
+
+job ctx50 ctx50_t5_convlstm_ring3_60e \
+    scripts/train/train_convlstm.sh "$CTX50_T5 $CTX50_NEG $CTX50_GEOM $CTX50_HYP EPOCHS=60 PATIENCE=0" "$RES_CTX50_SHORT" \
+    "the cheap read: does 300x200 of context move the curve at all by epoch 60, against long200's own epoch 60"
+job ctx50 ctx50_t5_convlstm_ring3_200e \
+    scripts/train/train_convlstm.sh "$CTX50_T5 $CTX50_NEG $CTX50_GEOM $CTX50_HYP EPOCHS=200 PATIENCE=0" "$RES_CTX50_LONG" \
+    "the matched arm: 200 epochs, early stopping off, directly against long200 -- same partition, negatives, LR, seed and effective batch, differing only in context"
+
+# ---- evallong200: the object-level score long200 has never had --------------
+#
+#     submit_all.sh evallong200 --submit     # 1 job
+#
+# long200 has a dice curve and NO object-level score, and dice is the metric
+# RESULTS.md 2 shows ranks these models backwards. Until this runs, "long200
+# looks good" is a reading of the one number the project has ruled out.
+#
+# THE PROTOCOL IS eval6's, EXACTLY, because that is what produced the 0.780 this
+# has to be read against: GEN=3 (generation-3 clean partitions), GROUP=temporal_k10
+# for the shared 20-scene temporal list, DATA_STRIDE=4 and PROTOCOL=rth.
+# K_PREVS=5 names the CHECKPOINT's depth, not the partition's -- run_eval.sh:264
+# expects exactly this pairing and says so. Identical to the eval6ref_t5_convlstm
+# row above, which is what makes the two directly comparable.
+R_LONG200=outputs/long200_t5_convlstm_ring3_200e_2026-09-03_16h22_lsf_643128
+
+job evallong200 evallong200_t5_convlstm \
+    scripts/eval/run_eval.sh "RUN=$R_LONG200 $EVAL6_TEMP K_PREVS=5" "$RES_EVAL_S4_T5" \
+    "the only reading that settles long200: object F1 on the eval6 protocol, against temporal_k5_pre2023_convlstm_ring3 at 0.780"
 
 # ---- argument parsing -------------------------------------------------------
 WANT=all; SUBMIT=no; ONLY=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    eval6ref|long200|all)   WANT="$1" ;;
+    eval6ref|long500|ctx50|evallong200|all)   WANT="$1" ;;
     # Retired by name rather than left to select zero jobs, so the mistake is
     # visible instead of looking like an empty batch. See docs/EXPERIMENTS.md.
-    train|tattn|control|clean22|valpos|attnfix|attnpos|pre23|training|\
+    long200|train|tattn|control|clean22|valpos|attnfix|attnpos|pre23|training|\
     eval|eval2|eval3|eval4|eval5|eval6|eval7|probe|posonly)
       echo "'$1' has already run -- see docs/EXPERIMENTS.md for what it settled." >&2
       echo "Recover its job definitions with: git show d708fba:scripts/submit_all.sh" >&2

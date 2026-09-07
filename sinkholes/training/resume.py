@@ -75,6 +75,7 @@ STRICT_CONFIG_KEYS: Sequence[str] = (
     "partition",
     "dataset",
     "batch_size",
+    "accum_steps",
     "seed",
 )
 
@@ -198,6 +199,11 @@ def run_config(args) -> Dict[str, Any]:
         "context_margin": (f"{args.context_margin[0]}x{args.context_margin[1]}"
                            if tuple(getattr(args, "context_margin", (0, 0)) or (0, 0)) != (0, 0)
                            else None),
+        # Emitted only when accumulating, so every checkpoint written before
+        # this keeps its fingerprint. batch_size alone no longer describes the
+        # optimiser: batch_size * accum_steps is the effective batch.
+        "accum_steps": (int(args.accum_steps)
+                        if int(getattr(args, "accum_steps", 1) or 1) != 1 else None),
         "stride": int(args.stride),
         "partition": _partition_signature(args),
         "dataset": _dataset_signature(args),

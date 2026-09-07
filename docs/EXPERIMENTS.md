@@ -72,7 +72,7 @@ been positives-only for every job since 2026-08-20**; the `valneg` kind is
 rejected by name so the mistake stays visible.
 
 Nine runs survive under `outputs/2026-08-19/` with `best.pt`. Four of them are
-the `eval6ref` anchors — still the one live batch in the launcher.
+the `eval6ref` anchors, one of the live batches in the launcher.
 
 ### `attnpos` (2026-08-20, 8 arms) — now `outputs/2026-08-20/*_valpos`
 
@@ -91,6 +91,33 @@ newer training years and nothing else.
 ahead in 4 of 6 matched pairs and significantly ahead in two, despite an archive
 ending three and a half years before the test scenes.
 
+### `long200` — the best temporal model taken to completion (2026-09-03, 1 arm)
+
+`outputs/long200_t5_convlstm_ring3_200e_2026-09-03_16h22_lsf_643128`, LSF 643128.
+Ran all 200 epochs in 11h44m (3m31s/epoch), peak VRAM 23.4 GiB allocated /
+25.8 GiB reserved.
+
+Its premise was that `pre23_temporal_k5_convlstm_ring3` — the best temporal
+model on record at object F1 0.780 — had never converged, because its 2026-08-20
+log stops mid-epoch at 91/100 with no completion line. **That premise was
+wrong**: the original's `best.pt` is from epoch 51, and the 40 epochs that
+followed it improved nothing. Nothing was lost to the interruption.
+
+**Verdict on the dice curve: 200 epochs bought nothing.** Best val/dice 0.6622
+@ epoch 200, against the original's 0.6626 @ epoch 51 — a difference of −0.0004,
+inside the ±0.006 noise floor.
+
+`LR_PATIENCE=20` did work mechanically. The original hit the 1.95e-08 `--min_lr`
+floor at epoch 75 and spent its last 16 epochs unable to move; long200 cut the
+LR five times and ended at 3.13e-07, live the whole way. It landed in the same
+place regardless, so **the floored LR was not what limited the original** — a
+clean negative result about the schedule.
+
+What is *not* settled: long200 took its best on the FINAL epoch (and set a new
+best at 198), so its own curve has not flattened. That is what `long500` is for.
+And **it has no object-level score at all** — `evallong200` is that job. Until it
+runs, every statement above is about the metric RESULTS.md ② rules out.
+
 ---
 
 ## Evaluation batches
@@ -103,7 +130,8 @@ ending three and a half years before the test scenes.
 | `eval6` | **all 19 runs of 2026-08-20**, RTh protocol | done 2026-09-01, LSF 984720–984749 |
 | `probe` | selectivity of all 12 attention arms | done 2026-09-02 |
 | `eval7` | the 11 `pre23` arms on their own era | done 2026-09-02, LSF 261436–261464 |
-| `eval6ref` | 4 positives-only anchors | **LIVE — the only unrun batch** |
+| `eval6ref` | 4 positives-only anchors | **LIVE** |
+| `evallong200` | long200 on the `eval6` protocol | **LIVE** |
 
 ### `eval6` (2026-09-01)
 

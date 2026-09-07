@@ -42,6 +42,12 @@ LR="${LR:-1e-6}"
 SCHEDULE="${SCHEDULE:-plateau}"           # plateau | cosine
 EPOCHS="${EPOCHS:-60}"
 BATCH="${BATCH:-128}"
+# Micro-batch x ACCUM is the EFFECTIVE batch, and the effective batch is what a
+# run is comparable on. Raise ACCUM and lower BATCH by the same factor when the
+# activations no longer fit -- a large-context run is the reason this exists --
+# and the optimiser sees what BATCH=128 would have given it. Both are STRICT
+# resume keys (resume.py), so a resume cannot quietly change either.
+ACCUM="${ACCUM:-1}"
 PATIENCE="${PATIENCE:-20}"                # early stop; 0 = off (reporter.py:257)
 # plateau: epochs without val/dice improvement before the LR is cut. 5 is the
 # code default (train.py:259) and what EVERY run before 2026-09-03 used, since
@@ -51,6 +57,27 @@ PATIENCE="${PATIENCE:-20}"                # early stop; 0 = off (reporter.py:257
 # say so in the run's row: it is an ADVISORY resume key (resume.py:88), so a
 # resume will report the change rather than refuse it.
 LR_PATIENCE="${LR_PATIENCE:-5}"
+
+# --- spatial context --------------------------------------------------------
+# Empty = the plain 200x100 tree, which is every run before 2026-09-07.
+# CTX_MY=50 CTX_MX=50 reads data_patches_H200_W100_ctx50x50_strpp2_11days_Aligned and feeds
+# the network 300x200 while still supervising, scoring and reconstructing the
+# centre 200x100. The grid, the targets, sample selection, ring negatives, the
+# AOI window and the evaluation protocol are all unchanged -- only what
+# surrounds each target. Costs ~3x the activations, hence ACCUM above.
+# Two variables rather than one "MY MX" string: submit_all.sh applies overrides
+# with `read -ra`, which splits on whitespace, so a two-word value cannot
+# survive the trip. Set BOTH or NEITHER.
+CTX_MY="${CTX_MY:-}"
+CTX_MX="${CTX_MX:-}"
+CTX_FLAGS=()
+if [ -n "$CTX_MY" ] || [ -n "$CTX_MX" ]; then
+  if [ -z "$CTX_MY" ] || [ -z "$CTX_MX" ]; then
+    echo "set both CTX_MY and CTX_MX, or neither (got '$CTX_MY' / '$CTX_MX')" >&2
+    exit 1
+  fi
+  CTX_FLAGS=(--context_margin "$CTX_MY" "$CTX_MX")
+fi
 
 # --- negative sampling ------------------------------------------------------
 # Positives-only training (--nonz_only, the code default and what every run
@@ -138,6 +165,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 python -m sinkholes train \
   --epochs "$EPOCHS" \
   --batch_size "$BATCH" \
+  --accum_steps "$ACCUM" \
   --learning-rate "$LR" \
   --lr_schedule "$SCHEDULE" \
   --lr_patience "$LR_PATIENCE" \
@@ -145,6 +173,7 @@ python -m sinkholes train \
   --partition_mode preset_by_intf \
   --partition_file "$PARTITION" \
   --patch_size 200 100 \
+  ${CTX_FLAGS[@]+"${CTX_FLAGS[@]}"} \
   --stride 2 \
   --pos_w "$POS_W" \
   --add_temporal \
