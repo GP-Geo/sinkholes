@@ -11,7 +11,12 @@ Written 2026-08-09, when the run directories were pruned; extended 2026-08-11
 with the 13-run 2026-08-10 batch; extended 2026-08-12 with the four-run
 2026-08-11 batch and **the object-level scores for all 17 evaluated models**;
 extended 2026-08-19 with the 14-run clean benchmark (`clean22`), the first batch
-on generation-3 partitions.
+on generation-3 partitions; extended 2026-09-01 with the 19 runs of the
+2026-08-20 batches (`attnpos` and `pre23`); extended 2026-09-03 with **the
+object-level scores for all 19** (`eval6`, run 2026-09-01), **the selectivity
+probe for all 12 attention arms** (run 2026-09-02), and **the 11 `pre23` arms
+re-scored on their own era** (`eval7`, run 2026-09-02). See
+[PREDICTIONS.md](PREDICTIONS.md) for the numbers.
 The point of this file is that **the metrics outlive the weights**:
 `results.csv`, the training log and `curves.png` are kept for every run listed
 here, so a deleted checkpoint costs a retrain (~2.5 h GPU) but never costs the
@@ -499,11 +504,14 @@ positives-only validation could not see. Whether it survives at scene scale is
   for 40 epochs. The fastest overfit in the project; it is the weakest geo run
   in the batch and is deliberately excluded from `eval5`.
 
-### Object-level status — nothing here is scored yet
+### Object-level status — scored 2026-09-01 (`eval6`)
 
-**Every `obj F1` cell above is `—`.** `outputs/predictions/` contains only
-generation-2 runs. Per the standing rule at the top of this file, the dice
-column must not be used to promote or kill any of these.
+**The `obj F1` cells above are stale `—` placeholders for the clean22 table
+only.** All nineteen runs of the 2026-08-20 batches were scored 2026-09-01 under
+the RTh protocol described below; the numbers are in
+[PREDICTIONS.md §4](PREDICTIONS.md). Per the standing rule at the top of this
+file, the dice column still must not be used to promote or kill any of these —
+and `eval6` is now the object-level evidence that supersedes it.
 
 `submit_all.sh eval5` scores **8 of the 14**, under the **benchmark paper's RTh
 protocol** (implemented 2026-08-19, `PLAN_CLEAN_BENCHMARK.md` §7(b) items 1 and
@@ -551,6 +559,260 @@ does not answer better. **Cost if that is wrong: ~2.5 h GPU each**, and
 `temporal_k10_convlstm_ring3` has no positives-only twin yet — the `attnpos`
 batch is where it was meant to come from. The other five keep their
 `predictions/` object scores from before the deletion.
+
+## The 2026-08-20 batches — positives-only reruns and the pre-2023 archive (19 runs)
+
+*Recorded 2026-09-01 from `results.csv` and `logs/reporter.log`. **No run in
+either batch has an object-level score**, so by the rule at the top of this file
+none of the tables below is a ranking. They are the training record.*
+
+Two batches were submitted on 2026-08-20 and all 19 runs finished on GPU:
+
+| Batch | Kind | Partitions | Runs | Where |
+|---|---|---|---|---|
+| positives-only attention reruns | `attnpos` | `*_clean.json` (2019–2026) | 8 | top level of `outputs/` |
+| the 2019–2022 archive | `pre23` | `*_pre2023.json` (2019–2022) | 11 | top level of `outputs/` |
+
+Both validate on **positives only** — the protocol adopted 2026-08-20 — so they
+are readable against the four `valpos` runs already in `outputs/2026-08-19/` and
+**not** against any `valneg` number. Every one of the 19 kept `best.pt`, plus
+`last.pt` and `resume.pt`; seven also hold an `interrupted.pt` from a requeue.
+
+### The comparability rule this batch adds: read `valN`, not just the partition
+
+Within one partition the **single-frame and temporal arms do not share a
+validation set**, and the gap is large on geo. `_load_temporal`
+(`dataprep/dataset.py:341`) clips every grid to the chain's common extent
+(`ny = min(...)` over the T frames) and drops coordinates missing from an
+earlier grid; `_load_single_ring` (`:428`) reads the current frame's grid only
+and keeps them. The temporal val set is therefore a **subset** of the
+single-frame one:
+
+| Group | single-frame `valN` | temporal `valN` | ratio |
+|---|---:|---:|---:|
+| `geo_k5` clean | 6,526 | 4,093 | 1.59x |
+| `geo_k5` pre23 | 4,270 | 2,576 | 1.66x |
+| `temporal_k5` pre23 | 6,417 | 6,072 | 1.06x |
+
+On temporal this is a 6% difference and can be ignored. **On geo the
+single-frame arm is scored on 60% more patches than the model it is the control
+for**, so a single-vs-temporal dice gap under ~0.02 on geo says nothing. `valN`
+is in every table below for that reason.
+
+### Batch 1 — `attnpos`, positives-only, generation-3 partitions
+
+The five `attnfix` arms of 2026-08-19 rerun without validation negatives, plus
+four temporal arms that had no positives-only twin. Ring-3 1:1 negatives,
+`pos_w` 4, batch 128, lr 1e-5, 100 epochs, patience 40, seed 42 throughout. The
+four `valpos` runs already under `outputs/2026-08-19/` are folded in — same
+protocol, same partitions, same hyper-parameters.
+
+**Geo** — the target axis. Only rows sharing a `valN` are strictly comparable:
+
+| Run | dice | val/F1 | val/P | val/R | best/last ep | valN | obj F1 |
+|---|---|---|---|---|---|---:|---|
+| `geo_k10_tattn_hybrid_ring3_valpos` | **0.6025** | 0.6688 | 0.6406 | 0.6997 | 37 / 77 | 2,649 | — |
+| `2026-08-19/geo_k10_convlstm_ring3_valpos` | 0.5921 | **0.6744** | 0.6485 | 0.7026 | 43 / 83 | 2,649 | — |
+| `geo_k10_tattn_ring3_valpos` | 0.5876 | 0.6625 | 0.6421 | 0.6842 | 41 / 81 | 2,649 | — |
+| `2026-08-19/geo_k5_single_ring3_valpos` | 0.5869 | **0.6748** | 0.6533 | 0.6978 | 59 / 93 (!) | 6,526 | — |
+| `geo_k5_tattn_ring3_valpos` | 0.5861 | 0.6544 | 0.5911 | 0.7329 | 53 / 93 | 4,093 | — |
+| `2026-08-19/geo_k5_convlstm_ring3_valpos` | 0.5847 | 0.6628 | 0.6191 | 0.7133 | 48 / 88 | 4,093 | — |
+
+**Temporal:**
+
+| Run | dice | val/F1 | val/P | val/R | best/last ep | valN | obj F1 |
+|---|---|---|---|---|---|---:|---|
+| `2026-08-19/temporal_k5_convlstm_ring3_valpos` | **0.6526** | **0.7453** | 0.6861 | 0.8158 | 66 / 100 | 5,917 | — |
+| `temporal_k10_convlstm_ring3_valpos` | 0.6510 | 0.7451 | 0.6936 | 0.8048 | 75 / 100 | 4,735 | — |
+| `temporal_k5_tattn_ring3_valpos` | 0.6493 | 0.7420 | 0.6862 | 0.8077 | 82 / 100 | 5,917 | — |
+| `temporal_k5_tattn_hybrid_ring3_valpos` | 0.6484 | 0.7385 | 0.6844 | 0.8018 | 83 / 100 | 5,917 | — |
+| `temporal_k10_tattn_hybrid_ring3_valpos` | 0.6465 | 0.7424 | 0.7005 | 0.7896 | 77 / 100 | 4,735 | — |
+| `temporal_k10_tattn_ring3_valpos` | 0.6420 | 0.7441 | 0.7271 | 0.7619 | 77 / 100 | 4,735 | — |
+
+(!) `geo_k5_single_ring3_valpos` has no completion line — killed at epoch 93 of
+100, most likely `TERM_RUNLIMIT` (`outputs/README.md`). Its best epoch is 59 and
+its last seven epochs ran at lr 1.95e-08 with `val/dice` flat in the fourth
+decimal, so the missing epochs cannot move the number; nothing that parses
+`Best val/dice` will see it.
+
+**The dice deflation predicted for this batch happened, at the predicted size.**
+`submit_all.sh` expected 0.63–0.66 where the `valneg` twins read 0.72–0.80.
+Measured, per matched pair:
+
+| Run | `valneg` dice | `valpos` dice | delta |
+|---|---|---|---|
+| `geo_k10_tattn_fixed_ring3` | 0.7331 | 0.5876 | −0.1455 |
+| `geo_k10_tattn_hybrid_fixed_ring3` | 0.7442 | 0.6025 | −0.1417 |
+| `geo_k5_tattn_fixed_ring3` | 0.7233 | 0.5861 | −0.1372 |
+| `temporal_k5_tattn_fixed_ring3` | 0.7957 | 0.6493 | −0.1464 |
+
+`val/F1` — pooled over raw pixel counts and negative-aware on both protocols —
+moves **+0.0032, +0.0061, +0.0119, +0.0176** across the same four pairs: an
+order of magnitude smaller than the dice move, and in the *opposite* direction.
+**That is the check that the deflation is the padding coming off and not a
+regression.** (Each figure is read at its own run's best-dice epoch, and the
+protocol changes which epoch that is, so these deltas carry a selection
+difference as well as a protocol one — they bound the effect, they do not
+isolate it.)
+
+**Nothing in this batch separates on the patch curve.** Geo k10 spans 0.0149
+dice across three architectures and **changes leader** on `val/F1`: ConvLSTM
+first at 0.6744, the dice leader (hybrid) second at 0.6688, attention last on
+both. Temporal spans 0.0106 dice and 0.0068
+`val/F1` across six runs. Against a ±0.006 dice noise floor — and with **no
+seed repeat on generation 3**, so the true floor is wider — attention, the
+hybrid and ConvLSTM are a three-way tie on both axes.
+
+**The attention fix is not isolated here, by design.** `attnpos` carries no
+`prefix` control; the fixed/prefix pair was run once, under `valneg`
+(0.7331 vs 0.7271 — a 0.006 gap, at the noise floor). No positives-only
+comparison of working against dead attention exists, and the `valneg`
+checkpoints that would license one were deleted with the 2026-08-18 batch.
+
+### Does the attention actually select? Measured 2026-09-02 — 8 of 12 do
+
+*Probed 2026-09-02. All twelve attention checkpoints of both 2026-08-20 batches,
+each against the partition family it **trained** on, `--control_lookback` set to
+that run's own `k_prevs`, `--lookback 40` to match the 2026-08-19 references.
+The headline number is the **control** ratio `effective_frames /
+effective_frames_if_uniform` at the run's own depth — that is the quantity the
+six reference points quote, not the probe-depth ratio. 1.000 is exactly uniform.
+0.9 is `run_probe.sh`'s own collapse alarm.*
+
+**The probe does not need the cluster.** It runs on a laptop against the patch
+tree over the mount, roughly 5 min per checkpoint, I/O-bound rather than
+compute-bound; the whole sweep of twelve took about an hour. `run_probe.sh` is
+written as a `bsub` job, which made this look like queued work for a year.
+
+| Checkpoint | control | k40 | temp | obj F1 | reading |
+|---|---|---|---|---|---|
+| `clean_temporal_k10_tattn_hybrid` | **0.708** | 0.711 | 1.093 | 0.772 | selecting |
+| `geo_k5_tattn` | 0.735 | 0.719 | 1.431 | 0.595 | selecting |
+| `temporal_k10_pre2023_tattn` | 0.741 | 0.707 | 1.860 | 0.748 | selecting |
+| `geo_k10_tattn` | 0.767 | 0.743 | 1.208 | 0.626 | selecting |
+| `temporal_k10_tattn` | 0.792 | 0.798 | 1.562 | 0.751 | selecting |
+| `temporal_k5_pre2023_tattn` | 0.822 | 0.822 | 1.151 | 0.768 | selecting |
+| `geo_k5_pre2023_tattn` | 0.872 | 0.858 | 1.140 | 0.638 | selecting |
+| `geo_k10_pre2023_tattn` | 0.880 | 0.880 | 1.122 | 0.584 | marginal |
+| `clean_geo_k10_tattn_hybrid` | 0.927 | 0.936 | 1.000 | 0.630 | **fails alarm** |
+| `temporal_k5_tattn` | 0.948 | 0.944 | 1.192 | 0.759 | **fails alarm** |
+| `geo_k10_pre2023_tattn_hybrid` | **1.000** | 1.000 | 1.000 | 0.641 | **dead** |
+| `clean_temporal_k5_tattn_hybrid` | **1.000** | 1.000 | 1.000 | 0.747 | **dead** |
+
+The 2026-08-19 `valneg` reference points, same metric: `geo_k5_tattn_fixed`
+0.757, `geo_k10_tattn_fixed` 0.788, `geo_k10_tattn_hybrid_fixed` 0.893,
+`temporal_k5_tattn_fixed` 0.928, and the two dead controls
+(`geo_k10_tattn_prefix`, clean22 `geo_k10_tattn`) at 1.000.
+
+**① The fix took, on the pure-attention arms.** Seven of eight pure arms select,
+and `geo_k5_tattn` at 0.735 is more selective than any 2026-08-19
+reference. `contrast` + `qk_norm` works. Only `temporal_k5_tattn`
+(0.948) fails among them. This could not have been established from the weights
+or from an architecture flag — it needed the probe.
+
+**② The hybrids are where it collapses — three of four fail.**
+`geo_k10_pre2023_tattn_hybrid` and `clean_temporal_k5_tattn_hybrid` sit at
+**exactly 1.000**, indistinguishable from the `prefix` control and from the
+clean22 collapse this fix exists for; `clean_geo_k10_tattn_hybrid` is 0.927.
+All three carry `logit_scale` temperature 1.000. This is the predicted failure
+mode confirmed: when a ConvLSTM already integrates over time, nothing pushes the
+attention to select, and the softmax relaxes flat. The exception is real though —
+`clean_temporal_k10_tattn_hybrid` at 0.708 is the **most** selective arm of all
+twelve, so this is a strong tendency, not a law.
+
+**③ Selectivity does not buy accuracy. This is the finding that matters.**
+Across the twelve, measured selectivity correlates with object F1 at
+**r = −0.10** — essentially zero — and the within-axis correlations flip sign
+(+0.49 geo, −0.38 temporal), which is what noise looks like. Against the matched
+ConvLSTM in the same cell, **only 1 of 7 attention arms comes out ahead**
+(`clean_temporal_k10_hybrid`, +0.011, not significant). The two ends make the
+point unaided: the most selective arm is the one that edges its ConvLSTM, the
+second most selective (`clean_geo_k5`, 0.735) is the **worst geo model on
+record** at 0.595, and the fully dead `geo_k10_pre2023_tattn_hybrid` scores 0.641 —
+better than five arms that genuinely select.
+
+> ### ⚠️ Temperature is a weak predictor of selectivity — the 2026-09-01 warning stands, now quantified
+>
+> Over all twelve, `logit_scale` temperature correlates with measured
+> selectivity at **r = −0.61**. It is reliable at exactly one place: all three
+> arms at temperature 1.000 fail the alarm. Everywhere else it misleads —
+> `clean_temporal_k10_hybrid` at temperature 1.093 is the most selective arm
+> measured, while `temporal_k5_tattn` at a *hotter* 1.192 is nearly
+> uniform. Reading collapse off a checkpoint would have mislabelled both.
+> **Rank on the probe, never on the temperature.**
+
+### Batch 2 — `pre23`, the 2019–2022 archive
+
+Eleven arms on `assets/partition_{geo,temporal}_k{5,10}_pre2023.json` —
+section 5's 2019–2022 design rebuilt with the current generator: same 31.4°
+cut, same AOI, same seed, same val share, `--years 2019 2022`
+(`PLAN_CLEAN_BENCHMARK.md` section 0a). Same hyper-parameters as batch 1.
+
+**Geo:**
+
+| Run | dice | val/F1 | val/P | val/R | best/last ep | valN | obj F1 |
+|---|---|---|---|---|---|---:|---|
+| `geo_k5_pre2023_single_ring3` | **0.5990** | **0.6837** | 0.6230 | 0.7575 | 56 / 96 | 4,270 | — |
+| `geo_k10_pre2023_tattn_hybrid_ring3` | 0.5904 | 0.6641 | 0.6334 | 0.6978 | 62 / 100 | 1,462 | — |
+| `geo_k10_pre2023_convlstm_ring3` | 0.5886 | 0.6593 | 0.6259 | 0.6966 | 45 / 73 (!) | 1,462 | — |
+| `geo_k10_pre2023_tattn_ring3` | 0.5871 | 0.6596 | 0.5800 | 0.7647 | 29 / 69 | 1,462 | — |
+| `geo_k5_pre2023_tattn_ring3` | 0.5861 | 0.6342 | 0.5617 | 0.7281 | 62 / 100 | 2,576 | — |
+| `geo_k5_pre2023_convlstm_ring3` | 0.5853 | 0.6401 | 0.5861 | 0.7052 | 57 / 97 | 2,576 | — |
+
+**Temporal:**
+
+| Run | dice | val/F1 | val/P | val/R | best/last ep | valN | obj F1 |
+|---|---|---|---|---|---|---:|---|
+| `temporal_k5_pre2023_convlstm_ring3` | **0.6626** | 0.7356 | 0.6404 | 0.8641 | 51 / 91 | 6,072 | — |
+| `temporal_k5_pre2023_tattn_ring3` | 0.6625 | **0.7372** | 0.6519 | 0.8482 | 44 / 84 | 6,072 | — |
+| `temporal_k10_pre2023_convlstm_ring3` | 0.6448 | 0.7180 | 0.6735 | 0.7689 | 54 / 94 | 2,632 | — |
+| `temporal_k5_pre2023_single_ring3` | 0.6421 | 0.7259 | 0.6564 | 0.8118 | 47 / 87 | 6,417 | — |
+| `temporal_k10_pre2023_tattn_ring3` | 0.6381 | 0.7055 | 0.6162 | 0.8250 | 52 / 92 | 2,632 | — |
+
+(!) `geo_k10_pre2023_convlstm_ring3` took SIGINT (WEXAC preemption) at epoch 73 of
+100 and was never requeued. Its best epoch is 45 and the 28 epochs after it ran
+at lr <= 1.95e-08 without improving, so it is converged in substance; it is the
+one run in the batch with no `Training complete` line.
+
+**`pre23` and `clean22` dice cannot be read against each other.** The archives
+differ, so the validation sets differ — `geo_k10` is 1,462 patches here against
+2,649 on the clean partitions, `temporal_k10` 2,632 against 4,735. The twin
+comparison the batch was built for is a **precision** claim about background in
+the newer years (section 0a: "how much of the false-positive rate is the newer
+years"), and precision on background is exactly what a positives-only patch
+curve cannot see. **That question stays open until both batches are scored on
+scenes.**
+
+### The single-frame U-Net, on the patch curve
+
+Three of the 19 runs are single-frame controls, and on geo the control is at the
+top of its batch on both dice and `val/F1`:
+
+| Group | single-frame | best temporal arm, same group | delta dice | delta val/F1 |
+|---|---|---|---|---|
+| `geo_k5` clean | 0.5869 / 0.6748 | tattn 0.5861 / 0.6544 | +0.0008 | +0.0204 |
+| `geo_k5` pre23 | 0.5990 / 0.6837 | tattn 0.5861 / 0.6342 | +0.0129 | +0.0495 |
+| `temporal_k5` pre23 | 0.6421 / 0.7259 | convlstm 0.6626 / 0.7356 | −0.0205 | −0.0097 |
+
+Read with the `valN` rule above: the two geo rows compare 4,270–6,526 patches
+against 2,576–4,093, so the geo margins are **not** a like-for-like measurement
+and cannot be quoted as "one frame beats recurrence". The temporal row *is*
+close to like-for-like (6,417 vs 6,072, a 6% difference) and reproduces
+finding ③ of `RESULTS.md` at its stated size: **+0.021 dice for temporal
+context, about 3x the noise floor.**
+
+The object-level answer to the same question already exists on generation-3
+ground for a different pair of checkpoints, and it points the other way on geo —
+see `PREDICTIONS.md`, "The clean benchmark".
+
+### Bookkeeping
+
+**`0.7378` is a `valneg` dice, not an object F1.** `scripts/submit_all.sh:938`
+and `:1400` describe it as "obj F1 0.7378 geo_k10 hybrid", and the `pre23`
+attention arms are justified partly on that reading. The number is
+`clean_geo_k10_tattn_hybrid_ring3`'s best `val/dice` under validation negatives
+(table above in this file); its `obj F1` column is `—` and that checkpoint no
+longer exists. Nothing downstream was computed from it, so no result changes.
 
 ## K10S — retired partition, INVALID RESULTS (`outputs/2026-08-03/`)
 

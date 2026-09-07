@@ -32,8 +32,21 @@ pip install -e . && sinkholes <command>
 
 `sinkholes <command> --help` lists every flag. The full stage-by-stage reference,
 including the conventions the science depends on, is
-[`docs/PIPELINE.md`](docs/PIPELINE.md); the experiment record is
-[`docs/TRAINING_RUNS.md`](docs/TRAINING_RUNS.md).
+[`docs/PIPELINE.md`](docs/PIPELINE.md).
+
+Where to look for what:
+
+| Question | File |
+|---|---|
+| What do we know? What should I not repeat? | [`docs/RESULTS.md`](docs/RESULTS.md) |
+| What did each batch settle? | [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) |
+| The object-level numbers | [`docs/PREDICTIONS.md`](docs/PREDICTIONS.md) |
+| Per-run registry, and attention selectivity | [`docs/MODEL_RUNS.md`](docs/MODEL_RUNS.md) |
+| What is on disk, what is safe to delete | [`docs/OUTPUTS.md`](docs/OUTPUTS.md) |
+| How to run a stage | [`docs/PIPELINE.md`](docs/PIPELINE.md) |
+
+**Object-level F1 decides everything.** Patch `val/dice` ranks these models
+*backwards* and is a training-health signal only — see `RESULTS.md` finding ②.
 
 ## Layout
 
@@ -48,8 +61,15 @@ sinkholes/            the package
 ├── dataprep/         patchify, the dataset, partitioning, prep commands
 ├── training/         losses, the training loop, evaluation, run reporter
 └── inference/        shared scene reconstruction + the evaluation/predict commands
-assets/               committed data assets (intf_coord.json, LiDAR coverage shapefile)
-docs/                 PIPELINE.md (reference), TRAINING_RUNS.md (experiment record)
+scripts/              cluster-side wrappers — the package does the work
+├── submit_all.sh     the shield in front of bsub; only jobs that never ran
+├── tidy_outputs.sh   file a finished run under outputs/<date>/ with its proper name
+├── train/            LSF templates, one per architecture
+├── eval/             run_eval.sh (2-stage scoring), rescore.sh, run_probe.sh
+├── data/             patch generation and dataset verification
+└── viewer/           interferogram viewer
+assets/               committed data assets (intf_coord.json, partitions, LiDAR coverage)
+docs/                 see the table above; reference/ holds the paper and status deck
 tests/                pytest suite (pins the behavioural invariants)
 data/, outputs/, models/, test_data/   local data and run artifacts (gitignored)
 ```

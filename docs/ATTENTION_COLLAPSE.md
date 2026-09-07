@@ -153,10 +153,10 @@ convincingly selective, and one fails the alarm outright.
 
 | run | effective frames | of uniform | `--require_selectivity 0.9` |
 |---|---|---|---|
-| `clean_geo_k5_tattn_fixed_ring3` | 4.540 / 6 | 75.7% | pass |
-| `clean_geo_k10_tattn_fixed_ring3` | 8.672 / 11 | 78.8% | pass |
-| `clean_geo_k10_tattn_hybrid_fixed_ring3` | 9.826 / 11 | 89.3% | pass, by 0.7 points |
-| `clean_temporal_k5_tattn_fixed_ring3` | 5.566 / 6 | **92.8%** | **COLLAPSED** |
+| `geo_k5_tattn_ring3` | 4.540 / 6 | 75.7% | pass |
+| `geo_k10_tattn_ring3` | 8.672 / 11 | 78.8% | pass |
+| `geo_k10_tattn_hybrid_ring3` | 9.826 / 11 | 89.3% | pass, by 0.7 points |
+| `temporal_k5_tattn_ring3` | 5.566 / 6 | **92.8%** | **COLLAPSED** |
 | `clean_geo_k10_tattn_prefix_ring3` (control) | 11.000 / 11 | 100.0% | COLLAPSED, as designed |
 
 The paired control is what makes the table readable. `prefix` is the same
@@ -213,7 +213,7 @@ at epoch 34, 1.164 by epoch 74 — so the kept checkpoint is not a settled state
 
 Reset `logit_scale` to 10 on a trained checkpoint and change nothing else:
 
-| `clean_geo_k10_tattn_fixed_ring3` | effective frames | weight range | argmax share at offset 2 |
+| `geo_k10_tattn_ring3` | effective frames | weight range | argmax share at offset 2 |
 |---|---|---|---|
 | as trained (temperature 1.280) | 8.672 / 11 | 0.69–1.31 x | 25.4276% |
 | same weights, temperature 10 | **4.194 / 11** | 0.39–1.84 x | 25.4276% |
@@ -327,7 +327,7 @@ sinkholes attention-probe --model outputs/<run>/checkpoints/best.pt \
 
 `--require_selectivity` exits non-zero if the attention is at or above 90% of
 uniform. Still worth wiring into the eval scripts: it caught
-`clean_temporal_k5_tattn_fixed_ring3`, and it can only be made against a
+`temporal_k5_tattn_ring3`, and it can only be made against a
 *trained* checkpoint — a fresh model passes every content-sensitivity test and
 still dies. Note that 90% is a **collapse alarm, not a pass mark**: the hybrid
 clears it by 0.7 points while averaging, so read the number, not the exit code.
@@ -345,7 +345,7 @@ between 79% and 38% of uniform. Any of the three is a few lines in
 `models/temporal_attention.py` plus a `STRICT_CONFIG_KEYS` entry, and it needs
 one paired run to settle — not five.
 
-Whatever the temperature does, `clean_temporal_k5_tattn_fixed_ring3` needs its
+Whatever the temperature does, `temporal_k5_tattn_ring3` needs its
 own answer: it is the one arm whose q/k are genuinely uninformative, and a
 floor would not rescue it.
 
