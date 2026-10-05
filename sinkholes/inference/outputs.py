@@ -87,6 +87,13 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                    help="reproduce the pre-AOI rule that scored only the northern half of a "
                         "South-frame canvas. Superseded by --aoi_window; kept so archived "
                         "evaluations can be re-scored exactly as they were")
+    p.add_argument("--gt_dir", type=str, default=None,
+                   help="read <intf>_gt.npy from this directory instead of --path: scores the "
+                        "SAME saved confidence maps against a different ground truth (e.g. "
+                        "relabelled polygons rasterised onto the identical canvas by "
+                        "'sinkholes relabel eval'). Requires --out_json; --path is only read")
+    p.add_argument("--gt_map", type=str, default=None,
+                   help="JSON {intf: path to its _gt.npy}; like --gt_dir but per scene")
 
 
 def scene_figure(out_png, image, gt, preds_by_th, confidence, extent):
@@ -171,6 +178,37 @@ def _resolve_tolerances(args):
     return tolerances
 
 
+def _gt_resolver(args):
+    """intf -> path of the ground-truth canvas to score against.
+
+    Default: the ``_gt.npy`` eval-scenes saved next to the predictions. With
+    ``--gt_dir``/``--gt_map`` the predictions are re-scored against another
+    ground truth; the source directory is then strictly read-only, so the
+    metrics must go elsewhere and figures (written into --path) are refused.
+    """
+    gt_dir = getattr(args, "gt_dir", None)
+    gt_map_file = getattr(args, "gt_map", None)
+    if gt_dir and gt_map_file:
+        raise SystemExit("pass --gt_dir or --gt_map, not both")
+    if not (gt_dir or gt_map_file):
+        return lambda intf: os.path.join(args.path, f"{intf}_gt.npy")
+    if not args.out_json:
+        raise SystemExit("--gt_dir/--gt_map need --out_json: the default writes into --path, "
+                         "which holds the original evaluation")
+    if args.save_figures:
+        raise SystemExit("--save_figures writes into --path; not allowed with --gt_dir/--gt_map")
+    if gt_dir:
+        return lambda intf: os.path.join(gt_dir, f"{intf}_gt.npy")
+    with open(gt_map_file) as fh:
+        gt_map = json.load(fh)
+
+    def lookup(intf):
+        if intf not in gt_map:
+            raise SystemExit(f"--gt_map {gt_map_file} has no entry for {intf}")
+        return gt_map[intf]
+    return lookup
+
+
 def _tolerance_key(ith, buffer) -> str:
     return f"ith{ith:g}_b{buffer:g}"
 
@@ -181,6 +219,7 @@ def main(args) -> None:
 
     logging.basicConfig(level=logging.INFO)
     path = args.path
+    gt_path = _gt_resolver(args)
 
     tolerances = _resolve_tolerances(args)
     if args.rth:
@@ -212,7 +251,10 @@ def main(args) -> None:
         x0a, y0a = aligned_origin(meta.frame)
 
         confidence = np.load(os.path.join(path, f"{intf}_pred.npy"), allow_pickle=True)
-        gt = np.load(os.path.join(path, f"{intf}_gt.npy"), allow_pickle=True)
+        gt = np.load(gt_path(intf), allow_pickle=True)
+        if gt.shape != confidence.shape:
+            raise SystemExit(f"{intf}: ground truth {gt.shape} does not match the confidence "
+                             f"map {confidence.shape} -- not the same evaluation canvas")
 
         # _image.npy is the (T, H, W) input stack -- ~3.7 GB per scene and by
         # far the largest thing eval-scenes writes (78% of an eval directory).
@@ -379,6 +421,9 @@ def main(args) -> None:
     )
     with open(out_json, "w") as fh:
         json.dump({"per_intf": per_intf, "summary": summary,
+                   # Where the ground truth came from: absent/None = the saved
+                   # eval-scenes _gt.npy (every result before relabelling).
+                   "gt_source": getattr(args, "gt_dir", None) or getattr(args, "gt_map", None),
                    "ol_th": tolerances[0][0], "buffer": tolerances[0][1],
                    "thresholds": list(args.thresholds),
                    # 'vote' means the thresholds above are the paper's RTh
