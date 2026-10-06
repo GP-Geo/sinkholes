@@ -1717,7 +1717,14 @@ job evalk5plain evalk5plain_posw8_tattn \
 
 # ---- fill: the two leading attention models on filled history chains ---------
 #
-#     submit_all.sh fill --submit             # 2 jobs
+#     submit_all.sh fill --only=k5 --submit   # the k5 arm, after the swap below
+#     submit_all.sh fill --submit             # both -- k10 IS ALREADY RUNNING
+#
+# ---- k10 SUBMITTED 2026-10-06 (LSF 261016) -- DO NOT RESUBMIT IT ------------
+#   fill_tattn_k10_plain_30e  outputs/fill_tattn_k10_plain_30e_2026-10-06_12h48_lsf_261016
+# The k5 row first went out as a ctx50 arm (LSF 261015, twin
+# th350_tattn_ctx50_neg10) and was KILLED: context is dropped from the project
+# (it lost in five of five pairs), so both fill arms are plain.
 #
 # Generation 5 (assets/PARTITIONS.md): find_11day_sequences now skips a missing
 # acquisition and takes an older one, up to 3k slots back, and the attention is
@@ -1730,10 +1737,13 @@ job evalk5plain evalk5plain_posw8_tattn \
 #
 # EACH ARM IS A SCORED LEADER WITH THE PARTITION SWAPPED, every other variable
 # reused verbatim, so the delta against its twin is the filled chains alone:
-#     fill_tattn_k5_ctx50_neg10   <- th350_tattn_ctx50_neg10    obj F1 0.7905 (20 scenes)
+#     fill_tattn_k5_plain_40e     <- posw8_tattn_plain_40e      val/dice 0.6764 @25, NO object score yet
 #     fill_tattn_k10_plain_30e    <- posw8_tattn_k10_plain_30e  obj F1 0.7907 (17 scenes)
-# The k10 twin is the 30-epoch run, not k10plain45: it is the one with an object
-# score, and LR_PATIENCE is part of what would otherwise differ.
+# Both pos_w 8 and plain, so the two arms differ in depth and in their twins'
+# schedules (k5plain's 40 epochs / LR_PATIENCE 5 / PATIENCE 15, k10's 30 / 8 / 0)
+# and nothing else. The k10 twin is the 30-epoch run, not k10plain45: it is the
+# one with an object score. The k5 twin has none -- evalk5plain never ran --
+# which evalfill below supplies.
 #
 # WHAT THEY ANSWER. Whether more supervised dates (the scenes the gap-free rule
 # dropped) and real frame ages are worth having. Expect the bigger effect at
@@ -1742,20 +1752,19 @@ job evalk5plain evalk5plain_posw8_tattn \
 # every newly admitted scene is a gappy one.
 #
 # RESOURCES, scaled from each twin's measurement by its sample ratio:
-#   k5   140.6 GB / 34729 s for 60 epochs on 71,074 samples (LSF 816217).
-#        x1.24 -> ~175 GB, ~12 h. 256G carries; wall 12:00 -> 18:00.
+#   k5   55.0 GB / 17485 s for 40 epochs on 71,074 samples (LSF 333265).
+#        x1.24 -> ~68 GB, ~6 h. RES_K5_TATTN_PLAIN's 96G / 24G / 10:00 carries.
 #   k10  82.6 GB / 20504 s for 30 epochs (LSF 316673). x1.51 -> ~125 GB, ~8.6 h.
 #        146G would sit at ~85%, so the next tier, 208G; wall 12:00 -> 16:00.
 # Stride-2 trees (ctx50 and plain, data and mask) hold every id the filled
 # train/val chains need: 249 at k5, 297 at k10, checked 2026-10-06.
-FILL_K5_BASE="PARTITION=assets/partition_temporal_k5_clean_fill_th350x200.json K_PREVS=5 POS_W=4"
+FILL_K5_BASE="PARTITION=assets/partition_temporal_k5_clean_fill_th350x200.json K_PREVS=5 POS_W=8"
 FILL_K10_BASE="PARTITION=assets/partition_temporal_k10_clean_fill_th350x200.json K_PREVS=10 POS_W=8"
-RES_FILL_K5_TATTN="long-gpu    256   48  18:00"
 RES_FILL_K10_TATTN_PLAIN="long-gpu    208   24  16:00"
 
-job fill fill_tattn_k5_ctx50_neg10 \
-    scripts/train/train_tattn.sh "$FILL_K5_BASE $TH350_NEG $TH350_OPT $TH350_RUN $TH350_CTX AUGMENT=hv FUSE_SKIPS=0 RECURRENCE=none" "$RES_FILL_K5_TATTN" \
-    "th350_tattn_ctx50_neg10 (obj F1 0.7905) on filled k5 chains -- +30 train scenes, and real frame ages for the 49 chains that skip a missing date"
+job fill fill_tattn_k5_plain_40e \
+    scripts/train/train_tattn.sh "$FILL_K5_BASE $TH350_NEG $TH350_OPT $K5PLAIN_RUN40 BATCH=64 ACCUM=2 AUGMENT=hv FUSE_SKIPS=0 RECURRENCE=none" "$RES_K5_TATTN_PLAIN" \
+    "posw8_tattn_plain_40e on filled k5 chains -- +30 train scenes, and real frame ages for the 49 chains that skip a missing date"
 job fill fill_tattn_k10_plain_30e \
     scripts/train/train_tattn.sh "$FILL_K10_BASE $TH350_NEG $TH350_OPT $K10_RUN30 BATCH=32 ACCUM=4 AUGMENT=hv FUSE_SKIPS=0 RECURRENCE=none" "$RES_FILL_K10_TATTN_PLAIN" \
     "posw8_tattn_k10_plain_30e (obj F1 0.7907) on filled k10 chains -- +47 train scenes, where the gap-free rule cost the most"
@@ -1765,8 +1774,9 @@ job fill fill_tattn_k10_plain_30e \
 #     submit_all.sh evalfill --submit         # 2 jobs
 #
 # The fill arms will be scored on 24 test scenes at both depths, a superset of
-# th350's 20 (k5) and 17 (k10). Their twins have no score on the added scenes,
-# so these two rows score the EXISTING checkpoints on the generation-5 list. The
+# th350's 20 (k5) and 17 (k10). Their twins have no score on the added scenes
+# (and the k5 twin none at all), so these two rows score the EXISTING
+# checkpoints on the generation-5 list. The
 # twins' predictions on the old scenes do not change -- a gap-free chain is the
 # same chain with the same ages -- so this costs nothing in comparability and
 # gives the coverage half of the comparison:
@@ -1774,24 +1784,21 @@ job fill fill_tattn_k10_plain_30e \
 #     coverage       both models over all 24
 # Add the fill arms' own rows here, on the same strings, once their runs land.
 #
-# PATCH TREES. The plain stride-4 tree has every id the k10 list needs (89).
-# The ctx50 stride-4 tree is SHORT 5 ids for the k5 list -- 20241106_20241117,
-# 20251012_20251023, 20251023_20251103, 20251103_20251114, 20251206_20251217 --
-# and the preflight below blocks --submit until they exist. Build them first:
-#     PARTITION=assets/partition_temporal_k5_testeval_clean_fill_th350x200.json K_PREVS=5 \
-#       bsub < scripts/data/make_context_stride4_patches.sh
-# RESOURCES are the twins' own eval measurements: RES_EVAL_TH350 for the ctx50
-# k5 workload, RES_EVAL_S4_T5 for the plain k10 one (75.3 GB, LSF 330515); 24
-# scenes against 20 / 17 only lengthens the run.
+# PATCH TREES. Both rows are plain and read the plain stride-4 tree, which has
+# every id both lists need (73 at k5, 89 at k10), so no tree check applies. The
+# ctx50 stride-4 build that went out for the dropped ctx50 row (LSF 261017) is
+# not needed by anything here.
+# RESOURCES: RES_EVAL_S4_T5, the plain temporal evals' tier (k5 measured 47.6 /
+# 48.0 GB, k10 75.3 GB at LSF 330515); 24 scenes only lengthens the run.
 EVAL_FILL_K5="GEN=fill GROUP=temporal_k5 DATA_STRIDE=4 PROTOCOL=rth JOB_NAME=scenes_temporal_k5_fill_rth"
 EVAL_FILL_K10="GEN=fill GROUP=temporal_k10 DATA_STRIDE=4 PROTOCOL=rth JOB_NAME=scenes_temporal_k10_fill_rth"
 
-job evalfill evalfill_th350_tattn_ctx50 \
-    scripts/eval/run_eval.sh "RUN=outputs/th350_tattn_ctx50_neg10_2026-09-10_01h16_lsf_816217 $EVAL_FILL_K5 K_PREVS=5 ARCH=tattn" "$RES_EVAL_TH350" \
-    "the k5 leader on the 24-scene generation-5 list: its 20 old scenes reproduce evalth350, the 4 new ones are the baseline for fill_tattn_k5's coverage gain"
+job evalfill evalfill_posw8_tattn_plain \
+    scripts/eval/run_eval.sh "RUN=outputs/posw8_tattn_plain_40e_2026-09-17_09h56_lsf_333265 $EVAL_FILL_K5 K_PREVS=5 ARCH=tattn" "$RES_EVAL_S4_T5" \
+    "the plain k5 twin on the 24-scene generation-5 list: re-averaged over its 20 th350 scenes it is the object score evalk5plain never produced, and all 24 are the baseline for fill_tattn_k5's coverage gain"
 job evalfill evalfill_posw8_tattn_k10_plain \
     scripts/eval/run_eval.sh "RUN=outputs/posw8_tattn_k10_plain_30e_2026-09-16_23h47_lsf_316673 $EVAL_FILL_K10 K_PREVS=10 ARCH=tattn" "$RES_EVAL_S4_T5" \
-    "the k10 leader on the 24-scene generation-5 list: 17 old scenes reproduce evalk10plain, 7 new ones it could never be scored on before"
+    "the k10 twin on the 24-scene generation-5 list: 17 old scenes reproduce evalk10plain, 7 new ones it could never be scored on before"
 
 # ---- argument parsing -------------------------------------------------------
 WANT=all; SUBMIT=no; ONLY=()
@@ -1884,9 +1891,6 @@ for i in "${!NAMES[@]}"; do
                          TREE_SETS+=("assets/partition_temporal_k5_testeval_clean_th350x200.json:5") ;;
     evalk10)             needs_tree=yes
                          TREE_SETS+=("assets/partition_temporal_k10_testeval_clean_th350x200.json:10") ;;
-    evalfill)            # Only the k5 row reads the ctx50 tree; the k10 row is plain.
-                         needs_tree=yes
-                         TREE_SETS+=("assets/partition_temporal_k5_testeval_clean_fill_th350x200.json:5") ;;
   esac
 done
 if [ "$needs_tree" = yes ]; then
