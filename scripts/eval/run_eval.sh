@@ -79,6 +79,12 @@ GEN="${GEN:-2}"             # PARTITION GENERATION -- assets/PARTITIONS.md.
                             #     NOT comparable -- see the evalth350 block in
                             #     submit_all.sh for what that is worth (+0.046
                             #     F1 on measured data, none of it model quality).
+                            # fill = partition_<group>_clean_fill_th350x200.json,
+                            #     th350 with chains that skip missing
+                            #     acquisitions (generation 5): 24 test scenes at
+                            #     both k5 and k10, a SUPERSET of th350's 20 / 17.
+                            #     For like-for-like with th350, re-average the
+                            #     per-scene results over the th350 list.
                             # Generations are NOT comparable: different scene
                             # lists AND different scored ground.
 DATA_STRIDE="${DATA_STRIDE:-2}"  # strides per patch of the reconstruction grid.
@@ -174,7 +180,8 @@ case "$GEN" in
   3)     GEN_SUFFIX="_clean" ;;
   p23)   GEN_SUFFIX="_pre2023" ;;
   th350) GEN_SUFFIX="_clean_th350x200" ;;
-  *)     echo "GEN must be 2, 3, p23 or th350, got '$GEN'" >&2; exit 1 ;;
+  fill)  GEN_SUFFIX="_clean_fill_th350x200" ;;
+  *)     echo "GEN must be 2, 3, p23, th350 or fill, got '$GEN'" >&2; exit 1 ;;
 esac
 case "$SPLIT" in
   val)  PARTITION="assets/partition_${GROUP}${GEN_SUFFIX}.json" ;;
@@ -202,9 +209,10 @@ esac
 # whole canvas is scored, which is how those numbers were produced. p23 is
 # generation 3's generator with a truncated archive, and th350 is the same
 # generator with a positive-count threshold, so both carry the same per-split
-# window and take the same flags.
+# window and take the same flags. fill is th350 rebuilt with chains that reach
+# past missing acquisitions (generation 5), same window.
 AOI_FLAGS=()
-if [ "$GEN" = 3 ] || [ "$GEN" = p23 ] || [ "$GEN" = th350 ]; then
+if [ "$GEN" = 3 ] || [ "$GEN" = p23 ] || [ "$GEN" = th350 ] || [ "$GEN" = fill ]; then
   AOI_FLAGS=(--aoi_from_partition "$PARTITION" --aoi_split val)
 fi
 
