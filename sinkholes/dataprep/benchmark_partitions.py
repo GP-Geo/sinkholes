@@ -41,11 +41,13 @@ from datetime import date
 import numpy as np
 
 from ..geo import grid_window
-from ..meta import find_11day_sequences, load_coord_dict
+from ..meta import FILL_LOOKBACK_FACTOR, find_11day_sequences, load_coord_dict
 from .partition import filter_by_nonz_count
 
-#: Written into every file so a reader can tell the generation apart.
-GENERATION = "all_years_clean"
+#: Written into every file so a reader can tell the generation apart. ``_fill``
+#: marks chains that reach past missing acquisitions (meta.find_11day_sequences);
+#: the committed ``all_years_clean`` files were built with gap-free chains only.
+GENERATION = "all_years_clean_fill"
 
 
 def generation_label(years, nonz_th=None):
@@ -58,7 +60,7 @@ def generation_label(years, nonz_th=None):
     ``--nonz_th``-restricted run is a separate family for the same reason: it
     holds fewer scenes than the bare name promises.
     """
-    label = GENERATION if not years else f"{years[0]}_{years[1]}_clean"
+    label = GENERATION if not years else f"{years[0]}_{years[1]}_clean_fill"
     return label if not nonz_th else f"{label}_nonz{nonz_th[0]}-{nonz_th[1]}"
 
 
@@ -91,7 +93,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                         "Default: no threshold, as every committed partition was built")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out_dir", type=str, default="assets")
-    p.add_argument("--suffix", type=str, default="clean",
+    p.add_argument("--suffix", type=str, default="clean_fill",
                    help="file name suffix: partition_<axis>_k<k>_<suffix>.json")
     p.add_argument("--dry_run", action="store_true",
                    help="print the tables without writing anything")
@@ -348,6 +350,7 @@ def main(args) -> None:
                 "generation": generation_label(args.years, args.nonz_th),
                 "axis": axis,
                 "k_prevs": k,
+                "max_lookback": FILL_LOOKBACK_FACTOR * k,
                 # ``years`` is what the splits actually contain; ``years_filter``
                 # is what was asked for. They differ when the archive is thinner
                 # than the request, so both are recorded.

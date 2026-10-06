@@ -19,7 +19,7 @@ import numpy as np
 
 from ..geo import PREDICT_X_OFFSET, crop_to_start_xy
 from ..dataprep.context import context_margin
-from ..meta import find_11day_sequences, intf_meta, load_coord_dict
+from ..meta import FILL_LOOKBACK_FACTOR, chain_offsets, find_11day_sequences, intf_meta, load_coord_dict
 from ..normalise import SCENE_RANGE_TOL, normalise_phase
 from ..polygons import mask_array_to_polygons, pixel_polygons_to_lonlat
 from .reconstruct import canvas_shape, rasterise_lidar_gates, reconstruct_scene
@@ -162,8 +162,9 @@ def main(args) -> None:
         missing = sorted(set(intfs_list) - set(valid))
         if missing:
             raise SystemExit(
-                f"no full {args.k_prevs}-previous chains for {missing}; these scenes "
-                f"cannot be predicted with a temporal model"
+                f"no {args.k_prevs} previous acquisitions within "
+                f"{FILL_LOOKBACK_FACTOR * args.k_prevs} slots for {missing}; these "
+                f"scenes cannot be predicted with a temporal model"
             )
 
     device = get_device()
@@ -252,6 +253,7 @@ def main(args) -> None:
             treat_nodata_regions=args.treat_nodata_regions,
             blend=args.blend_type, window_gamma=args.window_gamma,
             average="coverage", accumulate_image=False, log_progress=True,
+            offsets=chain_offsets(prev_dict[intf]) if args.k_prevs > 0 else None,
         )
 
         polygons = pixel_polygons_to_lonlat(

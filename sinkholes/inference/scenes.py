@@ -26,7 +26,9 @@ from ..geo import aligned_origin, grid_window
 from ..meta import (
     INTF_ID_RE,
     LIDAR_FALLBACK_SOURCE,
+    FILL_LOOKBACK_FACTOR,
     NO_LIDAR_MASK,
+    chain_offsets,
     find_11day_sequences,
     intf_meta,
     lidar_source_for,
@@ -327,8 +329,9 @@ def main(args) -> None:
         if not args.fallback_replicate:
             dropped = sorted(set(intf_list) - set(with_chains))
             if dropped:
-                logging.warning(f"skipping {len(dropped)} interferograms without full "
-                                f"{args.k_prevs}-previous chains: {dropped} "
+                logging.warning(f"skipping {len(dropped)} interferograms without "
+                                f"{args.k_prevs} previous acquisitions within "
+                                f"{FILL_LOOKBACK_FACTOR * args.k_prevs} slots: {dropped} "
                                 f"(--fallback_replicate keeps them)")
             intf_list = with_chains
 
@@ -351,17 +354,31 @@ def main(args) -> None:
         # output stack is saved); the chronological order the network needs is
         # produced by one reversal at the end. Predecessors whose grid file is
         # missing are padded with the current frame in the oldest slots.
+        # Ages and validity of each slot, newest first like the arrays; None
+        # leaves the model assuming an evenly spaced, fully real stack, which is
+        # what the replicated-input modes deliberately feed it.
+        offsets_newest_first = valid_newest_first = None
         if args.k_prevs > 0:
             if args.replicate_input or (args.fallback_replicate and intf not in (prev_dict or {})):
                 prev_ids = []
                 arrays_newest_first = [cur] * (args.k_prevs + 1)
             else:
-                prev_ids = prev_dict[intf]["prevs"][: args.k_prevs][::-1]  # newest first
+                chain = prev_dict[intf]
+                age = dict(zip(chain["prevs"], chain_offsets(chain)[:-1]))
+                prev_ids = chain["prevs"][: args.k_prevs][::-1]  # newest first
                 available = [pid for pid in prev_ids if os.path.exists(grid_path("data", pid))]
                 prevs = [np.load(grid_path("data", pid)).astype(np.float32, copy=False)
                          for pid in available]
+                offsets_newest_first = [0] + [age[pid] for pid in available]
+                valid_newest_first = [True] * len(offsets_newest_first)
                 while len(prevs) < args.k_prevs:
                     prevs.append(cur)
+                    # A pad is not an acquisition: mask it out for a model that
+                    # can, and keep the ages increasing past the oldest real one.
+                    offsets_newest_first.append(offsets_newest_first[-1] + 1)
+                    valid_newest_first.append(False)
+                if all(valid_newest_first):
+                    valid_newest_first = None
                 arrays_newest_first = [cur] + prevs
                 # `prevs` is a SECOND list holding the same arrays, and it stays
                 # in scope for the rest of this scene. Without this del the
@@ -477,6 +494,8 @@ def main(args) -> None:
             blend=args.blend_type, window_gamma=args.window_gamma,
             average=args.recon_average, vote_threshold=args.vote_threshold,
             log_progress=True,
+            offsets=None if offsets_newest_first is None else offsets_newest_first[::-1],
+            valid=None if valid_newest_first is None else valid_newest_first[::-1],
         )
 
         polygons = pixel_polygons_to_lonlat(

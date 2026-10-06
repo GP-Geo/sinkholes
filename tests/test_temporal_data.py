@@ -442,3 +442,25 @@ def test_preprocess_maps_mask_values_to_class_indices():
     out = SubsiDataset.preprocess([0, 1], mask, 1)
     assert out.dtype == np.int64
     assert np.array_equal(out, [[0, 1], [1, 0]])
+
+
+# -- frame ages travel with every sample ------------------------------------------------
+
+def test_samples_carry_the_chain_offsets(tmp_path):
+    """A chain that skipped a missing slot hands the model its real ages."""
+    img_dir, msk_dir = write_patch_tree(tmp_path, DISJOINT_POSITIVES)
+    gappy = {CURRENT: {"prevs": CHAIN[:-1], "offsets": [3, 1], "frame": "North"}}
+    ds = SubsiDataset(img_dir, msk_dir, [CURRENT], temporal=True, seq_dict=gappy,
+                      patch_size=PATCH, stride=STRIDE)
+    for k in range(len(ds)):
+        assert ds[k]["offsets"].tolist() == [3.0, 1.0, 0.0]
+
+
+def test_a_chain_without_offsets_is_read_as_gap_free(tmp_path):
+    _, temporal = build_pair(tmp_path)
+    assert temporal[0]["offsets"].tolist() == [2.0, 1.0, 0.0]
+
+
+def test_single_frame_samples_carry_no_offsets(tmp_path):
+    single, _ = build_pair(tmp_path)
+    assert "offsets" not in single[0]

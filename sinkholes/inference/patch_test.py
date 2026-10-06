@@ -126,7 +126,7 @@ def build_split_from_partition(args):
             # interferograms here is not the one the checkpoint was trained on:
             # the denominator of every metric below has changed.
             logging.warning(
-                f"{len(dropped)} interferograms have no full {args.k_prevs}-previous "
+                f"{len(dropped)} interferograms have no {args.k_prevs}-previous "
                 f"chain and are dropped: {dropped}. Training on this partition would "
                 f"have failed, so check --k_prevs and --partition_file against the run log."
             )

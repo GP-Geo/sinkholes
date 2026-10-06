@@ -85,8 +85,8 @@ def test_writes_eight_files(tmp_path):
     assert len(files) == 8
     for axis in ("geo", "temporal"):
         for k in (5, 10):
-            assert f"partition_{axis}_k{k}_clean.json" in files
-            assert f"partition_{axis}_k{k}_testeval_clean.json" in files
+            assert f"partition_{axis}_k{k}_clean_fill.json" in files
+            assert f"partition_{axis}_k{k}_testeval_clean_fill.json" in files
 
 
 def test_splits_are_disjoint(tmp_path):
@@ -104,8 +104,8 @@ def test_splits_are_disjoint(tmp_path):
 def test_k10_is_a_subset_of_k5_per_split(tmp_path):
     files, _ = run_generator(tmp_path)
     for axis in ("geo", "temporal"):
-        k5 = files[f"partition_{axis}_k5_clean.json"]
-        k10 = files[f"partition_{axis}_k10_clean.json"]
+        k5 = files[f"partition_{axis}_k5_clean_fill.json"]
+        k10 = files[f"partition_{axis}_k10_clean_fill.json"]
         for split in ("train", "val", "test"):
             assert set(k10[split]) <= set(k5[split]), f"{axis} {split}: k10 not inside k5"
 
@@ -117,7 +117,7 @@ def test_held_out_chains_never_reach_into_train(tmp_path):
     files, coord = run_generator(tmp_path)
     b1 = date(2023, 6, 1)
     for k in (5, 10):
-        d = files[f"partition_temporal_k{k}_clean.json"]
+        d = files[f"partition_temporal_k{k}_clean_fill.json"]
         chains, _ = find_11day_sequences(coord, k_prev=k)
         for split in ("val", "test"):
             for intf in d[split]:
@@ -131,7 +131,7 @@ def test_held_out_chains_never_reach_into_train(tmp_path):
 def test_geo_train_and_holdout_are_on_different_frames(tmp_path):
     files, coord = run_generator(tmp_path)
     for k in (5, 10):
-        d = files[f"partition_geo_k{k}_clean.json"]
+        d = files[f"partition_geo_k{k}_clean_fill.json"]
         assert all(coord[i]["frame"] == "North" for i in d["train"])
         assert all(coord[i]["frame"] == "South" for i in d["val"] + d["test"])
 
@@ -139,13 +139,13 @@ def test_geo_train_and_holdout_are_on_different_frames(tmp_path):
 def test_geo_carries_crossview_and_temporal_does_not(tmp_path):
     files, _ = run_generator(tmp_path)
     for k in (5, 10):
-        assert files[f"partition_geo_k{k}_clean.json"]["crossview"]
-        assert "crossview" not in files[f"partition_temporal_k{k}_clean.json"]
+        assert files[f"partition_geo_k{k}_clean_fill.json"]["crossview"]
+        assert "crossview" not in files[f"partition_temporal_k{k}_clean_fill.json"]
 
 
 def test_crossview_is_north_and_overlaps_train_on_purpose(tmp_path):
     files, coord = run_generator(tmp_path)
-    d = files["partition_geo_k5_clean.json"]
+    d = files["partition_geo_k5_clean_fill.json"]
     assert all(coord[i]["frame"] == "North" for i in d["crossview"])
     assert set(d["crossview"]) & set(d["train"]), (
         "crossview is meant to share scenes with train -- see plan 5b"
@@ -165,7 +165,7 @@ def test_every_split_has_a_window(tmp_path):
 
 def test_geo_train_window_is_above_the_cut_and_holdout_below(tmp_path):
     files, _ = run_generator(tmp_path)
-    d = files["partition_geo_k5_clean.json"]
+    d = files["partition_geo_k5_clean_fill.json"]
     assert d["aoi_window"]["train"][0] == CUT
     assert d["aoi_window"]["test"][1] == CUT
 
@@ -173,7 +173,7 @@ def test_geo_train_window_is_above_the_cut_and_holdout_below(tmp_path):
 def test_positives_are_counted_inside_the_window_not_whole_scene(tmp_path):
     """nonz_num would overstate every split; provenance must not use it."""
     files, coord = run_generator(tmp_path)
-    d = files["partition_geo_k5_clean.json"]
+    d = files["partition_geo_k5_clean_fill.json"]
     pos = d["provenance"]["positives_in_window"]
     # each synthetic North scene has 2 positives above the cut and 1 below,
     # while nonz_num says 4 -- so a whole-scene count would be 4x the scenes.
@@ -186,8 +186,8 @@ def test_testeval_carries_the_parent_test_list_as_val(tmp_path):
     files, _ = run_generator(tmp_path)
     for axis in ("geo", "temporal"):
         for k in (5, 10):
-            parent = files[f"partition_{axis}_k{k}_clean.json"]
-            te = files[f"partition_{axis}_k{k}_testeval_clean.json"]
+            parent = files[f"partition_{axis}_k{k}_clean_fill.json"]
+            te = files[f"partition_{axis}_k{k}_testeval_clean_fill.json"]
             assert te["val"] == parent["test"]
             assert "test" not in te
             assert set(te["train"]) == set(parent["train"]) | set(parent["val"])
@@ -278,7 +278,7 @@ def test_year_filter_restamps_the_generation(tmp_path):
     for f in out.glob("*.json"):
         pr = json.loads(f.read_text())["provenance"]
         # A restricted family must not be mistakable for the all-years one.
-        assert pr["generation"] == "2023_2023_clean" != bp.GENERATION
+        assert pr["generation"] == "2023_2023_clean_fill" != bp.GENERATION
         assert pr["years_filter"] == [2023, 2023]
 
 

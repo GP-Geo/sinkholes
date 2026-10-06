@@ -122,34 +122,54 @@ def parse_intf_id(intf_id: str) -> Tuple[datetime, datetime, int]:
     return sd, ed, (ed - sd).days
 
 
+#: How far back, in multiples of ``k``, a chain may reach to replace missing
+#: acquisitions. Measured on the committed dictionary (2026-10-06): filling to
+#: k frames needs at most 15 slots at k=5 and 22 at k=10, so 3k drops nothing
+#: that is fillable at all, while keeping a frame from becoming years stale.
+FILL_LOOKBACK_FACTOR = 3
+
+
 def find_11day_sequences(
     meta: Dict[str, Dict[str, Any]],
     k_prev: int = 2,
     step_days: int = 11,
     restrict_to: Optional[List[str]] = None,
     require_current_nonz_gt0: bool = True,
+    max_lookback: Optional[int] = None,
 ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
-    """Per-interferogram chains of the k previous same-frame acquisitions.
+    """Per-interferogram chains of the k nearest previous same-frame acquisitions.
 
-    A predecessor must exist exactly ``i * step_days`` earlier (i = 1..k), have
-    the same frame, and itself span ``step_days``. Ids missing any predecessor
-    are dropped from the returned valid list. ``prevs`` is ordered oldest ->
-    newest — the temporal stack everywhere in this project is chronological
-    with the current interferogram last.
+    A predecessor must lie a whole number of ``step_days`` slots earlier, have
+    the same frame, and itself span ``step_days``. Slots whose acquisition is
+    missing from the archive are skipped and the walk continues further back,
+    up to ``max_lookback`` slots (default ``FILL_LOOKBACK_FACTOR * k_prev``),
+    so a hole costs one older frame rather than the whole interferogram. Ids
+    that still cannot gather ``k_prev`` predecessors are dropped from the
+    returned valid list. ``max_lookback=k_prev`` is the old gap-free rule.
 
-    Returns ({id: {'prevs': [...], 'frame': ...}}, [valid ids]).
+    Where no slot is missing the chain is exactly the gap-free one, with
+    offsets ``k..1`` -- the positional encoding a model gets when it is given
+    no offsets at all -- so filling changes nothing for an interferogram the
+    gap-free rule already accepted.
+
+    ``prevs`` is ordered oldest -> newest -- the temporal stack everywhere in
+    this project is chronological with the current interferogram last -- and
+    ``offsets`` gives each predecessor's age in slots, aligned with ``prevs``
+    (the current frame, at offset 0, is in neither; see :func:`chain_offsets`).
+
+    Returns ({id: {'prevs': [...], 'offsets': [...], 'frame': ...}}, [valid ids]).
     """
+    if max_lookback is None:
+        max_lookback = FILL_LOOKBACK_FACTOR * k_prev
+    if max_lookback < k_prev:
+        raise ValueError(f"max_lookback {max_lookback} cannot hold k_prev={k_prev} predecessors")
 
     def make_key(sd, ed) -> str:
         return sd.strftime("%Y%m%d") + "_" + ed.strftime("%Y%m%d")
 
     daydiff = {k: parse_intf_id(k)[2] for k in meta}
     curr_keys = set(meta) if restrict_to is None else set(meta) & set(restrict_to)
-
-    frame_groups: Dict[str, set] = {"North": set(), "South": set()}
-    for k, info in meta.items():
-        if info.get("frame") in frame_groups:
-            frame_groups[info["frame"]].add(k)
+    frame_groups = frame_groups_of(meta)
 
     chains: Dict[str, Dict[str, Any]] = {}
     valid: List[str] = []
@@ -170,17 +190,36 @@ def find_11day_sequences(
 
         group = frame_groups[info["frame"]]
         prevs: List[str] = []
-        for i in range(k_prev, 0, -1):  # oldest first
-            pk = make_key(sd - timedelta(days=i * step_days), ed - timedelta(days=i * step_days))
-            if pk not in group or daydiff.get(pk) != step_days:
-                prevs = []
-                break
-            prevs.append(pk)
-        else:
-            chains[cur] = {"prevs": prevs, "frame": info["frame"]}
+        offsets: List[int] = []
+        for i in range(1, max_lookback + 1):  # newest first; reversed below
+            shift = timedelta(days=i * step_days)
+            pk = make_key(sd - shift, ed - shift)
+            if pk in group and daydiff.get(pk) == step_days:
+                prevs.append(pk)
+                offsets.append(i)
+                if len(prevs) == k_prev:
+                    break
+        if len(prevs) == k_prev:
+            chains[cur] = {"prevs": prevs[::-1], "offsets": offsets[::-1],
+                           "frame": info["frame"]}
             valid.append(cur)
 
     return chains, valid
+
+
+def chain_offsets(chain: Dict[str, Any]) -> List[int]:
+    """Ages in slots of ``chain['prevs'] + [current]``, oldest first, ending at 0.
+
+    A chain built before ``offsets`` existed (or written by hand, as tests do)
+    is gap-free by construction, so its ages are its list positions.
+    """
+    prevs = chain.get("prevs", [])
+    offsets = chain.get("offsets")
+    if offsets is None:
+        offsets = list(range(len(prevs), 0, -1))
+    if len(offsets) != len(prevs):
+        raise ValueError(f"chain has {len(prevs)} predecessors but {len(offsets)} offsets")
+    return [int(o) for o in offsets] + [0]
 
 
 #: A dense lookback: every 11-day slot from 1 to ``lookback``. The spelling

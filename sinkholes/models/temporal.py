@@ -12,6 +12,8 @@ Nothing here holds parameters, so nothing here is load-bearing for checkpoints.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 
 #: Channels a single interferogram contributes: 1 = phase only, 2 = phase +
@@ -94,3 +96,19 @@ def at_latest_timestep(feat: torch.Tensor, b: int, t: int) -> torch.Tensor:
 def unfold_time(feat: torch.Tensor, b: int, t: int) -> torch.Tensor:
     """``(B*T, C, H, W)`` -> ``(B, T, C, H, W)``, the whole sequence."""
     return feat.reshape(b, t, *feat.shape[1:])
+
+
+def run_model(model: torch.nn.Module, images: torch.Tensor,
+              offsets: Optional[torch.Tensor] = None,
+              valid: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """``model(images)``, handing each frame's age to a model that reads it.
+
+    A chain that skipped a missing acquisition is unevenly spaced, so its
+    ``offsets`` (``(T,)`` or ``(B, T)``, in 11-day slots) are what tell the
+    temporal attention how old each frame really is. Models that do not take
+    ages (single-frame, ConvLSTM) get the bare call. Gap-free offsets equal the
+    encoding a model uses when given none, so passing them is never a change.
+    """
+    if getattr(model, "takes_offsets", False) and (offsets is not None or valid is not None):
+        return model(images, offsets=offsets, valid=valid)
+    return model(images)

@@ -32,6 +32,7 @@ import numpy as np
 import torch
 
 from ..device import memory_format_for
+from ..models.temporal import run_model
 from ..normalise import validity_from_normalised
 from ..paths import asset
 
@@ -133,6 +134,8 @@ def reconstruct_scene(
     vote_threshold: float = 0.5,
     accumulate_image: bool = True,
     log_progress: bool = False,
+    offsets: Optional[Sequence[int]] = None,
+    valid: Optional[Sequence[bool]] = None,
 ) -> SceneReconstruction:
     """Predict every tile of a scene and stitch the results.
 
@@ -174,6 +177,13 @@ def reconstruct_scene(
     model was trained on. It must be the same window ``dataprep/dataset.py``
     used to build the split and the same one ``inference/outputs.py`` crops to;
     a mismatch scores a model on ground it trained on.
+
+    ``offsets``: each frame's age in 11-day slots, aligned with ``stack``
+    (oldest first, 0 last) -- what a chain that skipped a missing acquisition
+    must tell the model. ``valid``: per frame, False for a slot that holds
+    padding rather than a real acquisition. Both reach only models that read
+    them (:func:`sinkholes.models.temporal.run_model`); None leaves the model
+    assuming an evenly spaced, fully real stack.
     """
     if average not in ("uniform", "coverage", "vote"):
         raise ValueError(f"average must be 'uniform', 'coverage' or 'vote', got {average!r}")
@@ -211,6 +221,15 @@ def reconstruct_scene(
                   if average in ("coverage", "vote") else None)
 
     memory_format = memory_format_for(device)
+    offsets_t = valid_t = None
+    if offsets is not None:
+        if len(offsets) != T:
+            raise ValueError(f"{len(offsets)} offsets for a {T}-frame stack")
+        offsets_t = torch.as_tensor(list(offsets), dtype=torch.float32, device=device)
+    if valid is not None:
+        if len(valid) != T:
+            raise ValueError(f"{len(valid)} validity flags for a {T}-frame stack")
+        valid_t = torch.as_tensor([list(valid)], dtype=torch.bool, device=device)
     net.eval()
     for i in range(ny):
         if log_progress and i % 20 == 0:
@@ -253,7 +272,7 @@ def reconstruct_scene(
 
             batch = torch.from_numpy(x_np[None]).to(device=device, memory_format=memory_format)
             with torch.no_grad():
-                prob = torch.sigmoid(net(batch)).squeeze().cpu().numpy().astype(np.float32)
+                prob = torch.sigmoid(run_model(net, batch, offsets_t, valid_t)).squeeze().cpu().numpy().astype(np.float32)
             if prob.shape != (patch_h, patch_w):
                 raise ValueError(f"model output {prob.shape} does not match target grid {patch_size}")
 

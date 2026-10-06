@@ -41,6 +41,7 @@ from torch.utils.data import Dataset
 
 from ..geo import FRAME_ORIGINS, grid_window
 from ..normalise import PATCH_RANGE_TOL, PREPROCESSING_VERSIONS, normalise_channels
+from ..meta import chain_offsets
 from .context import context_margin
 from .patchify import patch_file_name
 
@@ -271,6 +272,11 @@ class SubsiDataset(Dataset):
         self.image_data: List[np.ndarray] = []
         self.mask_data: List[np.ndarray] = []
         self.index_map: List[List[int]] = []
+        # Per loaded interferogram, the age in 11-day slots of each timestep
+        # (oldest first, 0 last). A chain that skipped a missing acquisition is
+        # not evenly spaced, and the model must be told so. None when the
+        # samples carry no history.
+        self.offsets: Optional[List[List[int]]] = [] if temporal else None
 
         for intf_idx, intf_id in enumerate(self.ids):
             if spatial:
@@ -318,6 +324,8 @@ class SubsiDataset(Dataset):
 
             self.image_data.append(image_data)
             self.mask_data.append(mask_data)
+            if self.offsets is not None:
+                self.offsets.append(chain_offsets(seq_dict[intf_id]))
             n = image_data.shape[1]
             self.index_map.extend([[len(self.image_data) - 1, j] for j in range(n)])
 
@@ -708,7 +716,13 @@ class SubsiDataset(Dataset):
         else:
             img_t = torch.as_tensor(img.copy()).unsqueeze(0).float().contiguous()
         msk_t = torch.as_tensor(msk.copy()).long().contiguous()
-        return {"image": img_t, "mask": msk_t}
+        item = {"image": img_t, "mask": msk_t}
+        # Pickled test sets from before offsets existed have no attribute; their
+        # chains were gap-free, which is what a model assumes without offsets.
+        offsets = getattr(self, "offsets", None)
+        if getattr(self, "temporal", False) and offsets is not None:
+            item["offsets"] = torch.tensor(offsets[intf_idx], dtype=torch.float32)
+        return item
 
 
 # -- saved test sets --------------------------------------------------------------------

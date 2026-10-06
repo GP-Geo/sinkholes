@@ -52,7 +52,7 @@ from ..dataprep.partition import (
 from ..dataprep.context import context_size, io_geometry
 from ..dataprep.patchify import patch_file_name, resolve_patch_dirs
 from ..device import get_device, memory_format_for
-from ..meta import find_11day_sequences, load_coord_dict
+from ..meta import FILL_LOOKBACK_FACTOR, find_11day_sequences, load_coord_dict
 from ..models.attention_unet import AttentionUNet
 from ..models.convlstm_unet import DEFAULT_CONVLSTM_HIDDEN_CHANNELS, ConvLSTMUNet
 from ..models.factory import PER_TIMESTEP_ARCHITECTURES, architecture_from_flags
@@ -65,6 +65,7 @@ from ..models.tattn_unet import (
     RECURRENCE_CHOICES,
     TemporalAttentionUNet,
 )
+from ..models.temporal import run_model
 from ..models.unet import UNet
 from .evaluate import evaluate
 from .losses import segmentation_loss
@@ -502,12 +503,21 @@ def build_datasets(args, rep):
     # negatives. A negative must be empty at every timestep, so the exclusion
     # grid is the union over the chain -- and building it the same way here is
     # what lets a single-frame control draw exactly the negatives its temporal
-    # twin drew. Restricting to interferograms with full chains costs coverage,
+    # twin drew. Restricting to interferograms with chains costs coverage,
     # but an unmatched control is not a control.
     if args.add_temporal or args.add_ring_negatives or args.add_val_negatives:
         seq_dict, intf_list = find_11day_sequences(coord_dict, k_prev=args.k_prevs,
                                                    restrict_to=intf_list)
-        logging.info(f"{len(intf_list)} interferograms have full {args.k_prevs}-previous chains")
+        n_gappy = sum(1 for i in intf_list if seq_dict[i]["offsets"][0] != args.k_prevs)
+        logging.info(f"{len(intf_list)} interferograms have {args.k_prevs}-previous chains "
+                     f"({n_gappy} reach past a missing acquisition, up to "
+                     f"{FILL_LOOKBACK_FACTOR * args.k_prevs} slots back)")
+        if n_gappy and args.add_temporal and args.convlstm_unet:
+            logging.warning(
+                f"{n_gappy} chains skip a missing acquisition, and the ConvLSTM "
+                f"takes no frame ages: it will read them as evenly spaced. Only "
+                f"--tattn_unet is told each frame's real age."
+            )
         if not args.add_temporal:
             logging.info(
                 f"single-frame run with negatives: negatives are excluded "
@@ -1053,10 +1063,13 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                     images = images.to(device=device, dtype=torch.float32,
                                        memory_format=memory_format_for(device))
                     true_masks = true_masks.to(device=device, dtype=torch.long)
+                    offsets = batch.get("offsets")
+                    if offsets is not None:
+                        offsets = offsets.to(device=device)
 
                     with torch.autocast(device.type if device.type != "mps" else "cpu",
                                         enabled=args.amp):
-                        logits = model(images)
+                        logits = run_model(model, images, offsets)
                     parts = {}
                     loss = loss_of(logits, images, true_masks, parts)
 

@@ -13,6 +13,7 @@ from shapely.ops import unary_union
 from tqdm import tqdm
 
 from ..device import memory_format_for
+from ..models.temporal import run_model
 from .features import compute_feature
 from .losses import (
     dice_coeff,
@@ -268,8 +269,11 @@ def evaluate(
             image = image.to(device=device, dtype=torch.float32,
                              memory_format=memory_format_for(device))
             mask_true = mask_true.to(device=device, dtype=torch.long)
+            offsets = batch.get("offsets")
+            if offsets is not None:
+                offsets = offsets.to(device=device)
 
-            logits = net(image)
+            logits = run_model(net, image, offsets)
 
             if net.n_classes == 1:
                 mask_true = mask_true.unsqueeze(1)

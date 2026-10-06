@@ -1,6 +1,6 @@
 # Partition registry
 
-`assets/` holds **four generations** of interferogram partition. They coexist on purpose:
+`assets/` holds **five generations** of interferogram partition. They coexist on purpose:
 the older ones are what every published number was produced on, so deleting them would
 make `docs/MODEL_RUNS.md`, `docs/RESULTS.md` and `docs/PREDICTIONS.md` unreproducible.
 Nothing selects a generation for you — every entry point demands an explicit path.
@@ -10,6 +10,7 @@ extend them.
 
 | Generation | Files | What it is |
 |---|---|---|
+| 5 (filled chains, being evaluated) | `partition_temporal_k{5,10}[_testeval]_clean_fill_th350x200.json` | generation 4 with chains that **reach past missing acquisitions** |
 | **4** (current) | `partition_temporal_k{5,10}[_testeval]_clean_th350x200.json` | generation 3 plus a **label-quality threshold on targets** |
 | 3 | `partition_{geo,temporal}_k{5,10}[_testeval]_clean.json` | the clean benchmark: AOI + latitude cut, all years |
 | 3b | `partition_{geo,temporal}_k{5,10}[_testeval]_pre2023.json` | the same, archive stopped at 2022-12-31 |
@@ -19,6 +20,40 @@ extend them.
 Generations 3 and 3b differ **only** in which years the archive contains — same generator,
 cut, AOI, seed and val share — so a run on one is readable against its twin on the other
 and the difference is the archive. **Do not mix them inside one comparison.**
+
+---
+
+## Generation 5 — `*_clean_fill_th350x200.json` (filled chains, 2026-10-06)
+
+Generation 4 rebuilt after `find_11day_sequences` stopped demanding a gap-free chain. A
+missing acquisition is now skipped and the walk continues to an older one, up to
+`3k` slots back (`FILL_LOOKBACK_FACTOR`), and each chain records its real `offsets`, which
+the temporal attention receives as frame ages. Same command, cut, AOI, bounds, seed and
+threshold as generation 4; only the chain rule differs.
+
+Where no slot is missing the filled chain is the gap-free one, so **every split of
+generation 4 is a subset of the same split here** (checked at write time). A generation-5
+run can therefore be scored on the generation-4 test list too: that is the like-for-like
+number, and the full generation-5 test list is the coverage gain.
+
+| File | train / val / test intfs | positives in window |
+|---|---|---|
+| `partition_temporal_k5_clean_fill_th350x200.json` | 130 / 12 / 24 | 44,114 / 3,379 / 8,893 |
+| `partition_temporal_k10_clean_fill_th350x200.json` | 121 / 11 / 24 | 41,032 / 3,162 / 8,893 |
+| `partition_temporal_k5_testeval_clean_fill_th350x200.json` | 142 / 24 (test-as-val) | 47,493 / 8,893 |
+| `partition_temporal_k10_testeval_clean_fill_th350x200.json` | 132 / 24 (test-as-val) | 44,194 / 8,893 |
+
+Only `--tattn_unet` reads the ages. A ConvLSTM trained here sees uneven chains as evenly
+spaced, and `train` warns when it does.
+
+```bash
+sinkholes make-benchmark-partitions \
+  --intf_dict assets/intf_coord.json \
+  --patches_dir $D/patches --seed 0 \
+  --aoi 31.25 31.75 35.38 35.46 --axis temporal \
+  --temporal_bounds 20240101 20250101 \
+  --nonz_th 350 200 --suffix clean_fill_th350x200 --out_dir assets/
+```
 
 ---
 

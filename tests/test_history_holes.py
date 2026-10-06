@@ -296,7 +296,7 @@ def test_select_history_on_the_real_dictionary_beats_the_strict_rule():
 
     meta = load_coord_dict()
     groups = frame_groups_of(meta)
-    _, strict = find_11day_sequences(meta, k_prev=40)
+    _, strict = find_11day_sequences(meta, k_prev=40, max_lookback=40)
 
     tolerant, depths = [], []
     for intf_id, info in meta.items():
@@ -313,3 +313,102 @@ def test_select_history_on_the_real_dictionary_beats_the_strict_rule():
     assert len(strict) < 30, "the strict rule should be nearly empty at a 40-slot lookback"
     assert len(tolerant) > 250, "hole tolerance should keep essentially every interferogram"
     assert np.mean(depths) > 25, "and most of the history should still be there"
+
+
+# -- filled chains: a missing acquisition is replaced by an older one ----------------------
+
+def eleven_day_run(n, holes=(), frame="South"):
+    """Meta for n consecutive 11-day slots ending at the newest, minus ``holes``.
+
+    ``holes`` are slot ages counted back from the newest (which is age 0).
+    Returns (meta, newest id).
+    """
+    from datetime import datetime, timedelta
+
+    base = datetime.strptime("20200101", "%Y%m%d")
+    dates = [(base + timedelta(days=11 * i)).strftime("%Y%m%d") for i in range(n)]
+    dates = [d for age, d in zip(range(n - 1, -1, -1), dates) if age not in holes]
+    meta = synthetic_meta(dates, frame=frame)
+    return meta, sorted(meta)[-1]
+
+
+def test_a_hole_is_filled_from_further_back():
+    from sinkholes.meta import find_11day_sequences
+
+    meta, current = eleven_day_run(8, holes=(2,))
+    chains, valid = find_11day_sequences(meta, k_prev=4, restrict_to=[current])
+    assert valid == [current]
+    assert chains[current]["offsets"] == [5, 4, 3, 1], "slot 2 skipped, slot 5 fills in"
+    assert len(chains[current]["prevs"]) == 4
+    assert chain_offsets_of(chains[current]) == [5, 4, 3, 1, 0]
+
+
+def chain_offsets_of(chain):
+    from sinkholes.meta import chain_offsets
+    return chain_offsets(chain)
+
+
+def test_a_gap_free_chain_is_exactly_the_strict_one():
+    """Every interferogram the old rule accepted keeps its chain, offsets k..1."""
+    from sinkholes.meta import find_11day_sequences, load_coord_dict
+
+    meta = load_coord_dict()
+    for k in (5, 10):
+        strict, strict_valid = find_11day_sequences(meta, k_prev=k, max_lookback=k)
+        filled, filled_valid = find_11day_sequences(meta, k_prev=k)
+        assert set(strict_valid) < set(filled_valid), "filling only ever adds"
+        for intf in strict_valid:
+            assert filled[intf]["prevs"] == strict[intf]["prevs"]
+            assert filled[intf]["offsets"] == list(range(k, 0, -1))
+
+
+def test_filling_stops_at_the_lookback():
+    from sinkholes.meta import find_11day_sequences
+
+    meta, current = eleven_day_run(8, holes=(1, 2, 3))
+    _, valid = find_11day_sequences(meta, k_prev=2, max_lookback=4, restrict_to=[current])
+    assert valid == [], "only one predecessor within 4 slots"
+    chains, valid = find_11day_sequences(meta, k_prev=2, max_lookback=5,
+                                         restrict_to=[current])
+    assert valid == [current] and chains[current]["offsets"] == [5, 4]
+
+
+def test_lookback_shorter_than_k_is_refused():
+    from sinkholes.meta import find_11day_sequences
+
+    with pytest.raises(ValueError, match="cannot hold"):
+        find_11day_sequences({}, k_prev=5, max_lookback=4)
+
+
+def test_hand_written_chains_read_as_gap_free():
+    assert chain_offsets_of({"prevs": ["a", "b", "c"]}) == [3, 2, 1, 0]
+    with pytest.raises(ValueError, match="offsets"):
+        chain_offsets_of({"prevs": ["a", "b"], "offsets": [1]})
+
+
+# -- run_model: ages reach the models that read them ---------------------------------------
+
+def test_run_model_passes_offsets_to_temporal_attention():
+    from sinkholes.models.temporal import run_model
+
+    model = make_model()
+    torch.manual_seed(4)
+    x = torch.randn(2, 4, 64, 32)
+    gappy = torch.tensor([[5.0, 3.0, 1.0, 0.0]] * 2)
+    with torch.no_grad():
+        assert torch.allclose(run_model(model, x, gappy), model(x, offsets=gappy))
+        assert not torch.allclose(run_model(model, x, gappy), model(x), atol=1e-6)
+        # Gap-free offsets are the implicit encoding: passing them changes nothing.
+        dense = torch.tensor([[3.0, 2.0, 1.0, 0.0]] * 2)
+        assert torch.allclose(run_model(model, x, dense), model(x), atol=1e-5)
+
+
+def test_run_model_gives_other_models_the_bare_call():
+    from sinkholes.models.temporal import run_model
+
+    class Bare(torch.nn.Module):
+        def forward(self, x):
+            return x.sum(dim=1, keepdim=True)
+
+    x = torch.randn(1, 3, 8, 8)
+    assert torch.equal(run_model(Bare(), x, torch.tensor([4.0, 1.0, 0.0])), Bare()(x))

@@ -57,6 +57,7 @@ def main(args) -> None:
     from ..dataprep.dataset import load_test_dataset
     from ..device import get_device
     from ..models.factory import architecture_from_flags, build_from_checkpoint
+    from ..models.temporal import run_model
 
     logging.basicConfig(level=logging.WARNING)
     scores, source = learning_curve(args.run_dir)
@@ -120,7 +121,9 @@ def main(args) -> None:
             y = batch["mask"].to(device).float()
             if y.ndim == 4:
                 y = y.squeeze(1)
-            prob = torch.sigmoid(net(x)).squeeze(1)
+            offsets = batch.get("offsets")
+            prob = torch.sigmoid(run_model(
+                net, x, None if offsets is None else offsets.to(device))).squeeze(1)
             pos = y > 0.5
             n_pos += int(pos.sum().item())
             n_tot += int(y.numel())

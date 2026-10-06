@@ -174,7 +174,7 @@ def test_an_interferogram_without_a_chain_is_dropped_with_a_warning(
     with caplog.at_level("WARNING"):
         built = build_split_from_partition(args)
     assert built.ids == [CURRENT], "only the id with a full chain survives"
-    assert "no full" in caplog.text and CHAIN[0] in caplog.text
+    assert "previous chain" in caplog.text and CHAIN[0] in caplog.text
 
 
 # -- the scene-level gate --------------------------------------------------------------

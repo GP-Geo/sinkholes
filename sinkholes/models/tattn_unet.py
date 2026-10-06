@@ -94,6 +94,9 @@ class TemporalAttentionUNet(CentreCropOutput, nn.Module):
     #: chain that has to be updated in step with every new model.
     CONFIG_KEY = CONFIG_KEY
 
+    #: ``forward`` reads per-frame ages; see :func:`.temporal.run_model`.
+    takes_offsets = True
+
     def __init__(
         self,
         n_channels_per_timestep: int = 1,
