@@ -55,7 +55,7 @@ reaching q/k is ~10x weaker than the one reaching the value path, and the
 projections decay to zero long before the encoder learns to separate the frames
 (it eventually does — the ratio reaches 0.50 by the end of training, far too
 late). All fifteen checkpoints trained before this was found average their
-history instead of selecting from it; ``docs/ATTENTION_COLLAPSE.md`` has the
+history instead of selecting from it; ``docs/ATTENTION.md`` has the
 measurements.
 
 Two changes fix it, and neither is sufficient alone:
@@ -315,7 +315,7 @@ class _TemporalReadoutBlock(nn.Module):
     returned because the skip fusion reuses them; they sum to 1 over T.
 
     ``contrast`` and ``qk_norm`` are the two halves of the fix for the collapse
-    documented in ``docs/ATTENTION_COLLAPSE.md``; see :class:`CausalTemporalAttention`
+    documented in ``docs/ATTENTION.md``; see :class:`CausalTemporalAttention`
     for what each does and why neither works alone.
     """
 

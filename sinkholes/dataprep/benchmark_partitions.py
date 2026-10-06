@@ -21,6 +21,14 @@ Two rules the generator exists to enforce, both easy to get wrong by hand:
 * **k10 is a subset of k5 per split.** Splits are assigned at k5 and intersected
   with the k10 chain-valid set, so the two depths differ in chain length and
   nothing else.
+* **``--nonz_th`` gates targets only.** A scene below the threshold never enters
+  train/val/test, but stays available as a *predecessor*: the chains are built
+  over the whole dictionary before the filter runs, so a thinly labelled scene
+  can still supply an input frame. Label quality is judged WHOLE-SCENE
+  (``nonz_num``) and not inside the AOI on purpose -- an in-window count would
+  confuse "badly digitised" with "few sinkholes in this band". Since an
+  in-window count can never exceed the whole-scene one, the filter cannot drop
+  a scene that has more than the threshold's worth of positives in the window.
 """
 
 import argparse
@@ -34,20 +42,24 @@ import numpy as np
 
 from ..geo import grid_window
 from ..meta import find_11day_sequences, load_coord_dict
+from .partition import filter_by_nonz_count
 
 #: Written into every file so a reader can tell the generation apart.
 GENERATION = "all_years_clean"
 
 
-def generation_label(years):
+def generation_label(years, nonz_th=None):
     """The generation stamp for this run.
 
     A ``--years``-restricted run is *not* :data:`GENERATION`. Stamping it
     ``all_years_clean`` would make the year-restricted family indistinguishable
     from the full one in the only place a reader is told to trust
-    (assets/PARTITIONS.md: "trust the file's own provenance").
+    (assets/PARTITIONS.md: "trust the file's own provenance"). A
+    ``--nonz_th``-restricted run is a separate family for the same reason: it
+    holds fewer scenes than the bare name promises.
     """
-    return GENERATION if not years else f"{years[0]}_{years[1]}_clean"
+    label = GENERATION if not years else f"{years[0]}_{years[1]}_clean"
+    return label if not nonz_th else f"{label}_nonz{nonz_th[0]}-{nonz_th[1]}"
 
 
 def add_arguments(p: argparse.ArgumentParser) -> None:
@@ -67,8 +79,16 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                    metavar=("TRAIN_END", "VAL_END"),
                    help="train < first, val < second, test >= second")
     p.add_argument("--k_prevs", nargs="+", type=int, default=[5, 10])
+    p.add_argument("--axis", nargs="+", default=["geo", "temporal"], choices=["geo", "temporal"],
+                   help="which families to write (default: both). The axes are independent -- "
+                        "asking for one does not change the other's lists")
     p.add_argument("--years", nargs=2, type=int, default=None, metavar=("Y0", "Y1"),
                    help="optional year filter; default is every year in the dictionary")
+    p.add_argument("--nonz_th", nargs=2, type=int, default=None, metavar=("NORTH", "SOUTH"),
+                   help="per-region whole-scene positive-patch threshold for TARGETS: a scene "
+                        "enters train/val/test only when nonz_num > this (north when the frame "
+                        "origin is above lat 31.5, else south). Predecessors are exempt. "
+                        "Default: no threshold, as every committed partition was built")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out_dir", type=str, default="assets")
     p.add_argument("--suffix", type=str, default="clean",
@@ -276,13 +296,25 @@ def main(args) -> None:
         ch, valid = find_11day_sequences(coord, k_prev=k)
         chains_by_k[k], valid_by_k[k] = ch, sorted(valid)
         logging.info(f"k={k}: {len(valid)} chain-valid interferograms")
+        if args.nonz_th:
+            # Targets only. ``ch`` is deliberately left whole: it was built over
+            # the entire dictionary just above, so a scene dropped here still
+            # appears in a kept scene's ``prevs`` and still supplies an input
+            # frame. Filtering the chains too would silently shorten every stack
+            # that reaches back across a thinly labelled date.
+            kept = filter_by_nonz_count(valid_by_k[k], coord, tuple(args.nonz_th))
+            dropped = len(valid_by_k[k]) - len(kept)
+            valid_by_k[k] = sorted(kept)
+            logging.info(f"k={k}: --nonz_th {args.nonz_th[0]} {args.nonz_th[1]} dropped "
+                         f"{dropped} of {len(valid)} as targets; they stay available "
+                         f"as predecessors")
 
     # Splits are assigned at the SHALLOWEST chain depth and the deeper ones are
     # intersected with it, which is what makes k10 a subset of k5 per split --
     # so the two depths differ in chain length and in nothing else.
     k_base = min(ks)
     written = []
-    for axis in ("geo", "temporal"):
+    for axis in args.axis:
         base_splits = base_windows = None
         for k in sorted(ks):
             valid = valid_by_k[k]
@@ -313,7 +345,7 @@ def main(args) -> None:
             check_invariants(axis, k, splits, counter, windows)
 
             prov = {
-                "generation": generation_label(args.years),
+                "generation": generation_label(args.years, args.nonz_th),
                 "axis": axis,
                 "k_prevs": k,
                 # ``years`` is what the splits actually contain; ``years_filter``
@@ -321,6 +353,8 @@ def main(args) -> None:
                 # than the request, so both are recorded.
                 "years": sorted({int(i[:4]) for v in splits.values() for i in v}) or None,
                 "years_filter": list(args.years) if args.years else None,
+                # Target-side only; predecessors were never filtered by it.
+                "nonz_th": list(args.nonz_th) if args.nonz_th else None,
                 "cut_lat": args.cut_lat if axis == "geo" else None,
                 "aoi": list(aoi),
                 "temporal_bounds": list(args.temporal_bounds) if axis == "temporal" else None,

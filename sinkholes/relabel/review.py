@@ -29,8 +29,9 @@ STYLE = {
     "DEL": dict(edgecolor="#ff1744", linewidth=2.0, facecolor="#ff174422", linestyle="--", hatch="xx"),
     "MOD_old": dict(edgecolor="#ff00ff", linewidth=1.8, facecolor="none", linestyle="--"),
     "MOD_new": dict(edgecolor="#ff9100", linewidth=2.0, facecolor="none"),
+    "FLAG": dict(edgecolor="#d500f9", linewidth=2.2, facecolor="#d500f91a", linestyle=":", hatch=".."),
 }
-COLOR = {"ADD": "#39ff14", "DEL": "#ff1744", "MOD": "#ff9100"}
+COLOR = {"ADD": "#39ff14", "DEL": "#ff1744", "MOD": "#ff9100", "FLAG": "#d500f9"}
 CMAP = "twilight"            # cyclic, and free of the overlay colours
 ZOOM_PAD_PX = 80             # context around a change in a zoom panel
 ZOOM_MIN_PX = 260            # smallest zoom window side (~720 m)
@@ -67,6 +68,7 @@ def _patches(ax, geom, style, zorder=3):
 def _read_raster(tif, bounds=None, max_px=1600):
     """(array, extent) of the labelling raster, optionally windowed, decimated to max_px."""
     import rasterio
+    import rasterio.errors
     from rasterio.enums import Resampling
     from rasterio.windows import from_bounds
 
@@ -75,7 +77,11 @@ def _read_raster(tif, bounds=None, max_px=1600):
             win = rasterio.windows.Window(0, 0, src.width, src.height)
         else:
             win = from_bounds(*bounds, transform=src.transform).round_offsets().round_lengths()
-            win = win.intersection(rasterio.windows.Window(0, 0, src.width, src.height))
+            try:
+                win = win.intersection(rasterio.windows.Window(0, 0, src.width, src.height))
+            except rasterio.errors.WindowError:
+                # the change lies outside the labelling raster (outside the AOI crop)
+                return None, (bounds[0], bounds[2], bounds[1], bounds[3])
         scale = max(1.0, max(win.height, win.width) / max_px)
         shape = (max(1, int(win.height / scale)), max(1, int(win.width / scale)))
         arr = src.read(1, window=win, out_shape=shape, resampling=Resampling.nearest)
@@ -109,6 +115,8 @@ def _scalebar(ax, extent, lat):
 
 def _label(ax, c, short=True, fontsize=6):
     txt = c["change_id"].split("_", 2)[-1] if short else c["change_id"]
+    if c["change_type"] == "FLAG" and short:
+        txt = f"{txt} {c.get('qc_flag', '')}"
     ax.annotate(txt, (c["lon"], c["lat"]), xytext=(6, 6), textcoords="offset points",
                 fontsize=fontsize, color="black", zorder=20,
                 bbox=dict(boxstyle="round,pad=0.2", fc=COLOR[c["change_type"]], ec="black", lw=0.5),
@@ -123,7 +131,9 @@ def _legend(ax):
              Patch(edgecolor=COLOR["DEL"], facecolor="#ff174422", lw=2, ls="--", hatch="xx",
                    label="DEL: removed polygon"),
              Patch(edgecolor="#ff00ff", facecolor="none", lw=2, ls="--", label="MOD: old outline"),
-             Patch(edgecolor=COLOR["MOD"], facecolor="none", lw=2, label="MOD: new outline")]
+             Patch(edgecolor=COLOR["MOD"], facecolor="none", lw=2, label="MOD: new outline"),
+             Patch(edgecolor=COLOR["FLAG"], facecolor="#d500f91a", lw=2, ls=":", hatch="..",
+                   label="FLAG: hard/doubtful, KEPT in GT")]
     ax.legend(handles=items, loc="upper left", fontsize=6, framealpha=0.9)
 
 
@@ -202,30 +212,37 @@ def overview_figure(fig_or_none, scene, tif, orig_s, corr_s, cs, clusters, stats
     rows = [("Original polygons", stats["original_count"]),
             ("Corrected polygons", stats["corrected_count"]),
             ("Added", stats["added"]), ("Deleted", stats["deleted"]), ("Modified", stats["modified"]),
-            ("Flagged for review (ambiguous)", stats["needs_review"])]
+            ("Ambiguous changes (need review)", stats["needs_review"]),
+            ("Flagged hard/doubtful (kept in GT)", stats.get("flagged", 0))]
     for k, (a, b) in enumerate(rows):
         tx.text(0, 0.93 - k * 0.022, f"{a}:", fontsize=8)
         tx.text(0.62, 0.93 - k * 0.022, str(b), fontsize=8, weight="bold")
-    y = 0.78
+    y = 0.76
     tx.text(0, y, "Changes", fontsize=8, weight="bold")
     y -= 0.022
+    flag_head = False
     for c in cs:
+        if c["change_type"] == "FLAG" and not flag_head:
+            y -= 0.006
+            tx.text(0, y, "Flagged polygons (kept in the corrected GT)", fontsize=8, weight="bold")
+            y -= 0.022
+            flag_head = True
         if y < 0.02:
             tx.text(0, y, "... continued in the change table", fontsize=6)
             break
-        reason = c.get("edit_reason") or "-"
+        reason = (c.get("qc_flag") if c["change_type"] == "FLAG" else c.get("edit_reason")) or "-"
         z = next(k for k, (cc, _) in enumerate(clusters, 1) if c in cc)
         line = (f"{c['change_id']}  [Z{z}]  {reason}  "
                 f"({c['lat']:.5f}N, {c['lon']:.5f}E)")
         tx.text(0, y, line, fontsize=5.8, color="black",
                 bbox=dict(facecolor=COLOR[c["change_type"]], alpha=0.35, pad=0.5, edgecolor="none"))
         y -= 0.018
-        note = c.get("edit_notes")
+        note = c.get("qc_note") if c["change_type"] == "FLAG" else c.get("edit_notes")
         if note:
             tx.text(0.03, y, f"note: {str(note)[:110]}", fontsize=5.4, style="italic")
             y -= 0.016
         if c.get("needs_review"):
-            tx.text(0.03, y, f"FLAG: {c['review_note']}", fontsize=5.4, color="#b00020")
+            tx.text(0.03, y, f"CHECK: {c['review_note']}", fontsize=5.4, color="#b00020")
             y -= 0.016
     return fig
 
@@ -243,7 +260,12 @@ def zoom_figure(scene, tif, orig_s, corr_s, cluster, k):
     ids_del = {c["orig_uid"] for c in cs if c["change_type"] in ("DEL", "MOD")}
     ids_new = {c["feat_uid"] for c in cs if c["change_type"] in ("ADD", "MOD")}
     for ax, side in zip(axes, ("Original labels", "Corrected labels")):
-        ax.imshow(arr, extent=ext, cmap=CMAP, vmin=-np.pi, vmax=np.pi, interpolation="nearest")
+        if arr is not None:
+            ax.imshow(arr, extent=ext, cmap=CMAP, vmin=-np.pi, vmax=np.pi, interpolation="nearest")
+        else:
+            ax.set_facecolor("#dddddd")
+            ax.text(0.5, 0.02, "outside the labelling raster (AOI crop)", transform=ax.transAxes,
+                    ha="center", fontsize=7)
         if side.startswith("Original"):
             for r in orig_s.itertuples():
                 if r.orig_uid not in ids_del:
@@ -265,6 +287,9 @@ def zoom_figure(scene, tif, orig_s, corr_s, cluster, k):
                     _patches(ax, c["new_geom"], STYLE["MOD_new"], 5)
                 elif c["change_type"] == "DEL":
                     _patches(ax, c["old_geom"], dict(STYLE["DEL"], facecolor="none", linewidth=0.8), 4)
+        for c in cs:                                     # flags: same polygon on both sides
+            if c["change_type"] == "FLAG":
+                _patches(ax, c["new_geom"], STYLE["FLAG"], 6)
         for c in cs:
             _label(ax, c)
         _geo_axes(ax, ext, lat)
@@ -301,7 +326,9 @@ def cover_figure(summary, ws, note, n_changes):
         "Change ids, e.g. 20250329_20250409_ADD_001, are the same in this PDF, in change_list.csv",
         "and in gt_changes_v2.gpkg (open it in QGIS to see only the changed polygons).",
         "ADD = polygon added; DEL = polygon removed; MOD = outline changed (old dashed magenta,",
-        "new solid orange). FLAG marks a change the automatic matching could not resolve uniquely.",
+        "new solid orange). CHECK marks a change the automatic matching could not resolve uniquely.",
+        "FLAG (purple, dotted) marks a polygon judged hard or doubtful (e.g. a large polygon over",
+        "noisy phase). Flagged polygons are NOT removed: they stay in the corrected ground truth.",
     ]
     if note:
         txt += ["", f"Note: {note}"]
@@ -311,16 +338,17 @@ def cover_figure(summary, ws, note, n_changes):
     y = 1 - (len(txt) + 1) * 0.022
     ax.text(0, y, "Scene summary", fontsize=9, weight="bold")
     y -= 0.022
-    cols = ["intf_id", "frame", "original_count", "corrected_count", "added", "deleted", "modified"]
-    hdr = ["interferogram", "frame", "orig", "corr", "add", "del", "mod"]
-    xs = [0, 0.25, 0.37, 0.47, 0.57, 0.67, 0.77]
+    cols = ["intf_id", "frame", "original_count", "corrected_count", "added", "deleted", "modified",
+            "flagged"]
+    hdr = ["interferogram", "frame", "orig", "corr", "add", "del", "mod", "flag"]
+    xs = [0, 0.25, 0.37, 0.47, 0.57, 0.67, 0.77, 0.87]
     for x, h in zip(xs, hdr):
         ax.text(x, y, h, fontsize=7, weight="bold")
     for r in summary:
         y -= 0.017
-        changed = r["added"] or r["deleted"] or r["modified"]
+        changed = r["added"] or r["deleted"] or r["modified"] or r.get("flagged")
         for x, c in zip(xs, cols):
-            ax.text(x, y, str(r[c]), fontsize=7, weight="bold" if changed else "normal",
+            ax.text(x, y, str(r.get(c, 0)), fontsize=7, weight="bold" if changed else "normal",
                     color="black" if changed else "#777777")
     return fig
 
@@ -340,7 +368,7 @@ def main(args):
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     ws = Path(args.workspace)
-    changes, summary, detected = d.run(ws, take_snapshot=True)
+    changes, summary, detected, flags = d.run(ws, take_snapshot=True)
     orig, work, scenes = d.load_layers(ws)
     live = work[work["edit_status"].fillna("") != "deleted"]
     sc = {r["intf_id"]: r for r in scenes.to_dict("records")}
@@ -351,7 +379,8 @@ def main(args):
         raise SystemExit(f"{out} exists -- packages are never overwritten; pass another --tag")
     (out / "scenes").mkdir(parents=True)
 
-    changed = [i for i in scenes["intf_id"] if any(c["intf_id"] == i for c in changes)]
+    items = changes + list(flags)
+    changed = [i for i in scenes["intf_id"] if any(c["intf_id"] == i for c in items)]
     if args.scenes:
         changed = [i for i in changed if i in set(args.scenes)]
     if not changed:
@@ -363,7 +392,8 @@ def main(args):
         for intf in changed:
             s = sc[intf]
             tif = ws / s["raster"]
-            cs = sorted([c for c in changes if c["intf_id"] == intf], key=lambda c: c["change_id"])
+            cs = sorted([c for c in items if c["intf_id"] == intf],
+                        key=lambda c: (c["change_type"] == "FLAG", c["change_id"]))
             dx = 2.777e-05
             clusters = clusters_of(cs, dx)
             o_s, c_s = orig[orig["intf_id"] == intf], live[live["intf_id"] == intf]
@@ -376,10 +406,11 @@ def main(args):
                 fig.savefig(out / "scenes" / f"{intf}_zoom_Z{k:02d}.png", dpi=170)
                 pdf.savefig(fig)
                 plt.close(fig)
-            logging.info(f"{intf}: {len(cs)} change(s), {len(clusters)} zoom(s)")
+            n_f = sum(c["change_type"] == "FLAG" for c in cs)
+            logging.info(f"{intf}: {len(cs) - n_f} change(s), {n_f} flag(s), {len(clusters)} zoom(s)")
 
     src = ws_path(ws, "changes")
-    for f in ("gt_changes_v2.gpkg", "change_list.csv", "change_summary.csv"):
+    for f in ("gt_changes_v2.gpkg", "change_list.csv", "change_summary.csv", "flagged_list.csv"):
         shutil.copy2(src / f, out / f)
     (out / "README.txt").write_text(
         "Change review package\n"
@@ -390,13 +421,15 @@ def main(args):
         "change_summary.csv    one row per interferogram (original/corrected counts, added/deleted/modified)\n"
         "gt_changes_v2.gpkg    the changed polygons only, for QGIS: layers added, deleted,\n"
         "                      modified_original (old outlines), modified_corrected (new outlines),\n"
-        "                      change_markers (one point per change, labelled by change_id)\n\n"
+        "                      change_markers (one point per change, labelled by change_id),\n"
+        "                      flagged (hard/doubtful polygons, KEPT in the ground truth)\n"
+        "flagged_list.csv      one row per flagged polygon (flag id, flag, note, location)\n\n"
         "Change ids are identical across all of these files. Coordinates are WGS84 (EPSG:4326).\n"
         "Please reply per change id: agree / disagree / comment.\n")
     with open(out / "reviewer_response.csv", "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["change_id", "intf_id", "change_type", "verdict (agree/disagree/unsure)", "comment"])
-        for c in sorted(changes, key=lambda c: c["change_id"]):
+        for c in sorted(items, key=lambda c: c["change_id"]):
             if c["intf_id"] in changed:
                 w.writerow([c["change_id"], c["intf_id"], c["change_type"], "", ""])
     zpath = out.with_suffix(".zip")

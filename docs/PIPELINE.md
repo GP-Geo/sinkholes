@@ -2,8 +2,9 @@
 
 One document for the whole pipeline: the conventions the science depends on, then each
 stage with its command. Companion to the top-level [`README.md`](../README.md)
-(orientation + quickstart) and [`TRAINING_RUNS.md`](./TRAINING_RUNS.md) (what the runs
-so far actually scored). WEXAC paths below refer to the data host at
+(orientation + quickstart), [`RESULTS.md`](./RESULTS.md) (what the runs so far actually
+scored) and [`MODEL_RUNS.md`](./MODEL_RUNS.md) (the per-run registry). WEXAC paths below
+refer to the data host at
 `/home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/`.
 
 ```
@@ -66,6 +67,21 @@ being predicted** — the same set a single-frame run sees, so the two differ on
 depth and their metrics are directly comparable. Predecessors supply context, never
 patches of their own; a location missing from any grid in the chain is dropped, since a
 stack needs it at every timestep.
+
+**Context windows.** `--context_margin MY MX` (default `0 0`) reads a *large-context*
+patch tree and feeds the network `patch_size + 2 x margin` while still supervising,
+scoring and reconstructing the centre `patch_size`. `50 50` feeds **300x200** and
+supervises the centre **200x100**; the tree is
+`data_patches_H200_W100_ctx50x50_strpp2_11days_Aligned`. Everything else is deliberately
+unchanged — the grid, the targets, sample selection, ring negatives, the AOI window and
+the evaluation protocol — so a `ctx50` run and its plain twin differ in what surrounds
+each target and in nothing else. The geometry is written into the checkpoint as
+`io_geometry = {"context": [300, 200], "predict": [200, 100]}`, so `eval-scenes`,
+`test-patches` and `predict` derive the margin from the weights; passing a
+`--context_margin` that contradicts the checkpoint is an error, not a silent override.
+`attention-probe` **refuses** a context checkpoint rather than probing it on plain
+patches. Costs ~3x the activations (so pair it with `--accum_steps`) and ~3x the host
+memory, because the dataset still materialises every sample's pixels.
 
 **Validity channels.** `--treat_nodata_regions` appends one validity map per timestep in
 **block layout** `[img_t0..img_tT-1, V_t0..V_tT-1]`, doubling the channel count, and
@@ -170,9 +186,12 @@ sinkholes train --epochs 30 --partition_mode random_by_intf \
 Both sequence models require `--add_temporal` and count channels **per timestep**.
 
 `--convlstm_hidden` (0 = match the 1024 bottleneck) dominates the ConvLSTM's parameter
-count and `--convlstm_kernel` must be odd. Hidden size and kernel are stored **inside
-the checkpoint**, so they are never re-specified at evaluation time. On the runs to
-date the ConvLSTM is the best model — see `MODEL_RUNS.md`.
+count and `--convlstm_kernel` must be odd. `--dropout_bottleneck` applies `Dropout2d` to
+the final hidden state — after the frames are merged, so it cannot manufacture
+frame-to-frame "change" the way a dropout inside the folded `B*T` encoder would. All
+three are stored **inside the checkpoint**, so they are never re-specified at evaluation
+time; a checkpoint written before 2026-09-08 carries no `dropout_bottleneck` key and the
+constructor default reads it back as `0.0`, the network those weights were trained as.
 
 `--tattn_unet` makes the *current* interferogram query its predecessors at each of the
 72 bottleneck locations, rather than compressing them into one recurrent state. It is
@@ -212,8 +231,14 @@ interferograms); `--nonoverlap_tr_tst` (patch-level split with a spatial gap);
 `--train_intfs/--val_intfs/--test_intfs` (explicit comma lists, e.g. for smoke tests);
 `--add_ring_negatives --neg_per_pos 1.0 --neg_ring_inner 1 --neg_ring_outer 3` (empty
 patches sampled in an annulus around positives — candidates must be empty at *every*
-timestep); `--nonz_only/--no-nonz_only`; `--add_nulls_to_train`;
-`--train_with_nonz_th --nonz_th N S` (per-region positive-count threshold).
+timestep); `--nonz_only/--no-nonz_only`; `--add_nulls_to_train`.
+
+> ⚠️ **`--train_with_nonz_th --nonz_th N S` does nothing under `preset_by_intf`.** It
+> filters the *discovered* interferogram list, but a preset run takes its train/val lists
+> straight out of the partition JSON and never reads that list. Label quality on a preset
+> partition is a property of the **partition file**, so it is enforced when the file is
+> generated: `make-benchmark-partitions --nonz_th 350 200`
+> ([`assets/PARTITIONS.md`](../assets/PARTITIONS.md), generation 4).
 
 **Negatives reach the train split only. Validation is positives-only.** That is a
 deliberate, permanent property of this pipeline as of 2026-08-20, and it has a known
@@ -238,14 +263,49 @@ unresumable — the five `attnfix` runs of 2026-08-19 included. Nothing under `s
 sets it. Delete it, `validation_negatives()`, the `VAL_NEGATIVE_*` constants and
 `SubsiDataset(val_negatives=…)` once those runs have landed.
 
-**Loss.** Default: `BCEWithLogits(pos_weight=--pos_w) + soft Dice`. With
-`--treat_nodata_regions`: masked BCE (pos_weight fixed at 8.0, deliberately independent
-of `--pos_w` — the masked objective was tuned with it) + masked Dice + a false-positive
-suppression term inside no-data areas. Validation reports the *same* objective, so the
-`train/loss` vs `val/loss` gap is a straight overfitting read.
+**Loss.** Default: `BCEWithLogits(pos_weight=--pos_w) + soft Dice`. `--seg_loss jaccard`
+swaps the region term for soft IoU — the same quantity reparametrised (`J = D/(2−D)`) but
+a steeper penalty on the same error, so it trains differently. Binary only; `--classes >1`
+keeps Dice. **`train/loss` is not comparable across the two** (Jaccard reads higher at
+every identical prediction), so read `train/dice` and `train/jaccard`, which are recorded
+every epoch whichever is the objective — the one that is not the objective is computed
+under `no_grad` and cannot reach the optimiser.
 
-**Optimisation:** RMSprop, `ReduceLROnPlateau` on val Dice, gradient clipping at 1.0,
-`--amp` for mixed precision. Device selection is automatic (CUDA → MPS → CPU).
+With `--treat_nodata_regions`: masked BCE (pos_weight fixed at 8.0, deliberately
+independent of `--pos_w` — the masked objective was tuned with it) + the masked region
+term + a false-positive suppression term inside no-data areas. Validation reports the
+*same* objective, so the `train/loss` vs `val/loss` gap is a straight overfitting read.
+
+> ⚠️ **Every `--amp` run before 2026-09-08 optimised BCE alone.** The region term reduced
+> in fp16 and overflowed to `inf` above a mean predicted probability of 2.56% at batch
+> 128, returning loss exactly 1.0 with zero gradient. Fixed by widening every region term
+> to fp32 before it reduces; recorded as `region_loss_dtype=fp32-v2` in `run_config`.
+> [`CORRECTNESS_FIXES.md`](./CORRECTNESS_FIXES.md) has the measurement and the list of
+> affected runs.
+
+**Optimisation.** `--optimizer rmsprop|adam|adamw`, `ReduceLROnPlateau` on val Dice
+(`--lr_patience`, `--lr_factor`, `--min_lr`), gradient clipping at 1.0 **after** AMP
+unscaling, `--amp` for mixed precision, `--weight_decay`, and `--accum_steps` (the
+effective batch is `batch_size × accum_steps`). Device selection is automatic
+(CUDA → MPS → CPU).
+
+- `rmsprop` is the historical default and the only setting the pre-2026-09-08 numbers are
+  comparable across. Its momentum buffer is **not** bias-corrected, so the effective step
+  is `lr/(1−momentum)` — at the historical `--momentum 0.999` that is a 1000× step
+  amplification, survivable only while the AMP clipping defect was crushing every
+  gradient. With correct clipping it diverges inside one epoch
+  (`outputs/failed_2026-09-07_ampfix_divergence/`).
+- `adam`/`adamw` bias-correct, so the step is ~`lr` whatever `--beta1` is. **An `lr`
+  carried over from an RMSprop run is not the same step size** — retune it. `adamw`
+  decouples weight decay, which is the only form in which `--weight_decay` means what the
+  literature means by it. Every batch from 2026-09-09 on runs
+  `adamw lr 3e-4 wd 0.01`, `--momentum` is ignored there and a non-default one is refused
+  rather than silently dropped.
+- `--augment_flips none|h|v|hv` — random flips on the **train** split only; image and mask
+  flip together.
+- `--dropout_bottleneck` (ConvLSTM only) drops whole channels of the final hidden state,
+  the one tensor the whole sequence has been compressed into. `0.0` builds `nn.Identity`
+  and is the network exactly as it was before the option existed.
 
 **Outputs** under `outputs/<job>_<ts>/`: `checkpoints/best.pt` + `last.pt` (+ one
 `.pth` per epoch unless `--save_best_only`; `interrupted.pt` on Ctrl-C), `results.csv`
@@ -256,8 +316,23 @@ validation set, sparsest to densest, and are kept `--sample_min_sep` samples apa
 the grid never shows one sinkhole through several overlapping windows),
 `logs/reporter.log`, the run log, and `test_dataset_<job>.pkl` — the
 held-out split that feeds `test-patches`. `--patience N` early-stops; `--reporter/
---no-reporter` toggles the console table. Note `val/F1` pools every pixel (micro) while
-`val/dice` averages per batch (macro); they differ by design.
+--no-reporter` toggles the console table.
+
+`results.csv` columns, and what each is for:
+
+| column | what it is |
+|---|---|
+| `train/loss`, `val/loss` | the same objective on both splits — the gap is the overfitting read |
+| `train/bce`, `train/dice`, `train/jaccard` | the objective **split into its terms**, which says *which* term a plateau is stuck on. Both region terms are always recorded, so a `dice` arm and a `jaccard` arm are readable against each other |
+| `val/dice`, `val/jaccard` | per-sample means (macro). A training-health signal — see the warning above about ranking |
+| `val/IoU`, `val/F1`, `val/P`, `val/R` | pooled over raw pixel counts (micro), so negative-aware |
+| `grad/norm`, `grad/clip%`, `amp/scale` | what the gradient clip actually did that epoch, and whether AMP was rescaling. A clip% that sits near 100 means the clip, not the LR, is setting the step |
+
+Note `val/F1` pools every pixel (micro) while `val/dice` averages per batch (macro); they
+differ by design. `val/jaccard` is the per-sample twin of `val/dice`, and is **not** the
+same as `val/IoU`: pooled IoU is exactly `F1/(2−F1)` and carries nothing `val/F1` does
+not, whereas the per-sample mean can rank two models differently (`J` is convex in `D`,
+so `mean(J) ≠ J(mean(D))`).
 
 **Resuming a preempted job (`--resume auto`).** WEXAC preempts a job with SIGINT/SIGTERM
 and later reruns it under the *same* LSF job id. With `--resume auto` the run directory
@@ -339,10 +414,33 @@ band) — historical shape, harmless, kept so saved arrays stay comparable acros
 sinkholes eval-outputs --path outputs/predictions/<model>/<job>_<ts>/ --save_figures
 ```
 
-Re-thresholds the saved confidence maps at 0.125/0.25/0.5, computes object-level
-precision/recall at each (South-frame scenes are cropped to their populated northern
-half), writes a metrics JSON and, with `--save_figures`, a per-interferogram overview
-PNG. All figures render via Agg — no GUI, safe on headless nodes.
+Re-thresholds the saved confidence maps, computes object-level precision/recall at each
+operating point, writes a metrics JSON and, with `--save_figures`, a per-interferogram
+overview PNG. All figures render via Agg — no GUI, safe on headless nodes.
+
+Two threshold families, and **they are not comparable with each other**:
+
+| | thresholds | meaning | use on |
+|---|---|---|---|
+| default | 0.125 / 0.25 / 0.5 / 0.7 / 0.9 | a cut on the **mean probability** | a map from `eval-scenes --recon_average uniform` |
+| `--rth` | 0.125 / 0.25 / 0.375 / 0.5 | the **fraction of overlapping tiles** voting positive | a map from `eval-scenes --recon_average vote` |
+
+`--rth` is the benchmark paper's Reconstruction Threshold protocol and is what every
+generation-3 evaluation from `eval6` on reports. It is opt-in because on a probability
+map the numbers are silently meaningless rather than wrong-looking.
+
+Object matching runs under one or more **Intersection Tolerances** — `--th` (covered
+fraction for a GT object to count as detected) with `--buffer` (pixels the prediction is
+dilated by). `--rth` sweeps the paper's two, `0.7/5` (primary, and what fills the
+top-level `per_intf`/`summary` keys) and the softer `0.5/10`; `--extra_tolerance ITH:BUFFER`
+adds them by hand. Everything, primary included, is also reported under
+`summary_by_tolerance` keyed `ith0.7_b5` / `ith0.5_b10`.
+
+Crop the canvas with `--aoi_from_partition <partition.json>` (preferred) or
+`--aoi_window`; it **must** match the window `eval-scenes` predicted with or the metrics
+cover different ground than the predictions. `--legacy_south_half` reproduces the pre-AOI
+rule that scored only the northern half of a South-frame canvas, kept so archived
+evaluations re-score exactly as they were.
 
 ### Inspect a finished run
 
@@ -401,3 +499,11 @@ One run takes ~3 min on MPS and writes ~1.3 GB — delete the output directory a
       the strongest hold-outs are `spatial` and `--preset_test_val_21`.
 - [ ] Pass `--seed` when a split must be reproducible, and record the split lists the
       run logs print.
+- [ ] `--context_margin` is *not* passed at evaluation: it is read off the checkpoint's
+      `io_geometry`. Passing one that contradicts the weights is an error.
+- [ ] An `lr` copied from an RMSprop preset is the wrong step size under `adam`/`adamw` —
+      RMSprop's uncorrected momentum makes its effective step `lr/(1−momentum)`.
+- [ ] `--rth` scoring needs a map reconstructed with `eval-scenes --recon_average vote`;
+      on a probability map the numbers are meaningless, not merely different.
+- [ ] `--train_with_nonz_th` is a no-op under `preset_by_intf`. Filter at partition
+      generation time instead.

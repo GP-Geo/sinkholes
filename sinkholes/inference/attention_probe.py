@@ -98,7 +98,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                    help="exit non-zero unless the control condition uses fewer than "
                         "FRAC x T effective frames. 1.0 means 'exactly uniform', so "
                         "0.9 is a usable collapse alarm. This is the check that would "
-                        "have caught docs/ATTENTION_COLLAPSE.md, and it can only be "
+                        "have caught the collapse in docs/ATTENTION.md, and it can only be "
                         "made against a trained checkpoint -- a fresh model passes any "
                         "content-sensitivity test and still collapses in training.")
 
@@ -591,7 +591,7 @@ def main(args) -> None:
                 f"frames ({100 * used / total:.1f}% of uniform), at or above the "
                 f"{100 * args.require_selectivity:.0f}% limit. This checkpoint is "
                 f"averaging its history, not selecting from it -- see "
-                f"docs/ATTENTION_COLLAPSE.md. Retrain with --tattn_contrast "
+                f"docs/ATTENTION.md. Retrain with --tattn_contrast "
                 f"--tattn_qk_norm (both are on by default)."
             )
         logger.info("selectivity OK: %.3f of %.3f frames used (%.1f%% of uniform, "

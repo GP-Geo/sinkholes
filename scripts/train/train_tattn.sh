@@ -53,6 +53,15 @@ K_PREVS="${K_PREVS:-5}"                   # temporal depth; MUST match the parti
 POS_W="${POS_W:-4}"                       # BCE positive weight (code default is 1)
 SEED="${SEED:-42}"
 MOMENTUM="${MOMENTUM:-0.999}"             # see lrscan: 0.999 diverges on corrected clipping
+                                     # IGNORED unless OPTIM=rmsprop, and train.py REFUSES a
+                                     # non-default under adam/adamw rather than dropping it
+# rmsprop | adam | adamw. Mirrors train_convlstm.sh; rmsprop stays the default
+# so no earlier tattn run shifts under it. Under adam/adamw the step is ~LR
+# instead of LR/(1-MOMENTUM), so an LR carried over is NOT the same step size.
+# STRICT resume key (resume.py).
+OPTIM="${OPTIM:-rmsprop}"
+BETA1="${BETA1:-0.9}"                # adam/adamw only: the averaging window, NOT the step size
+BETA2="${BETA2:-0.999}"              # adam/adamw only
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-8}"      # 1e-8 is historical and is barely regularisation
                                           # at all; 1e-4..1e-2 is the usual range
 AUGMENT="${AUGMENT:-none}"                # none | h | v | hv -- random flips, TRAIN split only
@@ -61,7 +70,50 @@ LR="${LR:-1e-6}"
 SCHEDULE="${SCHEDULE:-plateau}"           # plateau | cosine
 EPOCHS="${EPOCHS:-60}"
 BATCH="${BATCH:-128}"
+# Micro-batch x ACCUM is the EFFECTIVE batch, and the effective batch is what a
+# run is comparable on. Raise ACCUM and lower BATCH by the same factor when the
+# activations stop fitting -- a large-context run is the reason this exists.
+# Both are STRICT resume keys (resume.py). NOTE that BatchNorm still sees one
+# MICRO-batch at a time, so an arm meant to be read against another must match
+# the micro-batch and not merely the product.
+ACCUM="${ACCUM:-1}"
+# The REGION term added to BCE: dice (every tattn run so far) or jaccard. Same
+# quantity reparametrised -- J = D/(2-D) -- but a steeper penalty on the same
+# error. train/loss is NOT comparable across the two. STRICT resume key.
+SEG_LOSS="${SEG_LOSS:-dice}"
+# NO DROPOUT_BOTTLENECK HERE. The flag names the single tensor a ConvLSTM
+# compresses its sequence into; this architecture selects over frames instead of
+# collapsing them into one state, and train.py:387 gates the option on
+# convlstm_unet, REFUSING it rather than ignoring it. A tattn arm matched to a
+# ConvLSTM arm that carries dropout is unmatched on that axis, unavoidably.
 PATIENCE="${PATIENCE:-20}"
+
+# --- spatial context --------------------------------------------------------
+# Empty = the plain 200x100 tree. CTX_MY=50 CTX_MX=50 reads
+# data_patches_H200_W100_ctx50x50_strpp2_11days_Aligned and feeds the network
+# 300x200 while still supervising and scoring the centre 200x100
+# (tattn_unet.py:308 crops through the same mixin every other architecture uses).
+#
+# IT ALSO MOVES THE ATTENTION FIELD, which no other template's context does.
+# The block attends at the bottleneck, so 200x100 gives a 12x6 field and 300x200
+# gives 18x12 -- 3x the positions, each selecting over the same T frames. That
+# is a real change to what attention is doing and not just to what the encoder
+# sees, so a ctx arm is NOT a pure geometry change for this architecture the way
+# it is for a ConvLSTM. Say so when reading it.
+#
+# Costs ~3x the activations and ~3x the host memory, hence ACCUM above.
+# Set BOTH or NEITHER -- submit_all.sh splits overrides on whitespace, so a
+# two-word "MY MX" value cannot survive the trip.
+CTX_MY="${CTX_MY:-}"
+CTX_MX="${CTX_MX:-}"
+CTX_FLAGS=()
+if [ -n "$CTX_MY" ] || [ -n "$CTX_MX" ]; then
+  if [ -z "$CTX_MY" ] || [ -z "$CTX_MX" ]; then
+    echo "set both CTX_MY and CTX_MX, or neither (got '$CTX_MY' / '$CTX_MX')" >&2
+    exit 1
+  fi
+  CTX_FLAGS=(--context_margin "$CTX_MY" "$CTX_MX")
+fi
 
 # --- the attention block ----------------------------------------------------
 DIM="${DIM:-0}"                           # token width (0 = the default, 256)
@@ -87,7 +139,7 @@ FUSE_SKIPS="${FUSE_SKIPS:-0}"             # 0..4
 # --- frame selection --------------------------------------------------------
 # Before 2026-08-19 the attention in every run here was DEAD: the weights came
 # out at exactly 1/T, so the model averaged its history instead of choosing from
-# it (docs/ATTENTION_COLLAPSE.md, 15 of 15 checkpoints). The cause was visible at
+# it (docs/ATTENTION.md, 15 of 15 checkpoints). The cause was visible at
 # initialisation -- the frame-to-frame differences are 0.09% of the token the
 # queries and keys are built from, so the softmax had nothing to separate.
 #
@@ -206,16 +258,22 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 python -m sinkholes train \
   --epochs "$EPOCHS" \
   --batch_size "$BATCH" \
+  --accum_steps "$ACCUM" \
   --learning-rate "$LR" \
   --lr_schedule "$SCHEDULE" \
   --lr_patience "$LR_PATIENCE" \
   --momentum "$MOMENTUM" \
+  --optimizer "$OPTIM" \
+  --beta1 "$BETA1" \
+  --beta2 "$BETA2" \
   --weight_decay "$WEIGHT_DECAY" \
   --augment_flips "$AUGMENT" \
+  --seg_loss "$SEG_LOSS" \
   --patches_dir /home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/patches \
   --partition_mode preset_by_intf \
   --partition_file "$PARTITION" \
   --patch_size 200 100 \
+  ${CTX_FLAGS[@]+"${CTX_FLAGS[@]}"} \
   --stride 2 \
   --pos_w "$POS_W" \
   --add_temporal \

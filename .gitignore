@@ -31,3 +31,6 @@ __pycache__/
 # Local safety copies made before large edits; not version-controlled.
 *.bak
 *.bak[0-9]
+
+# Status decks: kept on disk, out of git
+docs/reference/*.pptx

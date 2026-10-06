@@ -15,7 +15,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .common import EDIT_REASONS, EDIT_STATUSES, METRIC_CRS, date_strings, scene_geometry, ws_path
+from .common import (EDIT_REASONS, EDIT_STATUSES, METRIC_CRS, QC_FLAGS, date_strings,
+                     scene_geometry, ws_path)
 
 #: Below this many raster pixels a polygon is effectively invisible to the pipeline.
 MIN_PIXELS = 4
@@ -109,6 +110,12 @@ def run(workspace, only=None):
         reason = getattr(row, "edit_reason", None)
         if isinstance(reason, str) and reason and reason not in EDIT_REASONS:
             add("WARNING", "edit_reason", row, msg=f"edit_reason {reason!r} not in the vocabulary")
+        qc = getattr(row, "qc_flag", None)
+        if isinstance(qc, str) and qc.strip():
+            if qc not in QC_FLAGS:
+                add("WARNING", "qc_flag", row, msg=f"qc_flag {qc!r} not in {QC_FLAGS}")
+            if status == "deleted":
+                add("INFO", "qc_flag_on_deleted", row, msg="flag on a deleted polygon is ignored")
         g = row.geometry
         if g is None or g.is_empty:
             add("ERROR" if live else "WARNING", "empty_geometry", row, msg="null or empty geometry")

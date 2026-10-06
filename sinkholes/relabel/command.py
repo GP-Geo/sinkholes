@@ -8,6 +8,7 @@ Steps, in the order they are used:
   export    Output A: the corrected GT (gpkg + shp)
   review    Output B: the change-review package for an external reviewer
   eval      run: re-score saved predictions on corrected labels; compare: tables
+  predictions  a model's saved confidence maps as QGIS rasters (second, non-blind pass)
 """
 
 from importlib import import_module
@@ -19,6 +20,8 @@ _STEPS = {
     "export": "sinkholes.relabel.export",
     "review": "sinkholes.relabel.review",
     "eval": "sinkholes.relabel.evaluate",
+    "predictions": "sinkholes.relabel.predictions",
+    "migrate": "sinkholes.relabel.migrate",
 }
 
 

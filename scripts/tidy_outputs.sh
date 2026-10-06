@@ -6,6 +6,16 @@
 #      outputs/clean_geo_k10_tattn_fixed_ring3_2026-08-19_16h20_lsf_768296
 #   -> outputs/2026-08-19/geo_k10_tattn_fixed_ring3_valneg
 #
+#  SCREENS GO SOMEWHERE ELSE. A short probe batch (lrscan, dropscan, lossscan,
+#  adamscan, momscan, combo) is filed under outputs/screens/<date>/ instead:
+#
+#      outputs/adamscan_lr1e4_2026-09-08_14h38_lsf_232949
+#   -> outputs/screens/2026-09-08/adamscan_lr1e4
+#
+#  Those are 8- or 20-epoch runs made to decide whether an axis deserves a real
+#  training slot, not models -- they have no object-level score and mostly never
+#  will. See the case statement below for why they are kept but separated.
+#
 #  THE _valneg SUFFIX IS READ OUT OF THE RUN, NOT GUESSED. reporter.log records
 #  the validation protocol as either "Val scored on positives only" or
 #  "Val scored on N positive + N negative", and a run validated against
@@ -56,7 +66,7 @@ for a in "$@"; do
   case "$a" in
     --apply) APPLY=1 ;;
     --force) FORCE=1 ;;
-    -h|--help) sed -n '2,41p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,58p' "$0"; exit 0 ;;
     *) echo "unknown argument: $a (expected --apply and/or --force)" >&2; exit 2 ;;
   esac
 done
@@ -129,7 +139,29 @@ for d in "${runs[@]}"; do
       esac ;;
   esac
 
-  dest="outputs/$date/$clean"
+  # SCREENS GO IN THEIR OWN TREE, NOT THE DATED MODEL FOLDERS.
+  #
+  # A screen is a short probe of one idea -- 8 or 20 epochs, run to decide
+  # whether an axis is worth a real training slot. dropscan's own header says
+  # it in as many words: "A 20-EPOCH SCREEN, not an experiment ... Do not read
+  # an object-level claim out of it." They are not models: none has an
+  # object-level score, most have no evaluation directory and never will, and
+  # docs/RESULTS.md finding 2 says patch val/dice ranks models BACKWARDS -- so a
+  # screen's dice sitting in the same folder as a 200-epoch run invites exactly
+  # the comparison that is documented not to work.
+  #
+  # Keeping them is still right: a settled screen is what stops the axis being
+  # re-run. They just need to be unmistakably separate, hence outputs/screens/.
+  #
+  # Matched on the BATCH PREFIX rather than on the epoch count, because the
+  # count is inside the run and the prefix is the thing submit_all.sh actually
+  # names a batch by. Add new screen batches here when you add them there.
+  case "$clean" in
+    lrscan_*|dropscan_*|lossscan_*|adamscan_*|momscan_*|combo_*)
+      dest="outputs/screens/$date/$clean" ;;
+    *)
+      dest="outputs/$date/$clean" ;;
+  esac
   if [ -e "$dest" ]; then
     echo "SKIP  $n -- $dest already exists, refusing to overwrite"; skipped=$((skipped+1)); continue
   fi
@@ -138,7 +170,7 @@ for d in "${runs[@]}"; do
     echo "would move  $n -> $dest"; moved=$((moved+1)); continue
   fi
 
-  mkdir -p "outputs/$date"
+  mkdir -p "$(dirname "$dest")"
   # A failing mv on the SMB mount means something still holds the directory
   # open -- a Finder window or a log open in Console.app is enough. Report it
   # and carry on rather than half-moving the batch.

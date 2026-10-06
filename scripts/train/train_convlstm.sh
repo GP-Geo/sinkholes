@@ -58,9 +58,32 @@ PATIENCE="${PATIENCE:-20}"                # early stop; 0 = off (reporter.py:257
 # resume will report the change rather than refuse it.
 LR_PATIENCE="${LR_PATIENCE:-5}"
 MOMENTUM="${MOMENTUM:-0.999}"        # RMSprop momentum; 0.999 is historical, see --momentum
+                                     # IGNORED unless OPTIM=rmsprop, and train.py REFUSES a
+                                     # non-default under adam/adamw rather than dropping it
+# rmsprop | adam | adamw. rmsprop is every number this project has; it stays the
+# default so nothing shifts under a run that does not ask. Under adam/adamw the
+# step is ~LR instead of LR/(1-MOMENTUM), so an LR carried over from an rmsprop
+# run is NOT the same step size -- retune it rather than reusing it. STRICT
+# resume key (resume.py): a run cannot be resumed across a change here.
+OPTIM="${OPTIM:-rmsprop}"
+BETA1="${BETA1:-0.9}"                # adam/adamw only: the averaging window, NOT the step size
+BETA2="${BETA2:-0.999}"              # adam/adamw only
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-8}"      # 1e-8 is historical and is barely regularisation
                                           # at all; 1e-4..1e-2 is the usual range
 AUGMENT="${AUGMENT:-none}"                # none | h | v | hv -- random flips, TRAIN split only
+# Dropout2d on the ConvLSTM's final hidden state -- the one tensor the whole
+# sequence has been compressed into, and the point every parameter upstream
+# (down4 + the cell, 60% of the network) takes its gradient through. 0.0 builds
+# nn.Identity and is the network as it was before the option existed, so an arm
+# that shows nothing is rolled back by dropping the variable, not the branch.
+# 0.1-0.2 is the usual range. STRICT resume key (resume.py).
+DROPOUT_BOTTLENECK="${DROPOUT_BOTTLENECK:-0.0}"
+# The REGION term added to BCE: dice (every run before 2026-09-08) or jaccard.
+# Same quantity reparametrised -- J = D/(2-D) -- but a steeper penalty on the
+# same error. train/loss is NOT comparable across the two; both terms are
+# recorded every epoch either way (train/dice, train/jaccard, val/dice,
+# val/jaccard), so read those. STRICT resume key (resume.py).
+SEG_LOSS="${SEG_LOSS:-dice}"
 
 # --- spatial context --------------------------------------------------------
 # Empty = the plain 200x100 tree, which is every run before 2026-09-07.
@@ -174,8 +197,13 @@ python -m sinkholes train \
   --lr_schedule "$SCHEDULE" \
   --lr_patience "$LR_PATIENCE" \
   --momentum "$MOMENTUM" \
+  --optimizer "$OPTIM" \
+  --beta1 "$BETA1" \
+  --beta2 "$BETA2" \
   --weight_decay "$WEIGHT_DECAY" \
   --augment_flips "$AUGMENT" \
+  --dropout_bottleneck "$DROPOUT_BOTTLENECK" \
+  --seg_loss "$SEG_LOSS" \
   --patches_dir /home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/patches \
   --partition_mode preset_by_intf \
   --partition_file "$PARTITION" \

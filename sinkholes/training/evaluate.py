@@ -14,7 +14,12 @@ from tqdm import tqdm
 
 from ..device import memory_format_for
 from .features import compute_feature
-from .losses import dice_coeff, multiclass_dice_coeff
+from .losses import (
+    dice_coeff,
+    jaccard_coeff,
+    multiclass_dice_coeff,
+    multiclass_jaccard_coeff,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +238,14 @@ def evaluate(
     net.eval()
     num_val_batches = len(dataloader)
     dice_score = 0
+    # Reported alongside dice_score, and reduced the SAME way (per sample, then
+    # meaned). That distinction is the whole point of having it: `iou` below is
+    # the POOLED Jaccard over every validation pixel, and pooled IoU is exactly
+    # F1/(2-F1), so it carries nothing val/F1 does not. The per-sample mean does:
+    # J is convex in D, so mean(J) != J(mean(D)) and the two can rank two models
+    # differently -- measured, over mean-dice gaps up to 0.054, an order of
+    # magnitude above the +-0.006 noise floor.
+    jaccard_score = 0
     precision = recall = 0
     ol_precision = ol_recall = 0
     b_gts = []
@@ -303,6 +316,7 @@ def evaluate(
                         true_mask_batches.append(mask_true_np)
 
                 dice_score += dice_coeff(mask_pred, mask_true, reduce_batch_first=False)
+                jaccard_score += jaccard_coeff(mask_pred, mask_true, reduce_batch_first=False)
 
                 if metrics_out is not None:
                     _p = mask_pred_np.astype(bool)
@@ -329,6 +343,9 @@ def evaluate(
                 dice_score += multiclass_dice_coeff(
                     mask_pred_1h[:, 1:], mask_true_1h[:, 1:], reduce_batch_first=False
                 )
+                jaccard_score += multiclass_jaccard_coeff(
+                    mask_pred_1h[:, 1:], mask_true_1h[:, 1:], reduce_batch_first=False
+                )
 
         if save_val and out_path is not None:
             if epoch == 1 and mode == "val" and image_batches:
@@ -339,12 +356,16 @@ def evaluate(
 
     net.train()
     mean_dice = dice_score / max(num_val_batches, 1)
+    mean_jaccard = jaccard_score / max(num_val_batches, 1)
 
     if metrics_out is not None:
         metrics_out["tp"], metrics_out["fp"], metrics_out["fn"] = _tp, _fp, _fn
         metrics_out["precision"] = _tp / (_tp + _fp) if (_tp + _fp) else 0.0
         metrics_out["recall"] = _tp / (_tp + _fn) if (_tp + _fn) else 0.0
         metrics_out["n_batches"] = num_val_batches
+        # Per-sample mean, the twin of mean_dice. Distinct from "iou" below,
+        # which is pooled over pixels; see the comment at jaccard_score.
+        metrics_out["jaccard"] = float(mean_jaccard)
         den = _tp + _fp + _fn
         metrics_out["iou"] = _tp / den if den else 0.0
         metrics_out["f1"] = 2 * _tp / (2 * _tp + _fp + _fn) if den else 0.0

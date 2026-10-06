@@ -1,4 +1,24 @@
-# Correctness hotfix — 2026-09-07
+# Correctness fixes
+
+Two reviews, a day apart, each of which changed what a run optimises. Both are recorded
+here because the same question is asked of both: **which published numbers moved, and
+which are merely unverified?**
+
+| Date | Fix | Recorded as | Reaches |
+|---|---|---|---|
+| 2026-09-07 | nine defects; the load-bearing one is **AMP gradient clipping before unscaling** | `gradient_clipping=unscaled-v2` | every `--amp` run |
+| 2026-09-08 | **the region loss reduced in fp16 and overflowed**, so `--amp` runs optimised BCE alone | `region_loss_dtype=fp32-v2` | every `--amp` run at batch ≥ 32 |
+
+Each is behind a recorded version key in `run_config`, so a checkpoint says which code
+trained it and `check_config_compatible` refuses to resume across the change rather than
+continuing quietly on different arithmetic.
+
+**Neither fix rewrote a stored weight or a published number.** What they change is what a
+*new* run optimises — and, by the same token, what the old numbers were actually measuring.
+
+---
+
+# Part 1 — the 2026-09-07 hotfix
 
 ## Isolation and review boundary
 
@@ -29,6 +49,10 @@ integrating after jobs are protected/completed, reconcile that diff deliberately
 unscale before its clipping call, and record the now-unscaled norm directly,
 without dividing it by the AMP scale again. Do not overwrite the active file
 with this worktree's version while jobs can restart from it.
+
+> **Resolved.** That reconciliation landed as `6bc1181` ("record what the gradient clip
+> actually does"). `grad/norm`, `grad/clip%` and `amp/scale` are columns of every
+> `results.csv` written since, and the norm recorded is the unscaled one.
 
 ## Fixes and scientific-output classifications
 
@@ -192,3 +216,89 @@ context-aware sampling is implemented. Its standard path is unchanged.
 Atomic index publication is not a multi-file dataset transaction and does not
 make simultaneous regeneration/training safe. Regeneration remains a single-writer
 operation against a dataset that is not being used by active jobs.
+
+---
+
+# Part 2 — the region loss overflowed in fp16 (2026-09-08)
+
+Found the day after Part 1 landed, while reading the `train/dice` column that
+`6bc1181` had just started recording. Recorded as `region_loss_dtype = fp32-v2`
+(`sinkholes/training/losses.py`), exactly as `gradient_clipping` is, because it changes
+what every AMP run optimises.
+
+## The defect
+
+The loss is computed **outside** `autocast`, so under `--amp` the model's fp16 logits
+reached the loss functions unchanged and the bare `input.sum(...)` inside `dice_coeff`
+reduced an fp16 tensor.
+
+fp16 saturates at 65,504. A 200×100 patch at batch 128 is 2,560,000 elements, so the sum
+overflows to `inf` whenever the **mean predicted probability exceeds 2.56%**. The ratio
+then collapses to 0, `dice_loss` returns exactly 1.0, and its gradient is exactly zero.
+
+**The objective silently became BCE-only.**
+
+Measured at the training path's own dtypes and shapes:
+
+```
+fp16   p.sum() = 1280413 (inf)   loss = 1.000000   |grad| = 0.000e+00
+fp32   p.sum() = 1280322         loss = 0.952090   |grad| = 2.759e-02
+```
+
+The ceiling is crossed above a mean probability of **10.2% / 5.1% / 2.56%** at batch
+**32 / 64 / 128**.
+
+## How to tell whether a run was affected
+
+It is visible in the logs as `train/dice` **pinned at exactly 1.0** while `train/bce`
+falls normally. LSF 644244 at batch 128: epochs 1–3 exactly 1.0, 0.9985 at 4–5, decaying
+to 0.62 by epoch 10 while `train/bce` sat flat at 0.058 → 0.042.
+
+That column only exists from `55ef6f6` ("split the loss in the record") onward, so for
+earlier runs the test is structural rather than observational:
+
+- **No `--amp`** → not affected. The logits were fp32 already.
+- **`--amp` and batch ≥ 32** → the region term was dead for every step whose mean
+  predicted probability crossed the ceiling above, which on a `pos_w`-weighted model is
+  most of training. Every preset in `scripts/train/PRESETS.md` runs `--amp` at batch 128,
+  so this covers the negative-sampling, attention/control, `clean22`, `valpos`/`attnfix`,
+  `attnpos`, `pre23` and `long200` batches — the same population Part 1's AMP-clipping
+  section names.
+
+The two defects compound: those runs were trained on a crushed gradient **and** on BCE
+alone. Neither observation invalidates a recorded ranking — both models in any pair had
+the same objective — but "BCE + Dice" is not what those runs optimised, and a claim that
+depends on the region term (that the Dice weighting shaped the boundaries, say) has no
+support from them.
+
+## The fix
+
+Every region term widens to fp32 before it reduces. Widening fp16 to fp32 is exact, so
+the inputs are unchanged and the only difference is that the reduction no longer
+saturates.
+
+`dice_coeff` itself is deliberately **not** touched: it is also the `val/dice` metric
+(`training/evaluate.py`), which reduces one 20,000-pixel patch at a time and can never
+reach the ceiling. Widening it would have changed the metric as well as the loss, for no
+reason. The widening happens in `dice_loss` / `jaccard_loss` and in the masked binary and
+multiclass paths.
+
+The masked paths reduced in fp32 already — but only by accident, because `y_float` and
+`V` are fp32 and promote the products. That is not something a version key should rest
+on, so they widen explicitly. Their numbers do not move.
+
+## What shipped alongside it
+
+`--seg_loss jaccard` was added in the same change, because the union in `jaccard_loss` is
+built from the identical bare sums and would have inherited the overflow exactly. Both
+region terms are recorded every epoch (`train/dice`, `train/jaccard`, `val/dice`,
+`val/jaccard`) whichever is the objective; the one that is not the objective is computed
+under `no_grad` and cannot reach the optimiser. `train/loss` is **not** comparable across
+the two — Jaccard loss exceeds Dice loss at every identical prediction.
+
+## What it cost in practice
+
+Nothing yet, in the sense that no published number was withdrawn. What it changes is the
+baseline: every batch from `th350` on trains the objective the presets always claimed.
+The `lossscan` screen ([EXPERIMENTS.md](EXPERIMENTS.md)) is the first measurement of the
+region term that means anything, since it is the first one where the term had a gradient.

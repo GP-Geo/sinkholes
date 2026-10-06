@@ -6,6 +6,36 @@ filter. Renamed from `PLAN_CLEAN_2019_2022.md`. Supersedes the partition family 
 `assets/partition_{geo,temporal}_k{5,10}.json` for every new experiment. Nothing here changes a
 finished run or a published number.*
 
+> ## Status: EXECUTED, and partly superseded — read this first
+>
+> **All eight stages ran.** The generation-3 partitions exist, the `clean22` batch trained on
+> them, `eval5`/`eval6`/`eval7` scored them, and the old outputs were quarantined. This document
+> is now the **design record and the evidence archive**, not a queue. Nothing in it should be
+> executed as written.
+>
+> Where the live record is:
+>
+> | For | Read |
+> |---|---|
+> | which partition file to use, and its real counts | [`assets/PARTITIONS.md`](../assets/PARTITIONS.md) |
+> | what each batch settled | [EXPERIMENTS.md](EXPERIMENTS.md) |
+> | the object-level numbers | [PREDICTIONS.md](PREDICTIONS.md) |
+>
+> **Superseded by generation 4 (2026-09-10).** §0a's central decision — that label quality is
+> enforced *spatially*, by the AOI, and not by dropping scenes — has been **overturned in part**.
+> Generation 4 keeps the AOI and adds `--nonz_th 350 200`, a label-quality threshold that removes
+> thinly digitised scenes from the targets. It moves object precision from ~0.45 to ~0.87 without
+> changing a model ([RESULTS.md](RESULTS.md) ⑬), which means the false-positive rate this plan was
+> built to measure was substantially a labelling artefact. §1's precision collapse — 0.91 on 2021
+> scenes, 0.44 on 2024–2025 — is the observation that finally has a mechanism, and it is not the
+> one §0a accepted the risk of.
+>
+> **What is still load-bearing, and referenced from code:** §1 (the precision measurement),
+> §7(b) (the RTh protocol, cited by `scripts/eval/run_eval.sh` and `scripts/eval/PRESETS.md`),
+> §10 (the AOI measurement, backed by `scripts/data/measure_aoi.py` and `plot_aoi.py`), and §5's
+> temporal-boundary sweep. **What is dead:** §12's order of work, §8's quarantine steps and §6's
+> training queue, all completed; and §3's dictionary-audit assertions, already amended in place.
+
 The four current partitions put 2023–2026 interferograms into val/test, and §1 records the
 precision collapse that motivated restricting the years. That restriction has been **overturned
 by decision** (§0a): the AOI transfers cleanly to every year, the newer years are no less dense

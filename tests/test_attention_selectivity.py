@@ -1,7 +1,7 @@
 """The attention must actually select frames, and keep selecting after training.
 
 Every tattn checkpoint trained before 2026-08-19 produces exactly uniform
-weights (docs/ATTENTION_COLLAPSE.md). The cause is measurable at init and is
+weights (docs/ATTENTION.md). The cause is measurable at init and is
 what these tests pin:
 
 - the tokens attention sees are dominated by a component shared across the whole

@@ -15,6 +15,13 @@ Chronological order is oldest -> newest, matching the dataset: chains are
 returned oldest-first and the stack is ``prevs + [current]``, so index 0 is the
 oldest interferogram and index T-1 the current one.
 
+``dropout_bottleneck`` optionally drops whole channels of that final hidden
+state during training — the one place where the entire sequence has been
+compressed to a single tensor, and the only place in this network where dropout
+cannot invent frame-to-frame change (see the constructor). It defaults to 0.0,
+which builds ``nn.Identity`` and reproduces the network exactly as it was before
+the option existed.
+
 Output is raw logits ``[B, n_classes, H, W]`` — no sigmoid — exactly like
 ``UNet``, so the same losses and evaluation apply.
 """
@@ -170,6 +177,7 @@ class ConvLSTMUNet(CentreCropOutput, nn.Module):
         bilinear: bool = False,
         convlstm_hidden_channels: Optional[int] = None,
         convlstm_kernel_size: int = 3,
+        dropout_bottleneck: float = 0.0,
     ):
         super().__init__()
         self.n_channels_per_timestep = check_channels_per_timestep(n_channels_per_timestep)
@@ -207,6 +215,42 @@ class ConvLSTMUNet(CentreCropOutput, nn.Module):
             nn.Identity()
             if hidden == self.bottleneck_channels
             else nn.Conv2d(hidden, self.bottleneck_channels, kernel_size=1)
+        )
+
+        # Dropout on the recurrent summary. 0.0 (the default) builds nn.Identity
+        # and is the pre-2026-09-08 network exactly, so every existing run and
+        # checkpoint is untouched; the fallback from this experiment is simply
+        # not passing --dropout_bottleneck.
+        #
+        # WHY HERE. This is the one point where the whole sequence has been
+        # compressed into a single tensor: everything the decoder will ever know
+        # about time passes through it, and the 26M parameters upstream (down4 +
+        # the cell, 60% of the network) all take their gradient through it. It is
+        # also AFTER the frames are merged, which the encoder is not -- the
+        # encoder runs folded as B*T, so a Dropout2d there would draw a different
+        # channel mask per timestep and manufacture frame-to-frame "change" that
+        # is pure artefact, against a model whose whole premise is comparing
+        # frames. Nothing of the sort can happen on this side of the unroll.
+        #
+        # WHY BEFORE convlstm_proj. Dropping here removes whole ConvLSTM memory
+        # channels, which is the meaningful unit. The projection's 1024 outputs
+        # are linear mixes of these 256, so dropping those instead is a weaker
+        # perturbation -- what was zeroed stays recoverable from the surviving
+        # mixes. When hidden == bottleneck_channels the projection is Identity
+        # and the two placements coincide.
+        #
+        # Dropout2d, not Dropout: neighbouring positions on a 12x6 map are nearly
+        # identical, so zeroing single elements is filled in from next door and
+        # teaches nothing. Zeroing a whole channel removes a whole detector.
+        self.dropout_bottleneck = float(dropout_bottleneck)
+        if not 0.0 <= self.dropout_bottleneck < 1.0:
+            raise ValueError(
+                f"dropout_bottleneck must be in [0, 1); got {dropout_bottleneck!r}."
+            )
+        self.bottleneck_drop: nn.Module = (
+            nn.Dropout2d(self.dropout_bottleneck)
+            if self.dropout_bottleneck > 0.0
+            else nn.Identity()
         )
 
         self.up1 = Up(1024, 512 // factor, self.bilinear)
@@ -251,7 +295,9 @@ class ConvLSTMUNet(CentreCropOutput, nn.Module):
             state = self.convlstm(bottleneck_seq[:, step], state)
         h_final, _ = state  # type: ignore[misc]
 
-        decoded = self.convlstm_proj(h_final)
+        # Identity unless --dropout_bottleneck is set, and disabled by eval()
+        # on every inference path, so this line is a no-op for existing models.
+        decoded = self.convlstm_proj(self.bottleneck_drop(h_final))
 
         # Skip connections come from the latest timestep only.
         skip4 = self._at_latest_timestep(s4, b, t)
@@ -276,6 +322,10 @@ class ConvLSTMUNet(CentreCropOutput, nn.Module):
             "bilinear": self.bilinear,
             "convlstm_hidden_channels": self.convlstm_hidden_channels,
             "convlstm_kernel_size": self.convlstm_kernel_size,
+            # Absent from every checkpoint written before 2026-09-08, which the
+            # constructor default then reads back as 0.0 -- the network those
+            # weights were actually trained as.
+            "dropout_bottleneck": self.dropout_bottleneck,
         }
 
     def get_num_params(self) -> int:

@@ -41,6 +41,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 import numpy as np
 import torch
 
+from .losses import REGION_LOSS_DTYPE
+
 #: Marks a file written by :func:`save_resume_checkpoint`. Anything without it
 #: is treated as a legacy model-only checkpoint.
 RESUME_FORMAT = "sinkholes-resume"
@@ -56,6 +58,15 @@ STRICT_CONFIG_KEYS: Sequence[str] = (
     "preprocessing_version",
     "aoi_selection_version",
     "gradient_clipping",
+    "region_loss_dtype",
+    # STRICT, and it has to be: resume.pt carries optimizer.state_dict(), and
+    # RMSprop's per-parameter state (square_avg, momentum_buffer) and Adam's
+    # (exp_avg, exp_avg_sq, step) are different tensors under different keys.
+    # train.py's optimizer.load_state_dict would either raise or restore
+    # something meaningless, and beyond the mechanics the two families take
+    # different-sized steps for the same lr -- so a resume across them is a
+    # different experiment wearing the old one's name.
+    "optimizer",
     "momentum",
     "weight_decay",
     "augment_flips",
@@ -65,8 +76,10 @@ STRICT_CONFIG_KEYS: Sequence[str] = (
     "k_prevs",
     "treat_nodata_regions",
     "union_temporal_mask",
+    "seg_loss",
     "convlstm_hidden",
     "convlstm_kernel",
+    "dropout_bottleneck",
     "tattn_dim",
     "tattn_heads",
     "tattn_layers",
@@ -181,6 +194,13 @@ def run_config(args) -> Dict[str, Any]:
         "preprocessing_version": getattr(args, "preprocessing_version", "frame-v2"),
         "aoi_selection_version": getattr(args, "aoi_selection_version", "coordinates-v2"),
         "gradient_clipping": "unscaled-v2",
+        # Absent from every config written before 2026-09-08, which is exactly
+        # what the AMP guard in check_config_compatible keys on.
+        "region_loss_dtype": REGION_LOSS_DTYPE,
+        # Defaulted to "rmsprop" so every config written before 2026-09-08 keeps
+        # its exact fingerprint: those runs had no such flag and were all RMSprop,
+        # so an old checkpoint still compares equal and stays resumable.
+        "optimizer": str(getattr(args, "optimizer", "rmsprop")),
         "momentum": float(getattr(args, "momentum", 0.999)),
         "weight_decay": float(getattr(args, "weight_decay", 1e-8)),
         "augment_flips": str(getattr(args, "augment_flips", "none")),
@@ -191,8 +211,17 @@ def run_config(args) -> Dict[str, Any]:
         "k_prevs": int(args.k_prevs) if temporal else None,
         "treat_nodata_regions": bool(args.treat_nodata_regions),
         "union_temporal_mask": bool(args.union_temporal_mask),
+        # The objective itself. Absent from every config written before
+        # 2026-09-08, which check_config_compatible skips, so existing runs
+        # stay resumable; a resume that CHANGED it would splice two objectives.
+        "seg_loss": str(getattr(args, "seg_loss", "dice")),
         "convlstm_hidden": hidden,
         "convlstm_kernel": int(args.convlstm_kernel) if recurrent else None,
+        # None on every other architecture, matching its siblings above, and
+        # absent entirely from configs written before 2026-09-08 -- which
+        # check_config_compatible skips, so every existing run stays resumable.
+        "dropout_bottleneck": (float(getattr(args, "dropout_bottleneck", 0.0))
+                               if convlstm else None),
         # None on every non-attention run, so an existing ConvLSTM or U-Net
         # resume keeps the fingerprint it had before these keys existed.
         "tattn_dim": (args.tattn_dim or DEFAULT_TATTN_DIM) if tattn else None,
@@ -256,6 +285,19 @@ def check_config_compatible(saved: Mapping[str, Any], current: Mapping[str, Any]
             f"cannot resume {checkpoint_path}: legacy AMP clipped scaled gradients. "
             "Continue that run only with its original source tree; the fixed branch "
             "must start a new experiment (model-only weights may be used explicitly)."
+        )
+    # Same shape, same reason: under --amp the region term used to reduce fp16
+    # and saturated to a constant 1.0 with zero gradient, so those epochs
+    # optimised BCE alone. Resuming one here would run epochs 1..N on one
+    # objective and N+1.. on another. Only AMP runs are affected -- without it
+    # the logits were fp32 and the sum never reached fp16's ceiling.
+    if saved.get("amp") and saved.get("region_loss_dtype") != REGION_LOSS_DTYPE:
+        raise IncompatibleResume(
+            f"cannot resume {checkpoint_path}: it was trained with the fp16 region-loss "
+            f"defect (dice_loss saturating to 1.0 with zero gradient above ~2.56% mean "
+            f"predicted probability at batch 128). Its early epochs optimised BCE alone, "
+            f"so continuing it here would splice two objectives into one run. Start a "
+            f"fresh run, or continue it with the pre-2026-09-08 source tree."
         )
     missing = object()
     breaking = [

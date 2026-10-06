@@ -9,15 +9,48 @@ reproduce it".
 
 ## Template defaults
 
-Both templates ship with these, so an empty delta means "submit as-is":
+All three templates ship with these, so an empty delta means "submit as-is":
 
-    PARTITION=assets/partition_geo_k10.json   K_PREVS=10   HIDDEN=256
+    PARTITION=<required, no default>          K_PREVS=10   HIDDEN=256
     POS_W=8   SEED=42   LR=1e-6   SCHEDULE=plateau
     EPOCHS=60   BATCH=128   ACCUM=1   PATIENCE=20   LR_PATIENCE=5
+    OPTIM=rmsprop   MOMENTUM=0.999   BETA1=0.9   BETA2=0.999
+    WEIGHT_DECAY=1e-8   AUGMENT=none   SEG_LOSS=dice   DROPOUT_BOTTLENECK=0.0
     CTX_MY=     CTX_MX=
     RING_NEGS=no   NEG_RING_INNER=1   NEG_RING_OUTER=3   NEG_PER_POS=1.0
     VAL_NEGS=no
     RESUME=auto
+
+`PARTITION` has **no default on purpose** — `assets/` holds four generations
+(`assets/PARTITIONS.md`) and defaulting to one is how a clean-data run silently trains on
+the 2019–2026 noisy lists. The templates use `${PARTITION:?...}` so an unset one fails at
+submit time, not twenty minutes into a GPU allocation.
+
+> ### ⚠️ The defaults are historical, not recommended
+>
+> `OPTIM=rmsprop MOMENTUM=0.999 LR=1e-6 WEIGHT_DECAY=1e-8` is what every run before
+> 2026-09-08 used, and it stays the default so nothing shifts under a run that does not
+> ask for a change. **It is not what you should submit.** RMSprop's momentum buffer is not
+> bias-corrected, so the effective step is `LR/(1−MOMENTUM)` — a 1000× amplification at
+> 0.999, survivable only while the AMP clipping defect was crushing every gradient. With
+> correct clipping it diverges inside one epoch.
+>
+> **Every batch from 2026-09-09 on submits `OPTIM=adamw LR=3e-4 WEIGHT_DECAY=1e-2`**, and
+> `MOMENTUM` is ignored there (a non-default one is refused rather than dropped). An `LR`
+> copied from a preset below is the wrong step size under adam/adamw — retune, do not
+> translate. See `docs/CORRECTNESS_FIXES.md` and `docs/EXPERIMENTS.md` (`lrscan`,
+> `adamscan`).
+
+### The knobs added in September
+
+| Knob | What it does | Resume key |
+|---|---|---|
+| `OPTIM` / `BETA1` / `BETA2` | `rmsprop \| adam \| adamw`; adamw decouples the weight decay | STRICT |
+| `MOMENTUM` | RMSprop only, and the step-size knob described above | STRICT |
+| `WEIGHT_DECAY` | `1e-8` is barely regularisation; `1e-4`..`1e-2` is the usual range | STRICT |
+| `AUGMENT` | `none \| h \| v \| hv` — random flips, **train split only**, image and mask together | STRICT |
+| `SEG_LOSS` | `dice \| jaccard` — the region term added to BCE. Both are recorded every epoch whichever is the objective, so read `train/dice` and `train/jaccard`, not `train/loss`, which is **not** comparable across the two | STRICT |
+| `DROPOUT_BOTTLENECK` | `Dropout2d` on the ConvLSTM's final hidden state. **ConvLSTM only** — `train.py` refuses it on any other architecture rather than ignoring it, so a four-architecture batch is unavoidably unmatched on this axis | STRICT |
 
 `VAL_NEGS` is **deprecated as of 2026-08-20 and must stay `no`**. Validation is
 positives-only for every run from here on; see
@@ -54,7 +87,19 @@ evaluation protocol are all unchanged; only what surrounds each target.
 Set both or neither — the template refuses one alone. Costs ~3x the activations
 (hence `ACCUM`) and ~3x the host memory, because the dataset still materialises
 every sample's pixels. `eval-scenes` takes the same `--context_margin`, and
-refuses a value that disagrees with the checkpoint's `io_geometry`.
+refuses a value that disagrees with the checkpoint's `io_geometry` — in
+practice it derives the margin from the checkpoint, so `run_eval.sh` needs no
+context setting of its own.
+
+**Context is not a ConvLSTM feature.** As of 2026-09-09 `train_control.sh`
+carries `CTX_MY`/`CTX_MX` too, so `ARCH=single` and `ARCH=stack` can be run at
+300x200. Nothing in the Python layer had to change for that: the margin is
+applied in `build_datasets` and `build_model` without consulting the
+architecture, the single-frame loader has its own context branch
+(`dataset.py:498-505` — the image carries the margin, the target never does),
+and the plain U-Net crops its logits through the same `CropOutput` mixin the
+ConvLSTM uses (`unet.py:82`). A single-frame context run was previously not
+*expressible*, not unsupported.
 
 ## `train_convlstm.sh`
 
@@ -71,6 +116,20 @@ refuses a value that disagrees with the checkpoint's `io_geometry`.
 | `convlstm_temporal_k10_h256_b128_lr5e6_cosine_60e` | `PARTITION=…temporal_k10.json` `LR=5e-6` `SCHEDULE=cosine` | `2026-08-06/temporal_k10_convlstm_cosine` |
 
 ## `train_control.sh`
+
+Extended on 2026-09-09 with `ACCUM`, `OPTIM`/`BETA1`/`BETA2`, `SEG_LOSS` and
+`CTX_MY`/`CTX_MX`, which `train_convlstm.sh` already had. Before that a control
+could not be matched to any run of the 2026-09-07 campaign or later — it could
+express neither the optimiser, the region loss, nor the geometry — so "the
+single-frame floor" was only ever measurable against rmsprop runs on the plain
+patch tree. The defaults are unchanged, so every control run below is
+byte-identical to what it was.
+
+**`DROPOUT_BOTTLENECK` is deliberately absent.** It names the tensor a ConvLSTM
+compresses its sequence into; neither architecture here has one, and
+`train.py:372` refuses the flag rather than ignoring it. A control matched to a
+ConvLSTM arm carrying dropout is unmatched on that axis and cannot be fixed —
+note it in the run's row instead of implying the pair is clean.
 
 | Job name (`#BSUB -J`) | CONFIG delta | Run |
 |---|---|---|

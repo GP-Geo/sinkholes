@@ -32,6 +32,7 @@ import csv
 import logging
 import os
 import shutil
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -40,6 +41,8 @@ import numpy as np
 from .common import GPKG_OPTIONS, EDIT_STATUSES, METRIC_CRS, now_iso, ws_path
 
 TYPES = ("ADD", "DEL", "MOD")
+#: Registry order; FLAG is a quality flag on a polygon that stays in the GT.
+ID_TYPES = TYPES + ("FLAG",)
 #: Hausdorff distance (degrees) below which two geometries are the same polygon
 #: (~1 mm): absorbs float round trips through QGIS, never a real vertex move.
 SAME_TOL_DEG = 1e-8
@@ -125,6 +128,16 @@ def detect_changes(orig, work, match_iou=0.5):
     for intf in intfs:
         O = orig[orig["intf_id"] == intf]
         W = work[work["intf_id"] == intf]
+        # A live row whose geometry was emptied in QGIS (e.g. Delete Part on its
+        # last part) is no polygon at all: report it, and treat it as removed.
+        empty = W.geometry.isna() | W.geometry.is_empty
+        for w in W[empty & (W["edit_status"].fillna("") != "deleted")].itertuples(index=False):
+            if isinstance(w.orig_uid, str) and w.orig_uid in orig_by_uid \
+                    and not (W[~empty]["orig_uid"] == w.orig_uid).any():
+                rec("DEL", intf, o=orig_by_uid[w.orig_uid], w=w, match_method="emptied_geometry",
+                    needs_review=True, review_note="geometry emptied in QGIS (all parts deleted?)")
+                detected[w.feat_uid] = "deleted"
+        W = W[~empty]
         soft_del = W[W["edit_status"].fillna("") == "deleted"]
         active = W[W["edit_status"].fillna("") != "deleted"]
 
@@ -133,7 +146,8 @@ def detect_changes(orig, work, match_iou=0.5):
                      & (work["edit_status"].fillna("") != "deleted")]
         moved_uids = set(moved["orig_uid"])
 
-        linked = set()
+        linked = {c["orig_uid"] for c in changes
+                  if c["intf_id"] == intf and c["match_method"] == "emptied_geometry"}
         # Soft deletions of originals.
         for w in soft_del.itertuples(index=False):
             if isinstance(w.orig_uid, str) and w.orig_uid in orig_by_uid:
@@ -247,6 +261,24 @@ def detect_changes(orig, work, match_iou=0.5):
     return changes, detected
 
 
+def flag_items(work):
+    """One item per LIVE polygon carrying a qc_flag (flags on deleted rows are moot)."""
+    if "qc_flag" not in work.columns:
+        return []
+    live = work[(work["edit_status"].fillna("") != "deleted")
+                & work["qc_flag"].notna() & (work["qc_flag"].astype(str).str.strip() != "")
+                & work.geometry.notna() & ~work.geometry.is_empty]
+    return [{"change_type": "FLAG", "intf_id": w.intf_id, "orig_uid": w.orig_uid,
+             "feat_uid": w.feat_uid, "old_geom": None, "new_geom": w.geometry,
+             "qc_flag": w.qc_flag, "qc_note": getattr(w, "qc_note", None),
+             "edit_status": w.edit_status, "edited_by": getattr(w, "edited_by", None),
+             "edit_timestamp": getattr(w, "edit_timestamp", None),
+             "needs_review": False, "review_note": "", "related": "", "match_method": "",
+             "edit_reason": None, "edit_notes": None, "declared_status": w.edit_status,
+             "declared_matches": True}
+            for w in live.itertuples(index=False)]
+
+
 # --------------------------------------------------------------------------- registry
 
 
@@ -260,7 +292,7 @@ def load_registry(path):
 def change_key(c):
     """A change is identified by its type and the polygon it is about: the
     original for a deletion or modification, the new polygon for an addition."""
-    ident = c["feat_uid"] if c["change_type"] == "ADD" else c["orig_uid"]
+    ident = c["feat_uid"] if c["change_type"] in ("ADD", "FLAG") else c["orig_uid"]
     return f"{c['change_type']}|{c['intf_id']}|{ident}"
 
 
@@ -278,7 +310,7 @@ def assign_ids(changes, registry_path):
     def order(c):
         g = c["new_geom"] if c["new_geom"] is not None else c["old_geom"]
         pt = g.representative_point()
-        return (c["intf_id"], TYPES.index(c["change_type"]), -pt.y, pt.x)
+        return (c["intf_id"], ID_TYPES.index(c["change_type"]), -pt.y, pt.x)
 
     for c in sorted(changes, key=order):
         k = change_key(c)
@@ -339,7 +371,7 @@ ATTRS = ["change_id", "intf_id", "change_type", "start_date", "end_date", "frame
          "related", "iou", "area_before_m2", "area_after_m2", "centroid_shift_m", "lon", "lat"]
 
 
-def write_change_layers(changes, out_gpkg):
+def write_change_layers(changes, out_gpkg, flags=()):
     import geopandas as gpd
     import pandas as pd
     from shapely.geometry import Point
@@ -365,12 +397,22 @@ def write_change_layers(changes, out_gpkg):
     markers = gpd.GeoDataFrame(
         pd.DataFrame([{k: c.get(k) for k in ATTRS} for c in changes], columns=ATTRS),
         geometry=[Point(c["lon"], c["lat"]) for c in changes], crs="EPSG:4326")
+    if flags:
+        gpd.GeoDataFrame(
+            pd.DataFrame([{k: f.get(k) for k in FLAG_ATTRS} for f in flags], columns=FLAG_ATTRS),
+            geometry=[f["new_geom"] for f in flags], crs="EPSG:4326",
+        ).to_file(tmp, layer="flagged", driver="GPKG", dataset_options=GPKG_OPTIONS)
     markers.to_file(tmp, layer="change_markers", driver="GPKG",
             dataset_options=GPKG_OPTIONS)
     os.replace(tmp, out_gpkg)
 
 
-def summarise(changes, orig, work, detected, scenes):
+FLAG_ATTRS = ["flag_id", "intf_id", "qc_flag", "qc_note", "orig_uid", "feat_uid", "edit_status",
+              "start_date", "end_date", "frame", "edited_by", "edit_timestamp",
+              "area_after_m2", "lon", "lat"]
+
+
+def summarise(changes, orig, work, detected, scenes, flags=()):
     rows = []
     for s in scenes.itertuples(index=False):
         intf = s.intf_id
@@ -386,6 +428,10 @@ def summarise(changes, orig, work, detected, scenes):
             "added": n["ADD"], "deleted": n["DEL"], "modified": n["MOD"],
             "needs_review": sum(c["needs_review"] for c in cs),
             "declared_status_mismatches": sum(not c["declared_matches"] for c in cs),
+            "flagged": sum(f["intf_id"] == intf for f in flags),
+            "flags": ";".join(f"{k}:{v}" for k, v in sorted(
+                Counter(f["qc_flag"] for f in flags
+                                                  if f["intf_id"] == intf).items())),
         })
     return rows
 
@@ -455,30 +501,38 @@ def run(workspace, match_iou=0.5, take_snapshot=True):
     if unknown:
         logging.warning(f"unknown edit_status values (treated as not deleted): {unknown}")
     changes, detected = detect_changes(orig, work, match_iou)
-    assign_ids(changes, ws_path(workspace, "registry"))
-    enrich(changes, scenes)
+    flags = flag_items(work)
+    assign_ids(changes + flags, ws_path(workspace, "registry"))
+    for f in flags:
+        f["flag_id"] = f["change_id"]
+    enrich(changes + flags, scenes)
     out = ws_path(workspace, "changes")
     out.mkdir(parents=True, exist_ok=True)
-    write_change_layers(changes, out / "gt_changes_v2.gpkg")
+    write_change_layers(changes, out / "gt_changes_v2.gpkg", flags)
+    with open(out / "flagged_list.csv", "w", newline="") as fh:
+        w = _csv.DictWriter(fh, fieldnames=FLAG_ATTRS)
+        w.writeheader()
+        w.writerows([{k: f.get(k) for k in FLAG_ATTRS} for f in sorted(flags, key=lambda f: f["flag_id"])])
     with open(out / "change_list.csv", "w", newline="") as fh:
         w = _csv.DictWriter(fh, fieldnames=ATTRS)
         w.writeheader()
         w.writerows([{k: c.get(k) for k in ATTRS} for c in sorted(changes, key=lambda c: c["change_id"])])
-    summary = summarise(changes, orig, work, detected, scenes)
+    summary = summarise(changes, orig, work, detected, scenes, flags)
     with open(out / "change_summary.csv", "w", newline="") as fh:
         w = _csv.DictWriter(fh, fieldnames=list(summary[0].keys()))
         w.writeheader()
         w.writerows(summary)
     update_manifest(ws_path(workspace, "manifest"), summary)
-    return changes, summary, detected
+    return changes, summary, detected, flags
 
 
 def main(args):
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    changes, summary, _ = run(args.workspace, args.match_iou, not args.no_snapshot)
+    changes, summary, _, flags = run(args.workspace, args.match_iou, not args.no_snapshot)
     tot = {t: sum(c["change_type"] == t for c in changes) for t in TYPES}
     logging.info(f"{len(changes)} changes: {tot}; "
-                 f"{sum(c['needs_review'] for c in changes)} need review")
+                 f"{sum(c['needs_review'] for c in changes)} need review; "
+                 f"{len(flags)} flagged polygon(s) (kept in the GT)")
     for s in summary:
         if s["added"] or s["deleted"] or s["modified"]:
             logging.info(f"  {s['intf_id']}: {s['original_count']} -> {s['corrected_count']} "

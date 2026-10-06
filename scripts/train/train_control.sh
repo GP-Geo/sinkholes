@@ -41,6 +41,15 @@ SEED="${SEED:-42}"
 LR="${LR:-1e-6}"
 SCHEDULE="${SCHEDULE:-plateau}"
 MOMENTUM="${MOMENTUM:-0.999}"            # RMSprop momentum; 0.999 is historical and diverges
+                                     # IGNORED unless OPTIM=rmsprop, and train.py REFUSES a
+                                     # non-default under adam/adamw rather than dropping it
+# rmsprop | adam | adamw. Mirrors train_convlstm.sh exactly, and for the same
+# reason: rmsprop stays the default so no earlier control run shifts under it.
+# Under adam/adamw the step is ~LR instead of LR/(1-MOMENTUM), so an LR carried
+# over from an rmsprop run is NOT the same step size. STRICT resume key.
+OPTIM="${OPTIM:-rmsprop}"
+BETA1="${BETA1:-0.9}"                # adam/adamw only: the averaging window, NOT the step size
+BETA2="${BETA2:-0.999}"              # adam/adamw only
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-8}"      # 1e-8 is historical and is barely regularisation
                                           # at all; 1e-4..1e-2 is the usual range
 AUGMENT="${AUGMENT:-none}"                # none | h | v | hv -- random flips, TRAIN split only
@@ -49,7 +58,51 @@ LR_PATIENCE="${LR_PATIENCE:-5}"           # was never exposed here; 5 is the cod
                                           # so every earlier control run is unchanged
 EPOCHS="${EPOCHS:-60}"
 BATCH="${BATCH:-128}"
+# Micro-batch x ACCUM is the EFFECTIVE batch, and the effective batch is what a
+# run is comparable on. A control that is meant to be read against a ConvLSTM
+# arm must match the ConvLSTM's EFFECTIVE batch, not its micro-batch: at ctx50
+# the recurrent arm splits 128 into 64x2 to fit its activations, and a control
+# left at BATCH=128 ACCUM=1 would be the right comparison by accident only.
+# Both are STRICT resume keys (resume.py).
+ACCUM="${ACCUM:-1}"
+# The REGION term added to BCE: dice (every control run so far) or jaccard.
+# Same quantity reparametrised -- J = D/(2-D) -- but a steeper penalty on the
+# same error. train/loss is NOT comparable across the two. STRICT resume key.
+SEG_LOSS="${SEG_LOSS:-dice}"
+# NO DROPOUT_BOTTLENECK HERE, AND IT IS NOT AN OVERSIGHT. The flag names the
+# single tensor a ConvLSTM compresses its sequence into; neither architecture
+# on this template has one, and train.py:372 REFUSES the flag rather than
+# ignoring it. A control matched to a ConvLSTM arm that carries dropout is
+# therefore unmatched on that one axis, unavoidably -- say so in its row rather
+# than implying the pair is clean.
 PATIENCE="${PATIENCE:-20}"
+
+# --- spatial context --------------------------------------------------------
+# Empty = the plain 200x100 tree, which is every control run before 2026-09-09.
+# CTX_MY=50 CTX_MX=50 reads data_patches_H200_W100_ctx50x50_strpp2_11days_Aligned
+# and feeds the network 300x200 while still supervising and scoring the centre
+# 200x100 -- the image carries the margin, the target never does
+# (dataset.py:498-505, the single-frame loader's own branch).
+#
+# THIS WORKS FOR ARCH=single, which is the whole reason the block is here: the
+# margin is applied in build_datasets and build_model without ever consulting
+# the architecture, and the plain U-Net crops its logits through the same
+# CropOutput mixin the ConvLSTM uses (unet.py:82). A single-frame context
+# control was simply not expressible before -- not unsupported.
+#
+# Costs ~3x the activations and ~3x the host memory, hence ACCUM above.
+# Two variables rather than one "MY MX" string: submit_all.sh applies overrides
+# with `read -ra`, which splits on whitespace. Set BOTH or NEITHER.
+CTX_MY="${CTX_MY:-}"
+CTX_MX="${CTX_MX:-}"
+CTX_FLAGS=()
+if [ -n "$CTX_MY" ] || [ -n "$CTX_MX" ]; then
+  if [ -z "$CTX_MY" ] || [ -z "$CTX_MX" ]; then
+    echo "set both CTX_MY and CTX_MX, or neither (got '$CTX_MY' / '$CTX_MX')" >&2
+    exit 1
+  fi
+  CTX_FLAGS=(--context_margin "$CTX_MY" "$CTX_MX")
+fi
 
 # RING_NEGS=yes adds all-zero patches drawn from an annulus around the
 # positives. Candidates must be empty at EVERY timestep, so a patch that was
@@ -139,16 +192,22 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 python -m sinkholes train \
   --epochs "$EPOCHS" \
   --batch_size "$BATCH" \
+  --accum_steps "$ACCUM" \
   --learning-rate "$LR" \
   --lr_schedule "$SCHEDULE" \
   --lr_patience "$LR_PATIENCE" \
   --momentum "$MOMENTUM" \
+  --optimizer "$OPTIM" \
+  --beta1 "$BETA1" \
+  --beta2 "$BETA2" \
   --weight_decay "$WEIGHT_DECAY" \
   --augment_flips "$AUGMENT" \
+  --seg_loss "$SEG_LOSS" \
   --patches_dir /home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/patches \
   --partition_mode preset_by_intf \
   --partition_file "$PARTITION" \
   --patch_size 200 100 \
+  ${CTX_FLAGS[@]+"${CTX_FLAGS[@]}"} \
   --stride 2 \
   --pos_w "$POS_W" \
   ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} \

@@ -144,7 +144,8 @@ def outputs_args(src_dir, a, out_json, gt_map=None):
     return p.parse_args(argv)
 
 
-def run_one(src_dir, ws, label, orig_by, corr_by, orig_fp, corr_fp, objects, object_th):
+def run_one(src_dir, ws, label, orig_by, corr_by, orig_fp, corr_fp, objects, object_th,
+            flagged_by=None):
     from ..inference import outputs
 
     a = read_eval_args(src_dir)
@@ -210,7 +211,7 @@ def run_one(src_dir, ws, label, orig_by, corr_by, orig_fp, corr_fp, objects, obj
             "relabelled_scenes": sorted(i for i in intfs if corr_fp[i] != orig_fp.get(i))}
     write_json(out_dir / "meta.json", meta)
     if objects:
-        object_analysis(src_dir, a, gt_map, out_dir, object_th)
+        object_analysis(src_dir, a, gt_map, out_dir, object_th, flagged_by or {})
     return out_dir
 
 
@@ -265,7 +266,7 @@ def classify_objects(gt, pred, th=0.7, buffer=5):
     return gt_rows, pr_rows, rec, prec
 
 
-def object_analysis(src_dir, a, gt_map, out_dir, th_conf):
+def object_analysis(src_dir, a, gt_map, out_dir, th_conf, flagged_by=None):
     """Every predicted / GT object, old vs corrected labels, as GIS layers + CSV."""
     import geopandas as gpd
     from shapely.affinity import affine_transform
@@ -298,17 +299,35 @@ def object_analysis(src_dir, a, gt_map, out_dir, th_conf):
                               "transition": f"{'TP' if tp_old else 'FP'}->{'TP' if tp_new else 'FP'}",
                               "gt_overlap_old": round(fo, 3), "gt_overlap_new": round(fn_, 3),
                               "area_px": p.area, "geometry": affine_transform(p, T)})
+        # Quality flags of the corrected labels: a GT object is flagged when it
+        # overlaps a flagged polygon. Flagged objects stay in every number above;
+        # this only splits recall so their share of the misses is visible.
+        from shapely.ops import unary_union
+
+        fl = unary_union(list((flagged_by or {}).get(intf, []))) if (flagged_by or {}).get(intf) else None
+        flag_area = {True: [0.0, 0.0], False: [0.0, 0.0]}      # [detected, total] px
         for tag, rows in (("original", go), ("corrected", gn)):
             for g, det, f in rows:
+                geo_g = affine_transform(g, T)
+                is_fl = bool(fl is not None and tag == "corrected" and geo_g.intersects(fl))
+                if tag == "corrected":
+                    flag_area[is_fl][0] += g.area if det else 0.0
+                    flag_area[is_fl][1] += g.area
                 gt_rows_all.append({"intf_id": intf, "labels": tag, "detected": bool(det),
                                     "covered_fraction": round(f, 3), "area_px": g.area,
-                                    "geometry": affine_transform(g, T)})
+                                    "qc_flagged": is_fl, "geometry": geo_g})
         summary.append({"intf_id": intf, "recall_old": ro, "precision_old": pro,
                         "recall_new": rn, "precision_new": prn,
                         "FP_to_TP": sum(r["transition"] == "FP->TP" for r in pred_rows if r["intf_id"] == intf),
                         "TP_to_FP": sum(r["transition"] == "TP->FP" for r in pred_rows if r["intf_id"] == intf),
                         "gt_missed_old": sum(not d for _, d, _ in go),
-                        "gt_missed_new": sum(not d for _, d, _ in gn)})
+                        "gt_missed_new": sum(not d for _, d, _ in gn),
+                        "recall_new_flagged": (flag_area[True][0] / flag_area[True][1]
+                                               if flag_area[True][1] else None),
+                        "recall_new_unflagged": (flag_area[False][0] / flag_area[False][1]
+                                                 if flag_area[False][1] else None),
+                        "flagged_gt_area_share": (flag_area[True][1] / (flag_area[True][1] + flag_area[False][1])
+                                                  if (flag_area[True][1] + flag_area[False][1]) else None)})
     gpkg = Path(out_dir) / f"objects_th{th_conf}.gpkg"
     if pred_rows:
         gpd.GeoDataFrame(pred_rows, crs="EPSG:4326").to_file(gpkg, layer="pred_objects", driver="GPKG",
@@ -459,6 +478,8 @@ def main(args):
         __import__("geopandas").read_file(ws_path(ws, "original_gpkg"), layer="scenes")["intf_id"])
     orig = orig[orig["intf_id"].isin(scope)]
     orig_by, corr_by = _geoms_by_scene(orig), _geoms_by_scene(corr)
+    flagged_by = (_geoms_by_scene(corr[corr["qc_flag"].notna() & (corr["qc_flag"].astype(str) != "")])
+                  if "qc_flag" in corr.columns else {})
     orig_fp = {i: fingerprint(orig_by.get(i, [])) for i in scope}
     corr_fp = {i: fingerprint(corr_by.get(i, [])) for i in scope}
     dirs = args.eval_dirs or discover(args.predictions_root)
@@ -467,5 +488,5 @@ def main(args):
     for d in dirs:
         logging.info(f"== {d}")
         out = run_one(d, ws, args.label, orig_by, corr_by, orig_fp, corr_fp,
-                      args.objects, args.object_th)
+                      args.objects, args.object_th, flagged_by)
         logging.info(f"-> {out}")

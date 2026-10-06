@@ -339,7 +339,12 @@ def main(args) -> None:
     for intf in intf_list:
         meta = intf_meta(intf, args.intf_dict_path)
         x0a, y0a = aligned_origin(meta.frame)
-        cur = np.load(grid_path("data", intf)).astype(np.float32)  # (ny, nx, H, W)
+        # copy=False: the data grids are ALREADY float32 on disk, so the plain
+        # .astype() this replaces allocated a redundant full duplicate of every
+        # timestep (~15.6 GiB each at ctx50 stride 4) purely to hand back the
+        # same dtype. Non-float32 input still converts, so this is strictly a
+        # saving; it does not change what is loaded.
+        cur = np.load(grid_path("data", intf)).astype(np.float32, copy=False)  # (ny, nx, H, W)
 
         # -- assemble the temporal stack -------------------------------------------------
         # prev_ids are held newest-first here (matching how the historical
@@ -353,10 +358,17 @@ def main(args) -> None:
             else:
                 prev_ids = prev_dict[intf]["prevs"][: args.k_prevs][::-1]  # newest first
                 available = [pid for pid in prev_ids if os.path.exists(grid_path("data", pid))]
-                prevs = [np.load(grid_path("data", pid)).astype(np.float32) for pid in available]
+                prevs = [np.load(grid_path("data", pid)).astype(np.float32, copy=False)
+                         for pid in available]
                 while len(prevs) < args.k_prevs:
                     prevs.append(cur)
                 arrays_newest_first = [cur] + prevs
+                # `prevs` is a SECOND list holding the same arrays, and it stays
+                # in scope for the rest of this scene. Without this del the
+                # in-place normalise below frees nothing -- every raw grid stays
+                # pinned here through reconstruction. At ctx50 stride 4 that is
+                # ~15.6 GiB per timestep and it is what hit TERM_MEMLIMIT.
+                del prevs
         else:
             prev_ids = []
             arrays_newest_first = [cur]
@@ -371,11 +383,30 @@ def main(args) -> None:
         ctx_h, ctx_w = getattr(args, "_context_size", None) or (patch_h, patch_w)
         if any(p.shape[-2:] != (ctx_h, ctx_w) for p in arrays_newest_first):
             raise ValueError(f"patch file input geometry must match checkpoint {(ctx_h, ctx_w)}")
-        arrays_newest_first = [
-            normalise_phase(p[:ny, :nx, :ctx_h, :ctx_w].astype(np.float32, copy=False),
-                            range_tol=SCENE_RANGE_TOL)
-            for p in arrays_newest_first
-        ]
+        # Normalised IN PLACE, one timestep at a time, rather than with a list
+        # comprehension. normalise_phase always returns a NEW array, and a
+        # comprehension keeps every raw grid alive (via the old list) while it
+        # builds all of the replacements -- a peak of 2*(k_prevs+1) grids, and
+        # then the raw ones stay resident for the whole scene body because the
+        # names above still reference them. Replacing slot by slot drops each
+        # raw grid as soon as its normalised version exists, so the peak is
+        # (k_prevs+1)+1 and reconstruction runs holding only the stack.
+        #
+        # At ctx50 stride 4 that is the difference between ~187 GiB and ~109
+        # GiB on a 6-timestep stack: LSF 262921/262923 were killed at exactly
+        # their 208 GiB limit (TERM_MEMLIMIT, exit 137) part-way through the
+        # second scene, having written the first one fine.
+        #
+        # Numerically identical -- same call, same arguments, same order. Only
+        # the lifetime of the inputs changes.
+        for i in range(len(arrays_newest_first)):
+            arrays_newest_first[i] = normalise_phase(
+                arrays_newest_first[i][:ny, :nx, :ctx_h, :ctx_w].astype(np.float32, copy=False),
+                range_tol=SCENE_RANGE_TOL)
+        # The last raw reference. Slots holding `cur` (a short chain padded with
+        # the current frame, or --replicate_input) have been replaced above, so
+        # this is what actually releases it; `cur` is not read after this point.
+        del cur
         stack = arrays_newest_first[::-1]  # chronological, current frame last
 
         # -- ground truth ----------------------------------------------------------------
@@ -466,6 +497,27 @@ def main(args) -> None:
             np.save(prefix + "_pred_th", result.thresholded)
             if result.gt is not None:
                 np.save(prefix + "_gt", result.gt)
+
+        # RELEASE THIS SCENE BEFORE THE NEXT ONE IS READ.
+        #
+        # Python frees these only when the names are REBOUND, and every
+        # rebinding happens partway through the next iteration -- after that
+        # scene's T grids have already been loaded. So without this del the loop
+        # holds TWO full scenes at once: scene N's normalised stack plus scene
+        # N+1's raw stack, at the moment of peak allocation.
+        #
+        # At ctx50 stride 4 one grid is ~15.6 GiB and T=6, so the carry-over is
+        # ~94 GiB of stack, ~5 GiB of mask and ~4 GiB of canvases, landing on a
+        # ~94 GiB load: ~212 GiB against a 208 GiB limit. That is what killed
+        # LSF 262921, 262923 and 276398 -- each died immediately AFTER writing
+        # its first scene's polygons and BEFORE logging anything for the second,
+        # which is precisely this boundary and not the per-scene peak.
+        #
+        # The in-place normalise above lowers the within-scene peak; this is the
+        # one that decides whether the loop survives past scene 1. Both are
+        # needed, and neither changes a number.
+        del stack, arrays_newest_first, mask_cur, gt_grid, lidar_gates
+        del positive_tiles, result, polygons, image_to_save
 
     if args.merge_polygs:
         shp_files = sorted(glob.glob(os.path.join(polyg_dir, "*.shp")))

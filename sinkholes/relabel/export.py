@@ -53,7 +53,7 @@ def build_active(workspace):
 
     from . import diff as d
 
-    changes, summary, detected = d.run(workspace, take_snapshot=True)
+    changes, summary, detected, _ = d.run(workspace, take_snapshot=True)
     _, work, scenes = d.load_layers(workspace)
     live = work[work["edit_status"].fillna("") != "deleted"].copy()
     change_of = {c["feat_uid"]: c["change_id"] for c in changes if c["feat_uid"] and c["change_type"] != "DEL"}
@@ -76,6 +76,10 @@ def build_active(workspace):
     ts = pd.to_datetime(live["edit_timestamp"], errors="coerce").dt.normalize()
     out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce").dt.normalize()
     out.loc[edited, "timestamp"] = ts[edited].fillna(pd.Timestamp(datetime.now().date()))
+    # Quality flags travel with the polygon: it stays in the GT, and evaluations
+    # can score flagged objects separately.
+    for col in ("qc_flag", "qc_note"):
+        out[col] = live[col] if col in live.columns else None
     out["intf_id"] = live["intf_id"]
     out["gt_uid"] = live["feat_uid"]
     out["orig_uid"] = live["orig_uid"]

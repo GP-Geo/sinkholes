@@ -1,6 +1,6 @@
 # Predictions — the short version
 
-*Last updated 2026-09-03. Covers **two** output trees: `outputs/predictions/`
+*Last updated 2026-09-17. Covers **two** output trees: `outputs/predictions/`
 (full-scene) and `outputs/predictions_positives/` (positives-only, the benchmark
 paper's protocol). For the model-level story see [RESULTS.md](RESULTS.md); for
 the positives-only protocol see [POSITIVES_ONLY_EVAL.md](POSITIVES_ONLY_EVAL.md);
@@ -9,8 +9,16 @@ for attention selectivity see [MODEL_RUNS.md](MODEL_RUNS.md).*
 **This is where the numbers that matter live** — object-level precision and
 recall over whole interferograms, not patches.
 
-Counted on disk 2026-09-03: **56 evaluation job directories**, each holding
+Counted on disk 2026-09-17: **62 evaluation job directories**, each holding
 exactly one `olm_results*.json`.
+
+> ### ⚠️ Four partition generations live in this file
+>
+> §2 is generation 2, §3a–3c are generation 3/3b, **§3d is generation 4**. Each section
+> is a mean over a *different* set of scenes, so a figure from one is not a comparison
+> with a figure from another. See [`assets/PARTITIONS.md`](../assets/PARTITIONS.md).
+> Even within generation 4, k5 (20 scenes) and k10 (17 scenes) are different
+> denominators.
 
 - **53 under `predictions/`** — 16 generation-2 full-scene evaluations on two
   scene lists (§2), 2 Hann-window reruns of models already in that table, the
@@ -573,6 +581,78 @@ drift plus a different scene mix, confounded.
 
 ---
 
+## 3d. Generation 4 — the label-quality threshold (2026-09-14 → 09-16, 10 evaluations)
+
+Ten evaluations on `partition_temporal_k{5,10}_clean_th350x200`, RTh protocol,
+`DATA_STRIDE=4`, four thresholds × two Intersection Tolerances. The k5 arms share one
+20-scene set, the k10 arms a 17-scene set.
+
+### Temporal k5 — 20 scenes, best F1 of four RTh
+
+| Model | `ith0.7_b5` | P / R | `ith0.5_b10` | P / R |
+|---|---|---|---|---|
+| `th350_tattn_ctx50_neg10` | **0.7905** | 0.869 / 0.725 | 0.8888 | 0.896 / 0.882 |
+| `th350_hybrid_ctx50_neg10` | 0.7782 | 0.866 / 0.706 | 0.8737 | 0.895 / 0.853 |
+| `posw8_tattn_ctx50_25e` | 0.7699 | 0.850 / 0.704 | **0.8898** | 0.885 / 0.895 |
+| `posw8_convlstm_ctx50_25e` | 0.7699 | 0.862 / 0.696 | 0.8870 | 0.893 / 0.881 |
+| `posw8_single_ctx50_20e` | 0.7676 | 0.850 / 0.700 | 0.8875 | 0.891 / 0.884 |
+| `posw8_hybrid_ctx50_25e` | 0.7571 | 0.868 / 0.671 | 0.8803 | 0.898 / 0.863 |
+| `th350_single_ctx50_neg10` | 0.7535 | 0.859 / 0.671 | 0.8800 | 0.896 / 0.865 |
+| `th350_convlstm_ctx50_neg10` | 0.7489 | 0.879 / 0.652 | 0.8729 | 0.908 / 0.840 |
+
+### Temporal k10 — 17 scenes, a different denominator
+
+| Model | `ith0.7_b5` | P / R | `ith0.5_b10` |
+|---|---|---|---|
+| `posw8_tattn_k10_plain_30e` | **0.7907** | 0.819 / 0.764 | **0.9056** |
+| `posw8_tattn_k10_ctx50_30e` | 0.7748 | 0.858 / 0.706 | 0.8870 |
+| `posw8_single_k10_plain_30e` | 0.7685 | 0.789 / 0.749 | 0.8798 |
+| `posw8_single_k10_ctx50_30e` | 0.7427 | 0.871 / 0.647 | 0.8735 |
+
+### ① How much of this is the scene list — measured, not assumed
+
+Object precision is **0.85–0.88** here against **0.72–0.80** for the best generation-3
+temporal runs (§3b, and the `ampfix`/`long200` arms on the same 20-scene list).
+
+The scene-list contribution was measured directly: re-averaging the three finished
+generation-3 ctx50 runs over only the above-threshold scenes moves object F1 by
+**+0.013 to +0.024** at every RTh, for all three — a level shift from an easier list, not
+model quality. The lists overlap 17 of 20; 3 scenes are added (no 10-previous chain) and 3
+dropped (346 / 343 / 339 positives, just under the 350 cut).
+
+**The remaining gap is confounded.** The §3d arms also differ in optimiser (adamw 3e-4),
+objective (both 2026-09-07/08 correctness fixes), geometry (ctx50) and ring radius
+(10 vs 3). Nothing here separates those. **Never read a §3d number against a §3a–3c
+one**, and do not attribute the difference to the threshold — only +0.013..+0.024 of it
+has a measurement behind it.
+
+### ② Every arm peaks at RTh 0.125, the bottom of the sweep
+
+All ten. As in §3b ④, **every F1 in this section is a lower bound** and the ranking could
+reorder below 0.125. The `_pred.npy` are on disk, so `scripts/eval/rescore.sh` can extend
+the sweep downward without re-running anything.
+
+### ③ The tolerance changes the ranking
+
+`posw8_tattn_ctx50_25e` is third at `ith0.7_b5` and **first** at `ith0.5_b10`; the two
+`th350` leaders swap places with the `posw8` arms. All eight k5 arms sit inside
+**0.873–0.890** at the soft tolerance — a range narrower than the 0.011 gap measured
+between two runs of an identical configuration ([RESULTS.md](RESULTS.md) ⑯). At that
+tolerance the batch is not ranked at all; it is tied.
+
+### ④ Context inverts at k10
+
+The plain single-frame arm beats its context twin by **+0.026 F1** while sitting 0.045
+`val/dice` behind it — trading 0.102 recall for 0.082 precision. Every k5 measurement had
+context helping on both axes. One pair on one depth; `evalk10_tattn_ctx50` would say
+whether it is depth or the single-frame architecture.
+
+### ⑤ What this section cannot be extended to
+
+There is **no generation-4 geo family** — `make-benchmark-partitions --axis geo
+--nonz_th 350 200` has never been run. Every number here is temporal, and nothing in this
+section speaks to the train-north / predict-south question that §3a and §3b exist for.
+
 ## 4. Traps — read before quoting a number
 
 **① Never mix the trees.** A positives-only precision and a full-scene
@@ -598,11 +678,26 @@ paths.
 **⑤ A model's name no longer records its pos_w.** `geo_k10_convlstm_posw8` and
 `geo_k5_convlstm_posw8` are pre-`pos_w`-4 runs and are not valid references for
 anything in the 2026-08-10 batch onward. Everything without a `posw*` suffix is
-`pos_w` 4.
+`pos_w` 4 — except the generation-4 **batch** prefix `posw8_`, which does mean `pos_w` 8
+and is a batch name rather than a variant suffix.
+
+**⑥ Quote the generation, the tolerance and the threshold with every number.** §3d shows
+all three moving a ranking on their own: the generation is worth ~0.4 precision, the
+tolerance reorders the top four, and every arm in that section peaks at the bottom of its
+sweep. A bare "object F1 0.79" from this file is not a claim anyone can check.
+
+**⑦ Scene counts differ between sections and within generation 4.** §2 geo is 18 scenes,
+§3b geo 23 and temporal 20, §3c temporal 8, §3d k5 20 and k10 17. A mean of per-scene
+scores over different scenes is not a comparison.
 
 ---
 
 ## 5. What to do next
+
+*The list below is the August positives-only queue and is all geo. The current queue is in
+[RESULTS.md](RESULTS.md) §5. Both evaluation jobs this note used to name ran 2026-09-17:
+`evallonggrid` (plain beat ctx50 in all three pairs) and `evalk10_tattn_ctx50` (0.7748).
+`evalk10plain` ran the same day: 0.7907, the best k10 model.*
 
 1. **Give the geo baseline a positives-only score.** Four of the five entries
    are ring-negative or old models; without `geo_k5_convlstm_base` there is no

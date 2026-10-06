@@ -3,9 +3,14 @@
 Every training run under `outputs/`, its result, and what was kept on disk.
 
 > **Looking for the short version?** [RESULTS.md](RESULTS.md) is the readable
-> summary: what we know, what to ignore, and what to do next. Each dated folder
-> under `outputs/` also carries a `README.md` for that batch. This file is the
-> exhaustive record.
+> summary: what we know, what to ignore, and what to do next; [EXPERIMENTS.md](EXPERIMENTS.md)
+> says what each batch was for. This file is the exhaustive record.
+>
+> *(This note used to promise a per-batch `README.md` in each dated folder under
+> `outputs/`. **None exists** — not for `2026-08-19`, `2026-08-20`, `2026-09-03` or
+> `2026-09-07`. The batch write-ups are in `EXPERIMENTS.md` instead.
+> [`outputs/README.md`](../outputs/README.md) makes the same promise and it is wrong
+> there too.)*
 
 Written 2026-08-09, when the run directories were pruned; extended 2026-08-11
 with the 13-run 2026-08-10 batch; extended 2026-08-12 with the four-run
@@ -15,7 +20,9 @@ on generation-3 partitions; extended 2026-09-01 with the 19 runs of the
 2026-08-20 batches (`attnpos` and `pre23`); extended 2026-09-03 with **the
 object-level scores for all 19** (`eval6`, run 2026-09-01), **the selectivity
 probe for all 12 attention arms** (run 2026-09-02), and **the 11 `pre23` arms
-re-scored on their own era** (`eval7`, run 2026-09-02). See
+re-scored on their own era** (`eval7`, run 2026-09-02); extended 2026-09-17 with
+**the 19 September runs** — 22 screens, the `long*` batches, and the eight
+generation-4 arms that carry the project's best object-level scores. See
 [PREDICTIONS.md](PREDICTIONS.md) for the numbers.
 The point of this file is that **the metrics outlive the weights**:
 `results.csv`, the training log and `curves.png` are kept for every run listed
@@ -814,6 +821,113 @@ attention arms are justified partly on that reading. The number is
 (table above in this file); its `obj F1` column is `—` and that checkpoint no
 longer exists. Nothing downstream was computed from it, so no result changes.
 
+## The September 2026 runs (19 runs + 22 screens)
+
+Everything here trains with **`adamw lr 3e-4 / weight_decay 1e-2`**, batch 64 × 2 accum
+(32 × 4 at k10) = **128 effective**, seed 42, `--amp`, `--save_best_only`, plateau
+schedule with `LR_PATIENCE=8`, `PATIENCE=0` (no early stop). That optimiser is not a
+preference: RMSprop at the historical `--momentum 0.999` diverges once AMP clipping is
+correct ([CORRECTNESS_FIXES.md](CORRECTNESS_FIXES.md), [EXPERIMENTS.md](EXPERIMENTS.md)
+`lrscan`).
+
+**These runs are not comparable with anything above.** Different optimiser, a corrected
+objective, and — from `th350` on — a different partition generation.
+
+### Generation 4, temporal k5 — `partition_temporal_k5_clean_th350x200`
+
+ctx50 (`--context_margin 50 50`, 300×200 in, 200×100 supervised), ring negatives
+1..10 at 1:1, `--augment_flips hv`. `--dropout_bottleneck 0.2` is on the ConvLSTM arms
+**only** — `train.py` refuses it on any other architecture, so the four arms are unmatched
+on that axis and it is worth saying so when reading them together.
+
+| Run | pos_w | epochs | best val/dice | @ep | obj F1 `ith0.7_b5` |
+|---|---|---|---|---|---|
+| `th350_tattn_ctx50_neg10` (816217) | 4 | 60 | 0.6970 | 15 | **0.7905** |
+| `th350_hybrid_ctx50_neg10` (816220) | 4 | 60 | **0.7065** | 9 | 0.7782 |
+| `th350_convlstm_ctx50_neg10` (816218) | 4 | 60 | 0.7035 | 15 | 0.7489 |
+| `th350_single_ctx50_neg10` (816219) | 4 | 60 | 0.6859 | 16 | 0.7535 |
+| `posw8_tattn_ctx50_25e` (182833) | 8 | 25 | 0.7010 | 18 | 0.7699 |
+| `posw8_convlstm_ctx50_25e` (182850) | 8 | 25 | 0.7040 | 19 | 0.7699 |
+| `posw8_hybrid_ctx50_25e` (182851) | 8 | 25 | 0.7023 | 17 | 0.7571 |
+| `posw8_single_ctx50_20e` (182834) | 8 | 20 | 0.7018 | 16 | 0.7676 |
+
+**Dice ranks this backwards again.** The hybrid tops the dice column and is second on F1;
+the ConvLSTM is third on dice and last on F1; the single-frame floor is last on dice at
+`pos_w` 4 and third on F1. Eight runs, one partition, one protocol — the cleanest
+demonstration of finding ② in the project.
+
+Timing, measured: over 60 epochs the three temporal arms are within **1.6 %** of each
+other (tattn 34,729 s, hybrid 34,752 s, convlstm 34,217 s), peak RSS 140.6 GB on a 256 GB
+request; single 22,875 s, 33.9 GB peak of a 96 GB request. **This contradicts `th350`'s
+own header**, which predicted attention ~2.3× faster than recurrence because the ConvLSTM
+serialises over T. At ctx50 it does not — and the hybrid pays no measurable penalty for
+carrying both mechanisms.
+
+### Generation 4, temporal k10 — `partition_temporal_k10_clean_th350x200`
+
+T=11, batch 32 × 4 accum, `pos_w` 8, 30 epochs.
+
+| Run | ctx | best val/dice | @ep | obj F1 `ith0.7_b5` |
+|---|---|---|---|---|
+| `posw8_single_k10_ctx50_30e` (254184) | 50×50 | **0.7060** | 15 | 0.7427 |
+| `posw8_tattn_k10_ctx50_30e` (254183) | 50×50 | 0.6986 | 11 | 0.7748 |
+| `posw8_single_k10_plain_30e` (269165) | — | 0.6613 | 21 | 0.7685 |
+| `posw8_tattn_k10_plain_30e` (316673) | — | 0.6786 | **29** of 30 | **0.7907** |
+
+The first and third rows are the context inversion: 0.045 dice apart in one direction,
+0.026 object F1 apart in the other. Scored on 17 scenes, **not** the k5 batch's 20.
+`posw8_tattn_k10_plain_30e` peaked at its second-to-last epoch and may be under-trained
+against the other three. Depth on identical scenes, and the attention probe of both
+tattn cells, are in [EXPERIMENTS.md](EXPERIMENTS.md) (`k10`).
+
+### Generation 3, temporal k5 — the `long*` batches (2026-09-09/10)
+
+`partition_temporal_k5_clean`, 60 epochs unless noted.
+
+> 🗑️ **All eight run directories and their six prediction directories were deleted
+> 2026-09-17**, by decision: generation 3 still carries the badly digitised scenes the
+> generation-4 threshold removes. The tables here, and the object scores in
+> [EXPERIMENTS.md](EXPERIMENTS.md) (`longgrid`), are the record. The launcher blocks that
+> defined them were never committed and are archived in
+> `docs/reference/submit_all_retired_2026-09-17.sh`.
+
+Six of the eight were scored at object level before deletion (`evallonggrid`): plain beat
+ctx50 in all three pairs. The dice below ranks every pair the other way.
+
+| Run | what it varies | best val/dice | @ep | note |
+|---|---|---|---|---|
+| `longgrid_tattn_ctx50` (769020) | attention + context | **0.7025** | 19 | 30 epochs |
+| `longreg_ring10` (697787) | ConvLSTM, ring 10, hv, drop 0.2 | 0.6988 | 16 | **stopped 19/60**, preempted, never requeued |
+| `longreg_aughv` (697785) | flips | 0.6972 | 16 | reached 52/60 |
+| `longsingle_ctx50` (721120) | single + context | 0.6900 | 23 | |
+| `longreg_noaug` (697786) | no flips | 0.6870 | 7 | **stopped 19/60**, same preemption |
+| `longgrid_convlstm_plain` (751271) | recurrence, no context | 0.6767 | 23 | |
+| `longgrid_tattn_plain` (811232) | attention, no context | 0.6734 | 25 | |
+| `longsingle_plain` (721118) | single, no context | 0.6658 | 21 | |
+
+`longreg_ring10` is the arm `th350_convlstm_ctx50_neg10` was built to be read against:
+the two are the same configuration differing **only** in the partition, which is what
+makes the label-quality threshold itself measurable rather than confounded with an
+architecture change.
+
+### The 22 screens — `outputs/screens/`
+
+8- or 20-epoch probes of one axis, kept so nobody re-runs the axis, and **never** to be
+read against a full-length run. `outputs/README.md` has the rule; the verdicts are in
+[EXPERIMENTS.md](EXPERIMENTS.md).
+
+| Batch | Date | Arms | What it settled |
+|---|---|---|---|
+| `lrscan` | 2026-09-07 | 6 | the divergence is the momentum, not the LR |
+| `adamscan` | 2026-09-08 | 5 | `adamw lr 3e-4` — and the top three are within the noise floor |
+| `dropscan` | 2026-09-08 | 4 | bottleneck dropout 0.1–0.2 is worth ~0.01 dice |
+| `lossscan` | 2026-09-08 | 3 | Jaccard ≥ Dice at both seeds, by ~0.006–0.007 |
+| `combo` | 2026-09-08 | 4 | context +0.041; **and the 0.011 identical-config noise floor** |
+
+`combo_ctx_p00_dup` is a duplicate submission of `combo_ctx_p00` whose weights were
+dropped and metrics kept. It is the only measurement of run-to-run variance this project
+has, and it is roughly twice the ±0.006 floor quoted throughout these docs.
+
 ## K10S — retired partition, INVALID RESULTS (`outputs/2026-08-03/`)
 
 | Run | dice | Verdict | Kept |
@@ -884,6 +998,14 @@ be touched. The same rule applies to the four runs of the 2026-08-11 batch.
 Applied 2026-08-11: the batch went from 11 GB to 2.1 GB (30 files: 13 `last.pt`,
 13 `resume.pt`, 4 `interrupted.pt`), and moved from the top level of `outputs/`
 into `outputs/2026-08-10/` to match the dated-archive convention.
+
+**The same rule protected the September runs until they were scored.** `evallonggrid`
+and `evalk10_tattn_ctx50` ran 2026-09-17, and the eight `long*` arms were then deleted
+outright rather than pruned — generation 3 is superseded. That deletion includes
+`longreg_ring10`, the matched twin that would have made the generation-4 label threshold
+measurable (it stopped at epoch 19 of 60, and its `resume.pt` is gone with it), so that
+comparison now needs a retrain on generation 3 if it is ever wanted.
+`posw8_tattn_k10_plain_30e` has since been scored (0.7907, the best k10 model); keep its `best.pt`.
 
 ## Evaluation outputs — `predictions/`
 

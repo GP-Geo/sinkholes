@@ -120,7 +120,24 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                         "amplifies each update by 1/(1-m) = 1000x at steady state. That was "
                         "survivable only while the AMP clipping bug crushed every gradient "
                         "to a fixed tiny norm; with unscaled-v2 clipping it is far too hot "
-                        "(activations blow up inside one epoch). PyTorch's own default is 0.")
+                        "(activations blow up inside one epoch). PyTorch's own default is 0. "
+                        "IGNORED unless --optimizer is rmsprop; adam/adamw use --beta1.")
+    p.add_argument("--optimizer", choices=["rmsprop", "adam", "adamw"], default="rmsprop",
+                   help="rmsprop is what every run in this project up to 2026-09-08 used, and "
+                        "the only setting its numbers are comparable across. Its momentum "
+                        "buffer is NOT bias-corrected, so the effective step is lr/(1-momentum) "
+                        "-- the amplification that made --momentum a step-size knob. adam and "
+                        "adamw bias-correct, so the update is O(1) whatever --beta1 is and the "
+                        "step is ~lr; that removes the coupling but makes no number comparable "
+                        "with an rmsprop run. adamw decouples weight decay, which is the only "
+                        "form in which --weight_decay means what the literature means by it.")
+    p.add_argument("--beta1", type=float, default=0.9,
+                   help="adam/adamw first-moment decay (the momentum analogue). Unlike RMSprop "
+                        "momentum this does NOT scale the step, because the moment is "
+                        "bias-corrected -- it sets the averaging window only.")
+    p.add_argument("--beta2", type=float, default=0.999,
+                   help="adam/adamw second-moment decay. The RMSprop counterpart is `alpha`, "
+                        "which this project has always left at PyTorch's 0.99 default.")
     p.add_argument("--epochs", "-e", type=int, default=5)
     p.add_argument("--batch_size", "-b", type=int, default=1)
     p.add_argument("--accum_steps", type=int, default=1,
@@ -148,6 +165,15 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                         "evaluation protocol are all unchanged -- only what surrounds each target")
     p.add_argument("--stride", type=int, default=2, help="strides per patch window")
     p.add_argument("--pos_w", type=float, default=1, help="BCE positive-class weight")
+    p.add_argument("--seg_loss", choices=["dice", "jaccard"], default="dice",
+                   help="the REGION term of the objective, added to BCE. 'dice' is every "
+                        "run before 2026-09-08. 'jaccard' (IoU) is the same quantity "
+                        "reparametrised -- J = D/(2-D) -- but a steeper penalty on the "
+                        "same error, so it trains differently. Binary only; --classes >1 "
+                        "keeps Dice. NOTE train/loss is NOT comparable across the two: "
+                        "jaccard reads higher at every identical prediction. Both terms "
+                        "are recorded every epoch (train/dice, train/jaccard) whichever "
+                        "is the objective, and val/dice and val/jaccard likewise")
     p.add_argument("--seed", type=int, default=None,
                    help="seed python/numpy/torch, incl. the interferogram shuffle")
 
@@ -239,6 +265,16 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                         f"used is written into the checkpoint, so it is restored on load "
                         f"whatever the default becomes later.")
     p.add_argument("--convlstm_kernel", type=int, default=3)
+    p.add_argument("--dropout_bottleneck", type=float, default=0.0,
+                   help="ConvLSTM U-Net only: drop this fraction of the recurrent summary's "
+                        "channels during training (Dropout2d on the final hidden state, "
+                        "before convlstm_proj). 0.0, the default, builds nn.Identity and is "
+                        "the network exactly as it was before this option existed -- so the "
+                        "fallback from the experiment is not passing the flag. Reach for it "
+                        "when train/loss keeps falling while val/loss turns up, which is "
+                        "what every corrected-optimiser arm does around epoch 10-14. "
+                        "0.1-0.2 is the usual range; above ~0.3 a 12x6 bottleneck loses "
+                        "more signal than it regularises.")
     p.add_argument("--tattn_unet", action="store_true",
                    help="temporal-attention U-Net (requires --add_temporal)")
     p.add_argument("--tattn_dim", type=int, default=0,
@@ -268,7 +304,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                         "attention selects on how frames DIFFER. Without it the shared "
                         "component swamps the frame-to-frame signal (0.09%% of the token "
                         "magnitude at init) and the softmax is uniform before training "
-                        "even starts -- see docs/ATTENTION_COLLAPSE.md")
+                        "even starts -- see docs/ATTENTION.md")
     p.add_argument("--tattn_qk_norm", action=argparse.BooleanOptionalAction, default=True,
                    help="unit-norm queries and keys and scale the logits by one learned "
                         "temperature, so selectivity stops depending on projection "
@@ -329,6 +365,24 @@ def build_model(args, device):
             f"(e.g. --k_prevs 2)."
         )
 
+    # --dropout_bottleneck names a place only this architecture has: the single
+    # tensor the ConvLSTM compresses the sequence into. Silently ignoring it
+    # elsewhere would put a run in the registry whose recorded flags do not
+    # describe the network that was trained.
+    if float(getattr(args, "dropout_bottleneck", 0.0)) > 0.0 and arch != "convlstm_unet":
+        raise SystemExit(
+            f"--dropout_bottleneck applies to the ConvLSTM U-Net's recurrent summary, "
+            f"but this run selects {arch!r}. Drop the flag, or pass --convlstm_unet."
+        )
+
+    # segmentation_loss raises on this too, but that would be one full dataset
+    # build and a GPU allocation later.
+    if getattr(args, "seg_loss", "dice") != "dice" and int(args.classes) > 1:
+        raise SystemExit(
+            f"--seg_loss {args.seg_loss} is implemented for binary segmentation only, "
+            f"but --classes is {args.classes}. The multiclass objective still uses Dice."
+        )
+
     per_timestep = 2 if args.treat_nodata_regions else 1
     if arch == "convlstm_unet":
         model = ConvLSTMUNet(
@@ -337,6 +391,7 @@ def build_model(args, device):
             bilinear=args.bilinear,
             convlstm_hidden_channels=args.convlstm_hidden,
             convlstm_kernel_size=args.convlstm_kernel,
+            dropout_bottleneck=args.dropout_bottleneck,
         )
     elif arch == "tattn_unet":
         model = TemporalAttentionUNet(
@@ -715,9 +770,35 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, batch_size=1,
                             num_workers=1, pin_memory=True)
 
-    optimizer = optim.RMSprop(model.parameters(), lr=args.lr,
-                              weight_decay=args.weight_decay,
-                              momentum=args.momentum, foreach=True)
+    # RMSprop is the historical path and stays bit-identical under the default.
+    #
+    # The two families are not interchangeable and the difference is the whole
+    # reason --optimizer exists. RMSprop's momentum buffer is a raw running sum,
+    # so at steady state it converges to grad/(1-momentum) and the effective step
+    # is lr/(1-momentum) -- 1000x at the historical 0.999, which is what made
+    # lr and momentum a single co-adapted knob and what diverged once the AMP
+    # clipping bug was fixed. Adam bias-corrects both moments, so m_hat/sqrt(v_hat)
+    # is O(1) regardless of beta1 and the step is ~lr. beta1 therefore sets the
+    # averaging window and NOT the step size, and --momentum has no meaning here.
+    optim_name = getattr(args, "optimizer", "rmsprop")
+    if optim_name == "rmsprop":
+        optimizer = optim.RMSprop(model.parameters(), lr=args.lr,
+                                  weight_decay=args.weight_decay,
+                                  momentum=args.momentum, foreach=True)
+    else:
+        # Refused rather than ignored. --momentum is an RMSprop knob; honouring a
+        # non-default silently under adam would hand back a run whose logged
+        # config says 0.99 and whose optimiser never read it.
+        if abs(float(args.momentum) - 0.999) > 1e-12:
+            raise SystemExit(
+                f"--momentum {args.momentum} is an RMSprop setting and --optimizer "
+                f"{optim_name} does not use it; pass --beta1 instead (currently "
+                f"{args.beta1}). Leave --momentum at its 0.999 default for adam/adamw."
+            )
+        factory = optim.AdamW if optim_name == "adamw" else optim.Adam
+        optimizer = factory(model.parameters(), lr=args.lr,
+                            betas=(args.beta1, args.beta2),
+                            weight_decay=args.weight_decay, foreach=True)
     # 'plateau' reacts to val/dice, so a noisy validation curve can trigger a cut
     # that has nothing to do with real progress; 'cosine' follows a fixed path and
     # keeps runs comparable. Both stop at --min_lr rather than decaying to nothing.
@@ -759,7 +840,8 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
     def loss_of(logits, images, true_masks, components=None):
         return segmentation_loss(logits, images, true_masks, n_classes=model.n_classes,
                                  treat_nodata_regions=args.treat_nodata_regions,
-                                 criterion=criterion, components=components)
+                                 criterion=criterion, components=components,
+                                 region_loss=args.seg_loss)
 
     n_train, n_val = len(train_set), len(val_set)
     rep = setup_logger(REPORTER_NAME) if args.reporter else None
@@ -810,7 +892,9 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
             channels = (
                 f"{model.n_channels_per_timestep} ch/timestep x T={args.k_prevs + 1} "
                 f"/ {model.n_classes} out (ConvLSTM hidden="
-                f"{model.convlstm_hidden_channels}, k={model.convlstm_kernel_size})"
+                f"{model.convlstm_hidden_channels}, k={model.convlstm_kernel_size}"
+                + (f", dropout={model.dropout_bottleneck:g}"
+                   if model.dropout_bottleneck else "") + ")"
             )
         elif args.tattn_unet:
             recurrence = (f", ConvLSTM hidden={model.convlstm_hidden_channels}"
@@ -837,6 +921,15 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
             batch_size=(f"{args.batch_size} x {accum} accum = {args.batch_size * accum} effective"
                         if accum > 1 else args.batch_size),
             learning_rate=args.lr,
+            # Stated because it changes what every other optimiser number means:
+            # under rmsprop the step is lr/(1-momentum), under adam/adamw it is ~lr.
+            optimizer=(f"rmsprop (momentum {args.momentum}, "
+                       f"effective step lr/(1-m) = {args.lr / (1 - args.momentum):.2g})"
+                       if getattr(args, "optimizer", "rmsprop") == "rmsprop"
+                       else f"{args.optimizer} (betas {args.beta1}/{args.beta2}, step ~lr)"),
+            weight_decay=(f"{args.weight_decay:g}"
+                          + (" (decoupled)" if getattr(args, "optimizer", "") == "adamw"
+                             else " (L2 into the gradient)")),
             patch_size=f"{args.patch_size[0]}x{args.patch_size[1]} (stride {args.stride})",
             channels=channels,
             target=(("union over stack (legacy)" if args.union_temporal_mask
@@ -852,12 +945,18 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                            f"{VAL_NEGATIVE_INNER}..{VAL_NEGATIVE_OUTER}, seed {args.seed})"
                            if args.add_val_negatives else "positives only"),
             pos_weight=args.pos_w,
+            objective=f"BCE + {args.seg_loss}",
             seed=args.seed,
             output_dir=outpath,
         )
-        columns = ["epoch", "time", "train/loss", "val/loss", "val/dice",
+        # val/dice and val/jaccard are a pair (per-sample, then meaned); val/IoU
+        # and val/F1 are the other pair (pooled over pixels). val/IoU is exactly
+        # val/F1/(2-val/F1) and so carries nothing new -- the per-sample mean
+        # does, because J is convex in D.
+        columns = ["epoch", "time", "train/loss", "val/loss", "val/dice", "val/jaccard",
                    "val/IoU", "val/F1", "val/P", "val/R", "lr",
-                   "train/bce", "train/dice", "grad/norm", "grad/clip%", "amp/scale"]
+                   "train/bce", "train/dice", "train/jaccard",
+                   "grad/norm", "grad/clip%", "amp/scale"]
         table = EpochTable(columns, rep, header_every=25)
         # Resuming keeps epochs 1..completed and appends from there; a fresh run
         # starts the file over exactly as before.
@@ -881,9 +980,10 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
     last_path = dir_checkpoint / "last.pt"
     resume_path = dir_checkpoint / RESUME_NAME
     config = run_config(args)
-    logging.info("patch preprocessing=%s; AOI selection=%s; gradient clipping=%s",
+    logging.info("patch preprocessing=%s; AOI selection=%s; gradient clipping=%s; "
+                 "region loss=%s",
                  config["preprocessing_version"], config["aoi_selection_version"],
-                 config["gradient_clipping"])
+                 config["gradient_clipping"], config["region_loss_dtype"])
     interrupted = False
     partial_epoch = None
     early_stopped = False
@@ -1045,6 +1145,8 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                 "train/loss": epoch_loss / max(n_batches, 1),
                 "val/loss": round(val_metrics["loss"], 6) if val_metrics and "loss" in val_metrics else float("nan"),
                 "val/dice": float(val_score),
+                "val/jaccard": (round(val_metrics["jaccard"], 6)
+                                if val_metrics and "jaccard" in val_metrics else float("nan")),
                 "val/IoU": round(val_metrics["iou"], 4) if val_metrics else float("nan"),
                 "val/F1": round(val_metrics["f1"], 4) if val_metrics else float("nan"),
                 "val/P": round(val_metrics["precision"], 4) if val_metrics else float("nan"),
@@ -1052,7 +1154,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                 "lr": optimizer.param_groups[0]["lr"],
             }
 
-            for key in ("bce", "dice"):
+            for key in ("bce", "dice", "jaccard"):
                 row[f"train/{key}"] = (round(float(loss_parts[key]) / max(n_batches, 1), 6)
                                        if key in loss_parts else float("nan"))
 

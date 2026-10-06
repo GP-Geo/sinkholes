@@ -3,9 +3,20 @@
 *Written 2026-09-03, from the ~1700 lines of commentary that used to live inside
 `scripts/submit_all.sh`. That file is now a launcher; this is the notebook.*
 
-A batch is listed here once it has run. **A batch that appears here is not in the
-launcher** — `submit_all.sh` carries only work that has never run, so
-`submit_all.sh <kind> --submit` can never silently repeat finished GPU-hours.
+A batch is listed here once it has run. The launcher's own rule is that
+**a batch that appears here is removed from it** — `submit_all.sh` carries only work that
+has never run, so `submit_all.sh <kind> --submit` can never silently repeat finished
+GPU-hours.
+
+> ⚠️ **That rule has drifted, as of 2026-09-17.** `lrscan`, `dropscan`, `lossscan`,
+> `adamscan`, `combo`, `th350`, `evalth350`, `posw8`, `evalposw8`, `k10`, `k10plain`,
+> `evalk10` and `evalk10plain` have all run and are all still in the launcher. Until they are
+> pruned, `--submit` on one of those kinds **would** repeat finished GPU-hours — the exact
+> failure the shield exists to prevent. Dry-run first (the default) and check this file
+> before submitting anything. `eval6ref`, `reg` and `momscan` are unrun; `k5plain` and
+> `k10plain45` were added on 2026-09-17. `longreg`, `longgrid` and `evallonggrid` **were** retired on 2026-09-17; their
+> blocks were never committed, so `git show` cannot recover them — they are archived in
+> [`reference/submit_all_retired_2026-09-17.sh`](reference/submit_all_retired_2026-09-17.sh).
 
 To recover the exact job definitions of any retired batch:
 
@@ -129,6 +140,288 @@ say nothing about either in absolute terms.
 
 ---
 
+## September 2026 — the correctness fix, and everything it forced
+
+The 2026-09-07 hotfix (`ab23b07`, [CORRECTNESS_FIXES.md](CORRECTNESS_FIXES.md)) made AMP
+gradient clipping unscale first. That one change invalidated the optimiser the whole
+project had been using, and the eight batches below are the consequences, in order.
+
+### `ampfix` (2026-09-07, 5 arms) — the batch that diverged
+
+The first batch on the corrected tree, re-baselining the temporal ConvLSTM. **Three of
+five arms diverged to NaN at epoch 2** and are kept as evidence under
+`outputs/failed_2026-09-07_ampfix_divergence/` (LSF 612826 / 612827 / 612828): epoch 1
+scored val/dice 0.469, epoch 2 val/loss `nan` and dice `1e-08`. The two survivors are in
+`outputs/2026-09-07/`.
+
+**The cause is the fix working.** RMSprop's momentum buffer is not bias-corrected, so at
+the historical `--momentum 0.999` the effective step is `lr/(1−m)` — a **1000×**
+amplification. That was survivable only while the AMP clipping defect was crushing every
+gradient to a fixed tiny norm. With correct clipping the real gradient arrives, gets
+multiplied by 1000, and the activations blow up inside one epoch. Nothing about the model
+changed; the optimiser had been running on a bug.
+
+### `lrscan` (2026-09-07, 6 × 8-epoch screens) — it was the momentum, not the LR
+
+`outputs/screens/2026-09-07/`. Four learning rates at `m=0.999`, plus `lr 1e-5` at
+`m=0.9` and `m=0.0`.
+
+| arm | best val/dice (8 ep) |
+|---|---|
+| `lr1e5_m999` | **0.0000** — diverged at epoch 6, reproducing `ampfix` |
+| `lr1e6_m999` | 0.6195 |
+| `lr1e7_m999` | 0.6262 |
+| `lr1e8_m999` | 0.5792 |
+| `lr1e5_m090` | **0.6661** |
+| `lr1e5_m000` | 0.6210 |
+
+**Verdict: lowering the LR does not recover it.** Three decades of LR at `m=0.999` all
+land at 0.58–0.63, while the *same* LR that diverged is the best arm in the batch once
+the momentum comes down to 0.9. The step-size amplification is the defect, and it is not
+reachable through `lr`.
+
+### `adamscan` (2026-09-08, 5 × 20-epoch screens) — the replacement optimiser
+
+`outputs/screens/2026-09-08/`. AdamW bias-corrects, so the step is ~`lr` whatever
+`--beta1` is, and `adamw` decouples the weight decay.
+
+| arm | best val/dice (20 ep) |
+|---|---|
+| `adamscan_lr3e4` | **0.6762** |
+| `adamscan_lr1e4` | 0.6719 |
+| `adamscan_lr1e4_wd1e2` | 0.6717 |
+| `adamscan_lr3e5` | 0.6530 |
+| `adamscan_lr1e5` | 0.6346 |
+
+**`adamw lr 3e-4 wd 1e-2` became the standard**, and every batch from 2026-09-09 on runs
+it. Note the spread across the top three is 0.0045 — inside the noise floor — so this
+picked a *region*, not a point. An `lr` carried over from an RMSprop preset is not the
+same step size; that is why the whole scan was needed rather than a translation.
+
+### `dropscan` / `lossscan` (2026-09-08, 7 × 20-epoch screens) — two small yeses
+
+| `dropscan` (ConvLSTM bottleneck Dropout2d) | best val/dice |
+|---|---|
+| `p00` | 0.6585 |
+| `p01` | 0.6690 |
+| `p02` | **0.6704** |
+| `p03` | 0.6648 |
+
+| `lossscan` (`--seg_loss`) | best val/dice |
+|---|---|
+| `dice_s7` | 0.6572 |
+| `jac_s7` | 0.6633 |
+| `jac_s42` | **0.6726** |
+
+Dropout 0.1–0.2 is worth ~0.01 dice over none; Jaccard is ahead of Dice at both seeds.
+Both are **screens**, both margins are ~1–2× the noise floor, and neither has an
+object-level score. `DROPOUT_BOTTLENECK=0.2` was carried into the long batches; `SEG_LOSS`
+stayed at `dice`.
+
+### `combo` (2026-09-08, 4 × 20-epoch screens) — and an accidental noise measurement
+
+| arm | best val/dice |
+|---|---|
+| `combo_ctx_p00` | **0.7017** |
+| `combo_ctx_p00_dup` | 0.6908 |
+| `combo_ctx_p02` | 0.6832 |
+| `combo_p00` | 0.6605 |
+
+Context is worth **+0.041 dice** over the plain geometry at otherwise identical settings,
+which is large for this project. Dropout on top of context is not — it costs 0.018.
+
+> ### ⚠️ The duplicate is the most important number in the batch
+>
+> `combo_ctx_p00` was submitted twice by accident (LSF 275654 / 275798). **Two runs of an
+> identical configuration differ by 0.0109 val/dice** — nearly twice the ±0.006 noise
+> floor every screen in `screens/` is being read against, and both peaked at epoch 7 of
+> 20. It was measured incidentally and has never been measured on purpose. **Half the
+> margins in this section are inside it.** Nothing has been re-read in light of it.
+
+### `longreg` / `longsingle` / `longgrid` (2026-09-09/10) — context at full length
+
+> 🗑️ **Deleted 2026-09-17.** All eight run directories and the six `evallonggrid`
+> prediction directories (~294 GB) were removed after scoring: generation 3 still contains
+> the badly digitised scenes the generation-4 threshold removes, so these runs are not
+> kept for decisions. This section is the record; nothing here can be re-scored.
+
+Sixty-epoch runs on `partition_temporal_k5_clean`, `adamw 3e-4 / wd 1e-2`, batch 64 × 2
+accum = 128 effective, seed 42.
+
+| run | best val/dice | @ epoch | note |
+|---|---|---|---|
+| `longreg_ring10` | 0.6988 | 16 | ConvLSTM ctx50, outer ring 10, hv, dropout 0.2 — **stopped at 19/60**, preempted and never requeued |
+| `longreg_aughv` | 0.6972 | 16 | reached 52/60 |
+| `longreg_noaug` | 0.6870 | 7 | **stopped at 19/60**, same preemption |
+| `longsingle_ctx50` | 0.6900 | 23 | single frame, context |
+| `longsingle_plain` | 0.6658 | 21 | single frame, no context |
+| `longgrid_tattn_ctx50` | **0.7025** | 19 | 30 epochs |
+| `longgrid_convlstm_plain` | 0.6767 | 23 | |
+| `longgrid_tattn_plain` | 0.6734 | 25 | |
+
+**Context replicates at full length and on a second architecture**: +0.024 dice on the
+single-frame pair, +0.029 on the tattn pair, against `combo`'s +0.041 at 20 epochs. That
+is three independent measurements of the same sign, which is more than any of them is
+worth alone. Flips (`hv`) are worth ~+0.010 — one noise floor.
+
+**Object-level scores (`evallonggrid`, 2026-09-17, LSF 316677–316682).** The six grid
+cells on the generation-3 clean test list (20 scenes), RTh protocol, best of four
+thresholds — the same list and convention as `eval6`:
+
+| architecture | plain F1 `ith0.7_b5` (P / R) | ctx50 F1 `ith0.7_b5` (P / R) | Δ context | `ith0.5_b10` plain → ctx50 |
+|---|---|---|---|---|
+| single | 0.7167 (0.751 / 0.685) | 0.7089 (0.832 / 0.618) | −0.008 | 0.8400 → 0.8377 |
+| convlstm | 0.7437 (0.778 / 0.712) | 0.7196 (0.829 / 0.636) | −0.024 | 0.8743 → 0.8475 |
+| tattn | **0.7498** (0.793 / 0.711) | 0.7212 (0.847 / 0.628) | **−0.029** | 0.8759 → 0.8618 |
+
+> **At the object level context loses in all three pairs, and dice ranked every pair
+> backwards.** It buys +0.05 to +0.08 precision and costs −0.07 to −0.08 recall on every
+> architecture, and the recall loss wins. That is the same trade the k10 single-frame pair
+> shows on generation 4 ([`k10`](#k10--k10plain-2026-09-1617-4-arms--depth-helps-attention-context-costs-recall)),
+> so the inversion is not a k10 or single-frame effect. The "+0.024 / +0.029" context gains
+> above are patch dice only.
+
+> ⚠️ **Superseded as a basis for decisions, 2026-09-17.** These runs train and score on the
+> generation-3 partition, which still contains the badly digitised scenes the generation-4
+> 350N/200S threshold removes ([`assets/PARTITIONS.md`](../assets/PARTITIONS.md)). Their
+> absolute F1s sit below every generation-4 batch and are not comparable with them. What
+> they still show is the *within-pair* direction of context, measured on one shared list.
+
+### `th350` (2026-09-10, 4 arms) — the first generation-4 batch, and the best F1 on record
+
+Four architectures on `partition_temporal_k5_clean_th350x200` — generation 4, the
+label-quality threshold ([`assets/PARTITIONS.md`](../assets/PARTITIONS.md)) — at ctx50,
+ring negatives out to 10, `hv` flips, `adamw 3e-4 / wd 1e-2`, pos_w 4, 60 epochs.
+Scored by `evalth350` on 20 test scenes, RTh protocol, best of four thresholds.
+
+| arm | obj F1 `ith0.7_b5` | P / R | obj F1 `ith0.5_b10` | val/dice |
+|---|---|---|---|---|
+| `th350_tattn_ctx50_neg10` | **0.7905** | 0.869 / 0.725 | **0.8888** | 0.6970 |
+| `th350_hybrid_ctx50_neg10` | 0.7782 | 0.866 / 0.706 | 0.8737 | 0.7065 |
+| `th350_single_ctx50_neg10` | 0.7535 | 0.859 / 0.671 | 0.8800 | 0.6859 |
+| `th350_convlstm_ctx50_neg10` | 0.7489 | 0.879 / 0.652 | 0.8729 | 0.7035 |
+
+All four peak at **RTh 0.125**, the bottom of the sweep — so, exactly as in `eval6`,
+every F1 here is a **lower bound**.
+
+> ### ⚠️ These numbers are NOT comparable with `eval6`, `eval7` or anything earlier
+>
+> The generation-4 scene list is **not** the generation-3 one: 17 of 20 overlap, 3 are
+> added (no 10-previous chain, so k10 could never hold them) and 3 dropped (346/343/339
+> positives, just under the cut). Both lists happen to score 20 scenes; they are not the
+> same 20, and a mean over different scenes is not a comparison.
+>
+> **What the swap is worth was measured**: re-averaging the three finished generation-3
+> ctx50 runs over only the above-threshold scenes moves object F1 by **+0.013 to +0.024**
+> at every RTh, for all three models. That is a level shift from an easier list, not model
+> quality — and it is the *only* term in the September-vs-August gap that has been
+> isolated. These arms also change the optimiser, the objective (both correctness fixes),
+> the geometry and the ring radius. Do not attribute the rest.
+>
+> Within this table the comparison is clean: same partition, same protocol, same 20 scenes.
+
+**Two results the earlier batches did not give.** Attention is **+0.042 F1 over
+recurrence** and +0.037 over the single-frame floor — the first time on this project that
+attention has beaten a ConvLSTM on ground where both were trained identically, and it
+reverses `eval6`'s finding ② on a different partition. And the gain is **recall**
+(0.725 vs 0.652) at equal precision, which is the axis recurrence was supposed to own.
+`val/dice` ranks this table backwards again: the ConvLSTM is second on dice and last on
+F1.
+
+**Arm 2 was designed to measure the threshold itself** — `th350_convlstm_ctx50_neg10` is
+`longreg_ring10`'s configuration exactly, differing only in the partition. Dropout 0.2 is
+on that arm only, because `--dropout_bottleneck` is refused on any other architecture;
+the four are unmatched on that axis and it is worth saying so when reading them together.
+
+### `posw8` (2026-09-14, 4 arms) — buying recall with the class weight
+
+The same four architectures, the same partition, protocol and 20 scenes, with `pos_w 8`
+and 20–25 epochs instead of 60.
+
+| arm | obj F1 `ith0.7_b5` | P / R | obj F1 `ith0.5_b10` | Δ F1 vs its `th350` twin |
+|---|---|---|---|---|
+| `posw8_tattn_ctx50_25e` | 0.7699 | 0.850 / 0.704 | **0.8898** | −0.021 |
+| `posw8_convlstm_ctx50_25e` | 0.7699 | 0.862 / 0.696 | 0.8870 | **+0.021** |
+| `posw8_single_ctx50_20e` | 0.7676 | 0.850 / 0.700 | 0.8875 | +0.014 |
+| `posw8_hybrid_ctx50_25e` | 0.7571 | 0.868 / 0.671 | 0.8803 | −0.021 |
+
+**Verdict: `pos_w` 8 compresses the batch rather than lifting it.** The four arms land
+within 0.013 F1 of each other, against a 0.042 spread at `pos_w` 4 — the weight buys the
+weaker arms the recall they were missing (ConvLSTM +0.044 recall, single +0.029) and
+costs the leader precision. The architecture ranking that `th350` established **does not
+survive the weight change**, which means it is a property of the operating point, not of
+the models. Under the soft tolerance the ordering is different again.
+
+The recall lever this batch spent GPU-hours on was also available for free: re-reading
+the saved confidence maps at RTh 0.125 instead of 0.25 buys tattn +0.018 recall for
+−0.005 precision, and `eval-outputs` had already written all four thresholds.
+
+### `k10` / `k10plain` (2026-09-16/17, 4 arms) — depth helps attention, context costs recall
+
+`partition_temporal_k10_clean_th350x200` — 74 / 10 / 17 interferograms and 27,191 train
+positives, against k5's 100 / 11 / 20 and 35,558 — at T=11, `pos_w` 8, 30 epochs,
+`adamw 3e-4 / wd 1e-2`, ring 1–10, `hv`. tattn at batch 32 × 4, single at 64 × 2, both
+128 effective. A 2×2 over {single, tattn} × {plain, ctx50}. Scored by `evalk10` on the 17
+k10 test scenes (LSF 303197–303199) — **a different denominator from the k5 tables above.**
+
+| arm | obj F1 `ith0.7_b5` | P / R | obj F1 `ith0.5_b10` | val/dice @ epoch |
+|---|---|---|---|---|
+| `posw8_tattn_k10_ctx50_30e` | 0.7748 | 0.858 / 0.706 | 0.8870 | 0.6986 @ 11 |
+| `posw8_single_k10_plain_30e` | 0.7685 | 0.789 / 0.749 | 0.8798 | 0.6613 @ 21 |
+| `posw8_single_k10_ctx50_30e` | 0.7427 | 0.871 / 0.647 | 0.8735 | 0.7060 @ 15 |
+| `posw8_tattn_k10_plain_30e` | **0.7907** | 0.819 / 0.764 | **0.9056** | 0.6786 @ **29** of 30 |
+
+`tattn_k10_plain` peaked at its second-to-last epoch and may be under-trained relative to
+the other three (best epochs 11–21): a win for it at object level is robust to that, a
+loss is not.
+
+**Depth, on identical scenes.** The 17 k10 test scenes are a strict subset of the k5
+generation-4 list, so the k5 `posw8` arms can be re-averaged over exactly these 17 from
+their saved per-scene results — no new job:
+
+| arm | k5 `posw8`, same 17 scenes | k10 | Δ |
+|---|---|---|---|
+| tattn ctx50 | 0.7681 (0.858 / 0.696) | 0.7748 (0.858 / 0.706) | +0.007 |
+| single ctx50 | 0.7609 (0.850 / 0.689) | 0.7427 (0.871 / 0.647) | −0.018 |
+| **tattn − single** | +0.007 | **+0.032** | |
+
+k10 trains on 24% fewer positives. The single-frame arm, which cannot use the extra
+history, loses 0.018 to that cut; the attention arm, under the same cut, gains 0.007. So
+the temporal edge — attention over the single frame at matched data and context — widens
+from +0.007 at k5 to +0.032 at k10. Each per-arm Δ is inside the 0.011 duplicate spread
+(`combo`), so the widening edge is the reading, and it is one partition and one seed. For
+scale, `th350_tattn_ctx50_neg10` (k5, `pos_w` 4) scores 0.7863 on the same 17 scenes and
+is still the best model on them.
+
+> **Context costs recall, and dice gets it backwards.** The plain single-frame arm is
+> 0.045 val/dice behind the ctx50 arm and 0.026 object F1 ahead: context trades 0.102
+> recall for 0.082 precision. The `longgrid` object scores show the same trade on all
+> three architectures at k5 on generation 3, so it is neither a depth nor a single-frame
+> effect — the earlier k5 "context helps" evidence was patch dice only. With history the
+> loss is mostly bought back: ctx50 attention sits +0.006 over the plain single frame.
+> **The plain attention cell completes the 2×2 and is the best k10 model** (`evalk10plain`,
+> LSF 330515): **0.7907**, 0.016 over ctx50 attention, again on recall (0.764 vs 0.706).
+> Context has now lost in five of five pairs. History helps at both geometries — attention
+> over the single frame is +0.022 plain and +0.032 ctx50 — and context costs attention less
+> (−0.016) than it costs the single frame (−0.026). On the same 17 scenes plain k10
+> attention also edges the overall leader `th350_tattn_ctx50_neg10` (0.7863), by less than
+> the noise. It never cut its learning rate in 30 epochs and peaked at 29: `k10plain45`
+> retrains it for 45 epochs at `LR_PATIENCE=5`.
+
+**Attention at k10** (probed 2026-09-17 on the same 480 val patches for both tattn cells;
+[ATTENTION.md](ATTENTION.md#k10-history-carries-the-recall)).
+Both select — 2.6 and 2.5 of 11 frames, 23% of uniform against 53% untrained, temperature
+~10. The ctx50 model depends on its history far more than the k5 generation-4 runs did:
+masking it costs −0.044 patch Dice (−0.004 for `posw8_tattn_ctx50_25e`), and the loss is
+recall, 0.834 → 0.666 — the history is what recovers the recall context costs, which is
+the object-level +0.059 recall over the ctx50 single frame. *Which* frames it picks barely
+matters with context (forced uniform +0.002); at plain it matters more than the history
+itself (−0.022 vs −0.013). Both models put heavy weight on the oldest frame in the window,
+110 days back — a hint that deeper history may pay, which only a run trained deeper can
+test.
+
+---
+
 ## Evaluation batches
 
 | Kind | What | Status |
@@ -139,8 +432,14 @@ say nothing about either in absolute terms.
 | `eval6` | **all 19 runs of 2026-08-20**, RTh protocol | done 2026-09-01, LSF 984720–984749 |
 | `probe` | selectivity of all 12 attention arms | done 2026-09-02 |
 | `eval7` | the 11 `pre23` arms on their own era | done 2026-09-02, LSF 261436–261464 |
-| `eval6ref` | 4 positives-only anchors | **LIVE** |
+| `eval6ref` | 4 positives-only anchors | **LIVE — unrun** |
 | `evallong200` | long200 on the `eval6` protocol | done 2026-09-07, LSF 580743 — **0.7529 vs 0.780** |
+| `evalampfix` / `evalctx` | the corrected-tree arms, and context at `DATA_STRIDE=2` | done 2026-09-07 |
+| `evalth350` | the 4 generation-4 arms, 20 scenes, RTh | done 2026-09-14, LSF 816217–816220 — **tattn 0.7905** |
+| `evalposw8` | the same 4 at `pos_w` 8 | done 2026-09-15, LSF 182833–182851 |
+| `evalk10` | the 3 k10 arms, 17 scenes | done 2026-09-17, LSF 303197–303199 — **tattn ctx50 0.7748** |
+| `evalk10plain` | the 4th k10 cell, `posw8_tattn_k10_plain_30e` | done 2026-09-17, LSF 330515 — **0.7907, the best k10 model** |
+| `evallonggrid` | object scores for the 6 `longgrid`/`longsingle` arms | done 2026-09-17, LSF 316677–316682 — plain beats ctx50 in all 3 pairs; runs and predictions **deleted** the same day |
 
 ### `eval6` (2026-09-01)
 

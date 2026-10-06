@@ -209,3 +209,79 @@ def test_export_writer_keeps_date_fields(tmp_path):
     for path in (shp, gpkg):
         check_like_prepare_patches(path, {"20250329_20250409": 2})
     assert sqlite3.connect(gpkg).execute("pragma user_version").fetchone()[0] == 10200
+
+
+def test_prediction_crop_maps_canvas_to_raw_window():
+    """canvas (r, c) is raw (row_off + r, col_off + c); outside the canvas -> nodata."""
+    import dataclasses
+
+    from sinkholes.relabel.common import SceneGeometry
+    from sinkholes.relabel.predictions import NODATA, crop_canvas
+
+    geo = SceneGeometry("x", "North", 0, 0, 1, 1, 100, 100, row_off=10, col_off=20,
+                        canvas_x0=20, canvas_y0=-10, nominal_x0=20, nominal_y0=-10)
+    canvas = np.arange(30 * 40, dtype=np.float32).reshape(30, 40)
+    window = (15, 45, 25, 30)                              # raw rows 15..45, cols 25..30
+    out = crop_canvas(canvas, geo, window)
+    np.testing.assert_array_equal(out[:25], canvas[5:30, 5:10])   # canvas rows 5..29
+    assert (out[25:] == NODATA).all()                             # raw rows 40..44: no canvas
+    shifted = crop_canvas(canvas, dataclasses.replace(geo, row_off=11), window)
+    assert not np.array_equal(shifted, out)
+
+
+def test_detect_changes_survives_emptied_geometry():
+    """QGIS can leave a row with an empty geometry; it is a flagged removal, not a crash."""
+    I = "20250101_20250112"
+    O = _orig([sq(0, 0), sq(10, 0)])
+    W = _work([(f"{I}_O0", f"{I}_O0", "modified", None),            # emptied, no live piece
+               (f"{I}_O1", f"{I}_O1", "modified", None),            # emptied ...
+               ("piece", f"{I}_O1", "modified", sq(10, 0, 0.5))])   # ... but a split piece lives
+    changes, _ = d.detect_changes(O, W)
+    by = {(c["change_type"], c["orig_uid"]): c for c in changes}
+    assert by[("DEL", f"{I}_O0")]["needs_review"]
+    assert by[("MOD", f"{I}_O1")]["feat_uid"] == "piece"
+
+
+def test_flags_are_not_changes_and_get_stable_ids(tmp_path):
+    I = "20250101_20250112"
+    O = _orig([sq(0, 0), sq(10, 0)])
+    W = _work([(f"{I}_O0", f"{I}_O0", "unchanged", sq(0, 0)),
+               (f"{I}_O1", f"{I}_O1", "unchanged", sq(10, 0))])
+    W["qc_flag"] = [None, "noisy_large"]
+    W["qc_note"] = [None, "decorrelated"]
+    changes, detected = d.detect_changes(O, W)
+    assert changes == [] and detected[f"{I}_O1"] == "unchanged"      # a flag is not an edit
+    flags = d.flag_items(W)
+    reg = tmp_path / "reg.csv"
+    d.assign_ids(changes + flags, reg)
+    fid = flags[0]["change_id"]
+    assert fid.startswith(f"{I}_FLAG_")
+    flags2 = d.flag_items(W)
+    d.assign_ids(flags2, reg)
+    assert flags2[0]["change_id"] == fid                             # stable across runs
+    W.loc[1, "edit_status"] = "deleted"
+    assert d.flag_items(W) == []                                     # moot on a deleted polygon
+
+
+def test_migrate_adds_fields_without_touching_rows(tmp_path, monkeypatch):
+    import sqlite3
+    from types import SimpleNamespace
+
+    from sinkholes.relabel import migrate
+    from sinkholes.relabel.common import write_gt
+
+    ws = tmp_path / "ws"
+    (ws / "gt").mkdir(parents=True)
+    (ws / "history").mkdir()
+    g = _work([("a", "a", "unchanged", sq(0, 0)), ("b", None, "added", sq(5, 0))])
+    write_gt(g, ws / "gt" / "gt_test_working.gpkg", layer="working_gt")
+    before = gpd.read_file(ws / "gt" / "gt_test_working.gpkg", layer="working_gt")
+    monkeypatch.setattr(migrate, "qgis_running", lambda: False)
+    migrate.main(SimpleNamespace(workspace=str(ws)))
+    after = gpd.read_file(ws / "gt" / "gt_test_working.gpkg", layer="working_gt")
+    assert {"qc_flag", "qc_note"} <= set(after.columns)
+    assert after.drop(columns=["qc_flag", "qc_note"]).equals(before)
+    assert list((ws / "history").glob("*before_migrate*"))
+    migrate.main(SimpleNamespace(workspace=str(ws)))                 # idempotent
+    con = sqlite3.connect(ws / "gt" / "gt_test_working.gpkg")
+    assert [r[1] for r in con.execute("PRAGMA table_info(working_gt)")].count("qc_flag") == 1

@@ -1,12 +1,14 @@
 # `outputs/` — what is kept, what is prunable, and what pruning costs
 
-*Written 2026-09-03. `sinkholes/inference/outputs.py:226` points here.*
+*Written 2026-09-03, last checked 2026-09-17. `sinkholes/inference/outputs.py:226` points
+here.*
 
-Three trees, one naming convention, and one rule about what may be deleted.
+Four trees, one naming convention, and one rule about what may be deleted.
 
 | Tree | Holds |
 |---|---|
 | `outputs/<date>/` | **training runs**, one per model, grouped by the day it trained |
+| `outputs/screens/<date>/` | **screens** — 8/20-epoch probes, not models (since 2026-09-09) |
 | `outputs/predictions/` | **full-scene evaluations**, one directory per evaluated model |
 | `outputs/predictions_positives/` | **positives-only evaluations**, the paper's protocol |
 
@@ -76,6 +78,47 @@ fields, 0 differences.**
 `resume.pt` is only a requeue key — `--resume auto` globs
 `outputs/*_lsf_$LSB_JOBID` — so it is dead weight once a batch is settled and
 its runs have been filed under a dated folder.
+
+### Applied 2026-09-09
+
+`outputs/` went **885 GiB → 594 GiB**: **290.5 GiB** across **280 files** —
+140 `_image.npy` and 140 `_pred_th.npy` — from the **seven** evaluation
+directories written since the 2026-09-03 sweep, plus 821 MB of duplicate
+weights (below). Everything else in `predictions/` had already been pruned by
+that sweep and was untouched.
+
+Both guards above were applied and both held: no directory was missing its
+`olm_results*.json` (0 skipped), and every `_pred.npy` / `_gt.npy` survived —
+verified after the sweep by re-counting, with `pred` and `gt` equal in all 42
+directories and every metrics JSON and `*_overview.png` present.
+
+The seven were the two ctx50 arms (two evaluation directories each: the
+stride-4 `rth` run and the stride-2 `prob_s2` run), `ampfix_t5_single_ring3_200e`,
+`long200_t5_convlstm_ring3_200e`, and `temporal_k5_pre2023_convlstm_ring3`.
+They were expensive to hold because a ctx50 `_image.npy` is a **300×200** input
+stack rather than 200×100 — ~46 GiB per directory against ~13 GiB for a plain
+one.
+
+Filed the same day: 31 runs off the top level, 22 of them into the new
+`outputs/screens/` tree. `outputs/README.md` has the mapping, the
+`combo_ctx_p00` duplicate, and why the `ampfix_`/`long200_` prefixes stayed on
+the four renamed evaluation directories.
+
+### Not applied since: the eleven September evaluation directories
+
+As of 2026-09-17 the generation-4 evaluation directories are **unpruned** — **205
+`_image.npy` and 205 `_pred_th.npy`** across eleven directories (four `th350`, four
+`posw8` k5, three `posw8_*_k10`). Ten of the eleven are `ctx50`, where an `_image.npy` is
+a **300×200** input stack rather than 200×100 — ~46 GiB per directory against ~13 GiB for
+a plain one. The exception is `posw8_single_k10_plain_30e`.
+
+> **The first guard fires here, and it matters.**
+> `posw8_tattn_k10_ctx50_30e_…_lsf_254183` holds **11 of 17** scenes and **no
+> `olm_results_*.json`** — it is an evaluation still in flight (`evalk10_tattn_ctx50`).
+> Do not prune inside it, and do not read a score out of it.
+
+Everything else in `predictions/` was already pruned by the 2026-09-03 and 2026-09-09
+sweeps.
 
 ---
 

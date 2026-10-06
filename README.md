@@ -19,14 +19,17 @@ pip install -e . && sinkholes <command>
 | `prepare-patches` | cut `.unw` scenes + GT polygons into aligned patch grids |
 | `count-positives` | fill per-interferogram positive-patch counts into the dictionary |
 | `clean-patches` | optional QC: drop no-data / edge-sliver mask polygons |
+| `merge-lidar` | merge the per-year LiDAR coverage shapefiles into one |
 | `make-partition` | write a reproducible train/val partition JSON |
+| `make-benchmark-partitions` | write the geo/temporal benchmark partitions (AOI + cut) |
 | `prepare-local-subset` | make a partial patch download training-ready |
-| `train` | train UNet / UNet+attention / AttentionUNet / ConvLSTM U-Net |
-| `test-patches` | patch-level metrics on a run's pickled test split |
+| `train` | train UNet / UNet+attention / AttentionUNet / ConvLSTM / temporal-attention U-Net |
+| `test-patches` | patch-level metrics on a pickled split **or** a partition JSON |
 | `eval-scenes` | full-scene reconstruction → confidence maps, polygons, arrays |
 | `eval-outputs` | object-level metrics + figures over saved eval-scenes outputs |
 | `predict` | predict polygons on new raw `.unw` scenes (no ground truth) |
 | `inspect-run` | learning curve + decision-threshold sweep for a finished run |
+| `attention-probe` | where a `tattn_unet`'s attention lands over a long, gappy history |
 | `curves` | regenerate `curves.png` for a finished run |
 | `architectures` | list the registered model architectures |
 
@@ -42,6 +45,9 @@ Where to look for what:
 | What did each batch settle? | [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) |
 | The object-level numbers | [`docs/PREDICTIONS.md`](docs/PREDICTIONS.md) |
 | Per-run registry, and attention selectivity | [`docs/MODEL_RUNS.md`](docs/MODEL_RUNS.md) |
+| Which partition file, and why | [`assets/PARTITIONS.md`](assets/PARTITIONS.md) |
+| How does the temporal attention work, and does it select? | [`docs/ATTENTION.md`](docs/ATTENTION.md) |
+| Which published numbers a correctness fix moved | [`docs/CORRECTNESS_FIXES.md`](docs/CORRECTNESS_FIXES.md) |
 | What is on disk, what is safe to delete | [`docs/OUTPUTS.md`](docs/OUTPUTS.md) |
 | How to run a stage | [`docs/PIPELINE.md`](docs/PIPELINE.md) |
 
@@ -57,7 +63,8 @@ sinkholes/            the package
 ├── meta.py           interferogram metadata + 11-day temporal chains
 ├── normalise.py      phase normalisation and the 0.5 no-data convention
 ├── polygons.py       masks ↔ polygons, pixel → lon/lat
-├── models/           UNet, AttentionUNet, ConvLSTM U-Net + checkpoint factory
+├── models/           UNet, AttentionUNet, ConvLSTM + temporal-attention U-Net,
+│                    and the checkpoint factory that detects which is which
 ├── dataprep/         patchify, the dataset, partitioning, prep commands
 ├── training/         losses, the training loop, evaluation, run reporter
 └── inference/        shared scene reconstruction + the evaluation/predict commands
@@ -65,7 +72,8 @@ scripts/              cluster-side wrappers — the package does the work
 ├── submit_all.sh     the shield in front of bsub; only jobs that never ran
 ├── tidy_outputs.sh   file a finished run under outputs/<date>/ with its proper name
 ├── train/            LSF templates, one per architecture
-├── eval/             run_eval.sh (2-stage scoring), rescore.sh, run_probe.sh
+├── eval/             run_eval.sh (2-stage scoring), run_eval_positives.sh,
+│                    rescore.sh, run_probe.sh
 ├── data/             patch generation and dataset verification
 └── viewer/           interferogram viewer
 assets/               committed data assets (intf_coord.json, partitions, LiDAR coverage)
@@ -109,7 +117,9 @@ python -m sinkholes eval-scenes --model outputs/smoke_<ts>/checkpoints/best.pt \
 ```
 
 Every evaluation command detects the architecture from the checkpoint's weights, so
-UNet, AttentionUNet and ConvLSTM checkpoints all load with no extra flag.
+UNet, AttentionUNet, ConvLSTM and temporal-attention checkpoints all load with no extra
+flag — and so does the patch geometry, including the large-context runs' `300×200` input
+with its `200×100` target (`io_geometry`, see `docs/PIPELINE.md`).
 
 ## Tests
 

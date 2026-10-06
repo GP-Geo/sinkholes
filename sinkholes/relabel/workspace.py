@@ -23,6 +23,7 @@ from .common import (
     GPKG_OPTIONS,
     write_gt,
     EDIT_STATUSES,
+    QC_FIELDS,
     LAYOUT,
     METRIC_CRS,
     OFFICIAL_PARTITION,
@@ -166,9 +167,8 @@ def build_working_layer(orig):
     work = orig.drop(columns=["area_m2"]).copy()
     work.insert(0, "feat_uid", work["orig_uid"])
     work["edit_status"] = EDIT_STATUSES[0]
-    for col in ("edit_reason", "edit_notes", "edited_by", "edit_timestamp"):
+    for col in ("edit_reason", "edit_notes", "edited_by", "edit_timestamp", *QC_FIELDS):
         work[col] = None
-    for col in ("edit_reason", "edit_notes", "edited_by", "edit_timestamp"):
         work[col] = work[col].astype("object")
     return work
 

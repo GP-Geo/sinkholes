@@ -63,6 +63,22 @@ GEN="${GEN:-2}"             # PARTITION GENERATION -- assets/PARTITIONS.md.
                             #     LiDAR epoch. The generation-3 temporal test
                             #     split is 0 of 22 -- every scene falls back to
                             #     LiDAR2022 and carries that false-positive load.
+                            # th350 = partition_<group>_clean_th350x200.json,
+                            #     generation 3 with the 350N/200S label-quality
+                            #     threshold applied to EVERY split, test
+                            #     included -- so the scored scenes are the ones
+                            #     that cleared the same bar the training targets
+                            #     did. Same generator, cut, AOI and seed as
+                            #     generation 3, so it carries an aoi_window too.
+                            #     ONLY temporal_k5 exists in this family.
+                            #     ITS SCENE LIST IS NOT GENERATION 3's: 17 of the
+                            #     20 overlap, it adds 3 that k10 has no chain
+                            #     depth for, and it drops 3 that sit below the
+                            #     threshold. A th350 number and a generation-3
+                            #     number are means over different scenes and are
+                            #     NOT comparable -- see the evalth350 block in
+                            #     submit_all.sh for what that is worth (+0.046
+                            #     F1 on measured data, none of it model quality).
                             # Generations are NOT comparable: different scene
                             # lists AND different scored ground.
 DATA_STRIDE="${DATA_STRIDE:-2}"  # strides per patch of the reconstruction grid.
@@ -154,10 +170,11 @@ cd "$REPO" || { echo "cannot cd to $REPO" >&2; exit 1; }
 # (sinkholes/inference/scenes.py). To evaluate a TEST split we therefore point
 # it at the _testeval variant, whose "val" is exactly the parent's "test" list.
 case "$GEN" in
-  2)   GEN_SUFFIX="" ;;
-  3)   GEN_SUFFIX="_clean" ;;
-  p23) GEN_SUFFIX="_pre2023" ;;
-  *)   echo "GEN must be 2, 3 or p23, got '$GEN'" >&2; exit 1 ;;
+  2)     GEN_SUFFIX="" ;;
+  3)     GEN_SUFFIX="_clean" ;;
+  p23)   GEN_SUFFIX="_pre2023" ;;
+  th350) GEN_SUFFIX="_clean_th350x200" ;;
+  *)     echo "GEN must be 2, 3, p23 or th350, got '$GEN'" >&2; exit 1 ;;
 esac
 case "$SPLIT" in
   val)  PARTITION="assets/partition_${GROUP}${GEN_SUFFIX}.json" ;;
@@ -183,10 +200,11 @@ esac
 #
 # Generation 2 carries no window; load_partition_window returns None and the
 # whole canvas is scored, which is how those numbers were produced. p23 is
-# generation 3's generator with a truncated archive, so it carries the same
-# per-split window and takes the same flags.
+# generation 3's generator with a truncated archive, and th350 is the same
+# generator with a positive-count threshold, so both carry the same per-split
+# window and take the same flags.
 AOI_FLAGS=()
-if [ "$GEN" = 3 ] || [ "$GEN" = p23 ]; then
+if [ "$GEN" = 3 ] || [ "$GEN" = p23 ] || [ "$GEN" = th350 ]; then
   AOI_FLAGS=(--aoi_from_partition "$PARTITION" --aoi_split val)
 fi
 

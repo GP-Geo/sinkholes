@@ -142,6 +142,8 @@ relabel_temporal_test_v2/
     gt_test_working.gpkg    EDIT THIS: working_gt
     aux_context.gpkg        aoi_window, predictable_area, lidar2022_gate, scene_rasters_extent
   rasters/                <intf>_int_aoi.tif (label on these), <intf>_int_full.vrt
+  predictions/<model>/    <intf>_conf.tif: a model's saved confidence, same grid as rasters/
+                          (second pass only; OFF in the project), model.json
   qgis/                   relabel_test_v2.qgz, goto_scene.py
   history/                automatic snapshots of the working gpkg (every diff/export/review)
   changes/                change_registry.csv, gt_changes_v2.gpkg, change_list.csv,
@@ -210,7 +212,7 @@ refuses to switch scenes while there are unsaved edits. Without the console, set
 filter `"intf_id" = '…'` on both label layers, set the project variable `relabel_intf`
 (Project → Properties → Variables), and tick the scene's raster.
 
-**Layers.**
+**Layers.** The QGIS project stacks them in this order (top first):
 
 - **working_gt** (editable), styled by `edit_status`:
   - yellow: unchanged
@@ -233,9 +235,14 @@ filter `"intf_id" = '…'` on both label layers, set the project variable `relab
   because redrawing loses `orig_uid`. Status becomes `modified` by itself; choose a reason.
 - **Delete** a false label. **Don't press Delete.** Set `edit_status = deleted` and a reason.
   A hard delete is still detected, but it carries no reason.
-- **Split.** Use Split Features; the pieces keep `orig_uid`. The diff keeps the largest
+- **Split.** Use Split Features; the pieces keep `orig_uid` and each gets a fresh
+  `feat_uid` (the project sets the field's split policy; the first session's project
+  copied it). The diff keeps the largest
   piece as the modification and reports the others as additions "split from …". Reason:
   `split`.
+- **Don't empty a polygon.** Delete Part on a polygon's last part leaves a row with no
+  geometry. To remove a polygon, set `edit_status = deleted`. (This happened in the first
+  session; `diff` now flags it.)
 - **Merge.** Reshape one polygon to cover both, and mark the other `deleted` with reason
   `merge`.
 - **Wrong scene.** Don't change `intf_id` by hand unless the polygon really belongs to
@@ -244,6 +251,44 @@ filter `"intf_id" = '…'` on both label layers, set the project variable `relab
   ~4 pixels (≈ 30 m²) barely exist in the mask, and `validate` warns about them.
 - **Save often.** Each `diff` / `export` / `review` snapshots the working gpkg into
   `history/`.
+
+**Flag hard or doubtful polygons, don't delete them.** Some polygons are real but hard for
+the model, for example a large polygon over noisy, decorrelated phase. To keep such a polygon
+in the ground truth and still have it listed, give it a **quality flag**. Select it, then in
+the console run:
+
+```python
+flag('noisy_large', 'big polygon over decorrelated phase')   # note optional
+unflag()        # remove the flag from the selected polygon(s)
+flagged()       # list this scene's flagged polygons
+```
+
+You can also use the `qc_flag` drop-down in the attribute form. The flags are:
+
+- `noisy_large`
+- `low_coherence`
+- `uncertain_boundary`
+- `uncertain_existence`
+- `other` (explain in `qc_note`)
+
+A flag is **not** an edit: the polygon stays in the corrected GT and in every evaluation, and
+`edit_status` stays as it was (the project only sets `modified` when the geometry differs from
+the original). Flagged polygons get a purple dotted outline on top of their status colour.
+Flags travel everywhere:
+
+- `diff`: `changes/flagged_list.csv`, a `flagged` layer in `gt_changes_v2.gpkg`, and
+  `flagged`/`flags` columns in `change_summary.csv`. Flag ids look like
+  `<scene>_FLAG_<nnn>` and are stable.
+- `review`: purple in every figure, listed separately as "kept in the corrected GT", with a
+  `flag` column on the cover.
+- `export`: `qc_flag`/`qc_note` columns in the corrected GT.
+- `eval run --objects`: every corrected GT object overlapping a flagged polygon is marked
+  `qc_flagged`. The per-scene summary splits recall into `recall_new_flagged` and
+  `recall_new_unflagged`, plus `flagged_gt_area_share`. That measures how much of the miss
+  rate comes from the hard polygons, without removing them.
+
+The fields were added to an existing working file with `sinkholes relabel migrate` (QGIS
+closed; additive; backup in `history/`).
 
 `edit_status` is a declaration. **`relabel diff` decides what changed from the geometry**
 and reports any declaration it disagrees with.
@@ -267,6 +312,83 @@ RTh 0.25:
 - **Tier 1:** your six flagged scenes, plus any scene in a model's bottom-5 recall for at
   least 75% of models. The five flagged official scenes are bottom-5 in 6–8 of 8 models.
 - **Tier 2:** recall below the official mean.
+
+## 4b. Two passes: blind, then against a model
+
+**Pass 1 (blind).** Label without looking at any prediction. The project opens with every
+`PREDICTIONS -- …` group **unchecked**. `goto()`/`nxt()` move those layers to the new scene
+but never switch a group on, so a prediction cannot appear by accident. Finish and save each
+scene, and mark it `reviewed` in `manifest.csv`, before pass 2.
+
+**Pass 2 (disagreement review).** For a scene you have finished:
+
+```python
+predictions_on()          # tick the group: continuous confidence of the reference model
+pred_threshold(0.25)      # + binary layer, confidence > 0.25 (the evaluation's own rule: strict >)
+pred_threshold(0.5)       # any value: 0.125 0.25 0.5 0.7 0.9 ...
+pred_bands()              # instead: nested classes > 0.125 / 0.25 / 0.5 / 0.7 / 0.9
+pred_opacity(0.4)         # more interferogram, less prediction (default 0.6; thresholded 0.55)
+predictions_off()         # (= blind()) hide everything again before the next blind scene
+```
+
+Look for strong confidence with no label (possible missing GT) and for labels with no
+confidence (a miss, or a doubtful label). Every pass-2 edit is recorded like any other, but
+**put "pass 2" in `edit_notes`**. That keeps blind and model-informed corrections separable
+when the effect of relabelling is measured: changes seen in pass 2 are not independent of the
+model.
+
+**By hand.** Tick or untick the group in the Layers panel. To change the threshold by hand,
+open the "> t" layer, then Properties → Symbology: the first class value is the threshold,
+and pixels **above** it are coloured. Opacity is under Properties → Transparency.
+
+**What the confidence is.** The reference model was evaluated with the RTh protocol
+(stride 4, `--recon_average vote`), so a pixel's value is the **fraction of the 16 overlapping
+tiles that called it positive**: 0, 1/16, …, 1. It is not a probability. The project's
+operating points are RTh 0.125–0.25. The map is zero where no tile was predicted: outside
+the AOI tiles and the LiDAR2022 gate (the dashed `predictable_area`). Colours are greens,
+the one hue the phase colour scale never uses.
+
+**Reference model:** `th350_tattn_ctx50_neg10`, from
+`outputs/predictions/th350_tattn_ctx50_neg10_2026-09-10_01h16_lsf_816217/best/scenes_temporal_th350_rth_09_14_12h21`.
+
+- It is the best generation-4 temporal k5 model in `docs/RESULTS.md` §3 (object F1 0.7905,
+  P 0.869, R 0.725, strict tolerance).
+- It ranks first on the area-weighted F1 recomputed from its saved metrics at RTh 0.25 and
+  0.5.
+- It has predictions for all 20 official scenes.
+- The nominally equal k10 leader, `posw8_tattn_k10_plain_30e` (0.7907), covers only 17. It
+  has nothing for 20260304, 20260326 or 20260406.
+
+**Adding another model.** Pass any other saved eval directory; it becomes its own group, also
+off:
+
+```bash
+sinkholes relabel predictions --workspace $WS --data_dir $DATA --eval_dir <eval dir> [--name tag]
+scripts/relabel/qgis_python.sh scripts/relabel/build_qgis_project.py --workspace $WS
+```
+
+**How the rasters were made, and checked.**
+
+- No inference is run; the evaluation directory is only read.
+- Each `<intf>_pred.npy` canvas pixel (r, c) is raw pixel (row_off + r, col_off + c). The
+  labelling raster records its raw window. The prediction GeoTIFF is that integer slice,
+  written with **the labelling raster's own transform, CRS and size**, and is read back and
+  compared before it is kept. Window rows the canvas does not reach (a few at the bottom) are
+  nodata (−1).
+- **Alignment is verified against the evaluation's own output.** The saved `_gt.npy`, cut the
+  same way, must be positive on exactly the pixels where the original polygons rasterise on
+  the labelling raster's grid. That holds on all 20 scenes (55k–298k labelled pixels each).
+  Shifting the crop by one row or one column breaks the check, so a misalignment cannot pass.
+
+**Rebuild with QGIS closed, or reopen without saving.** A QGIS session that still has the
+old project open will write it back over a rebuilt one if you choose *Save* on exit. That
+happened once, on 2026-10-05: the prediction layers vanished. Since then, `goto()` no longer
+marks the project modified, and loading `goto_scene.py` warns when the open project is older
+than `predictions/`. To pick up a rebuild while QGIS is open, use Project → Revert.
+
+Rebuilding the QGIS project (`build_qgis_project.py`) first copies the previous `.qgz` into
+`history/`. Layer styles you change by hand are reset by a rebuild; your labels are not, since
+they live in the GeoPackage.
 
 ## 5. Commands
 
@@ -470,9 +592,11 @@ Nothing is written to any `outputs/predictions/...` directory.
 2. **Inside the AOI only?** Only polygons inside the test AOI are scored. Polygons inside
    the AOI but outside `predictable_area` (LiDAR2022 gate) are always misses. Fix those
    anyway, or treat the gate as part of the protocol?
-3. **Independence.** Relabelling while looking at model predictions biases the labels
-   toward the models. The workspace deliberately shows **no predictions**. Decide whether
-   predictions may be consulted (e.g. only after a first blind pass), and record it.
+3. **Independence.** Relabelling while looking at model predictions biases the labels toward
+   the models. Predictions are hidden by default and shown only on request (§4b). Agree how
+   pass-2 edits will be reported. They can be kept apart through the "pass 2" note, or
+   evaluated as a separate label version (export once after pass 1 with `--tag v2_blind`,
+   then again after pass 2).
 4. **Candidates.** Relabelling the seven threshold-excluded scenes may make them eligible.
    Adding them changes the test set and makes old and new numbers incomparable. Should that
    be a new partition generation (5)?

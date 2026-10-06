@@ -127,7 +127,7 @@ class TemporalAttentionUNet(CentreCropOutput, nn.Module):
             )
         self.tattn_recurrence = tattn_recurrence
         self.tattn_fuse_skips = int(tattn_fuse_skips)
-        # The two halves of the attention-collapse fix (docs/ATTENTION_COLLAPSE.md).
+        # The two halves of the attention-collapse fix (docs/ATTENTION.md, "The fix").
         # Default on for new models; the checkpoint builder turns them off for any
         # weights that predate them, since they add parameters.
         self.tattn_contrast = bool(tattn_contrast)

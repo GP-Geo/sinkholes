@@ -98,6 +98,18 @@ EDIT_REASONS = (
     "wrong_scene",             # belongs to another interferogram's dates
     "other",                   # explain in edit_notes
 )
+#: Quality flags: the polygon STAYS in the corrected GT and in every evaluation;
+#: the flag only marks it as a known-hard or doubtful object, so reports can
+#: list it and evaluations can score flagged and unflagged objects apart.
+QC_FLAGS = (
+    "noisy_large",             # large polygon over noisy / decorrelated phase
+    "low_coherence",           # feature in a low-coherence area: shape hard to see
+    "uncertain_boundary",      # real, but the outline is a guess
+    "uncertain_existence",     # might not be subsidence at all
+    "other",                   # explain in qc_note
+)
+QC_FIELDS = ("qc_flag", "qc_note")
+
 MANIFEST_STATUSES = (
     "not_reviewed", "in_progress", "reviewed", "approved",
     "sent_for_external_review", "externally_approved", "needs_revision",

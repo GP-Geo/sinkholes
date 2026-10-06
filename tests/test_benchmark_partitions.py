@@ -287,3 +287,89 @@ def test_unrestricted_run_records_no_year_filter(tmp_path):
     for d in files.values():
         assert d["provenance"]["years_filter"] is None
         assert d["provenance"]["generation"] == bp.GENERATION
+
+
+# -- --nonz_th: the target-side label-quality gate ----------------------------------------
+#
+# The threshold judges DIGITISATION COMPLETENESS, which is a whole-scene property, so it
+# reads nonz_num and not the in-window count: an in-window count would drop a well-mapped
+# scene merely for having few sinkholes inside the AOI band. It gates targets only --
+# a thin scene is still legitimate history for a well-mapped one.
+
+THIN, FAT = 5, 400
+
+
+def _archive_with_mixed_counts(tmp_path, thin_every=3):
+    """The standard archive, but every `thin_every`-th scene is thinly labelled."""
+    dict_path, patches, coord = build_archive(tmp_path)
+    for n, i in enumerate(sorted(coord)):
+        coord[i]["nonz_num"] = THIN if n % thin_every == 0 else FAT
+    dict_path.write_text(json.dumps(coord))
+    return dict_path, patches, coord
+
+
+def _run(tmp_path, dict_path, patches, **overrides):
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    p = argparse.ArgumentParser()
+    bp.add_arguments(p)
+    args = p.parse_args([
+        "--intf_dict", str(dict_path), "--patches_dir", str(patches),
+        "--out_dir", str(out), "--temporal_bounds", "20230601", "20230801",
+    ])
+    for k, v in overrides.items():
+        setattr(args, k, v)
+    bp.main(args)
+    return {f.name: json.loads(f.read_text()) for f in out.glob("*.json")}
+
+
+def test_nonz_th_drops_thin_targets_from_every_split(tmp_path):
+    dict_path, patches, coord = _archive_with_mixed_counts(tmp_path)
+    files = _run(tmp_path, dict_path, patches, nonz_th=[100, 100])
+    for name, d in files.items():
+        for split in ("train", "val", "test", "crossview"):
+            for intf in d.get(split, []):
+                assert coord[intf]["nonz_num"] > 100, f"{name}:{split} kept thin {intf}"
+
+
+def test_nonz_th_leaves_predecessors_alone(tmp_path):
+    """A dropped scene must still be usable as history for a kept target."""
+    dict_path, patches, coord = _archive_with_mixed_counts(tmp_path)
+    files = _run(tmp_path, dict_path, patches, nonz_th=[100, 100])
+    chains, _ = bp.find_11day_sequences(coord, k_prev=5)
+    thin_prevs = 0
+    for d in files.values():
+        for intf in d.get("train", []):
+            thin_prevs += sum(1 for p in chains.get(intf, {}).get("prevs", [])
+                              if coord[p]["nonz_num"] <= 100)
+    assert thin_prevs > 0, "no kept target kept a thin predecessor -- chains were filtered too"
+
+
+def test_nonz_th_is_recorded_and_restamps_the_generation(tmp_path):
+    dict_path, patches, _ = _archive_with_mixed_counts(tmp_path)
+    files = _run(tmp_path, dict_path, patches, nonz_th=[350, 200])
+    for d in files.values():
+        assert d["provenance"]["nonz_th"] == [350, 200]
+        assert d["provenance"]["generation"] == f"{bp.GENERATION}_nonz350-200"
+
+
+def test_no_nonz_th_reproduces_the_committed_generation(tmp_path):
+    """Default off: every committed partition was built without the gate."""
+    dict_path, patches, _ = _archive_with_mixed_counts(tmp_path)
+    files = _run(tmp_path, dict_path, patches)
+    for d in files.values():
+        assert d["provenance"]["nonz_th"] is None
+        assert d["provenance"]["generation"] == bp.GENERATION
+
+
+def test_axis_selects_which_families_are_written(tmp_path):
+    """--axis temporal writes only the temporal family; geo lists are untouched by it."""
+    dict_path, patches, _ = _archive_with_mixed_counts(tmp_path)
+    only = _run(tmp_path, dict_path, patches, axis=["temporal"], nonz_th=[100, 100])
+    assert only and all("temporal" in n for n in only), sorted(only)
+
+    both_root = tmp_path / "both_run"
+    both_root.mkdir()
+    both = _run(both_root, dict_path, patches, nonz_th=[100, 100])
+    for name, d in only.items():
+        assert d["train"] == both[name]["train"], f"{name}: axis choice changed the lists"

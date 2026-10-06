@@ -1,7 +1,32 @@
 # Plan — train on a large window, predict on the middle
 
-*Written 2026-08-20. **Not started** — this is a design note for a future experiment, not a
-record of one. Nothing here changes a finished run or a published number.*
+*Written 2026-08-20. **Implemented 2026-09-07** (`a05b215`), and in production since: every
+generation-4 arm is a context run. Kept as the design record, because §1's receptive-field
+measurement and §6's cost model are not written down anywhere else and both still hold.*
+
+> ## What actually shipped, and how it differs from this plan
+>
+> | Plan said | Shipped as |
+> |---|---|
+> | `--context_size H W` (the network's input size) | **`--context_margin MY MX`** (the margin per side). `50 50` ⇒ 300×200 in, 200×100 supervised |
+> | 400×300 or 600×400 (§1's sizing) | **300×200** — a 50 px margin, *under* the 94–110 px the receptive field could use, chosen for cost |
+> | "no new patch tree" — cut context out of the `strpp2` grids | **a new tree**, `data_patches_H200_W100_ctx50x50_strpp2_11days_Aligned` |
+> | "the dataset must go lazy first" (§3) | **not built.** The dataset still materialises every sample's pixels, which is why a ctx50 run needs ~3× the host memory and `rusage[mem=256GB]` |
+> | `--loss_region center\|full` (§2), two arms one flag apart | **only the cropped arm exists.** The "supervise all 9×" arm was never built, so the false-positive hypothesis it was for is untested |
+> | `io_geometry` in the checkpoint (§3) | **shipped as specified.** `eval-scenes`/`test-patches`/`predict` derive the margin from the weights; `attention-probe` refuses a context checkpoint outright |
+> | `--accum_steps` to hold the effective batch (§6) | **shipped.** Every context run is `BATCH=64 ACCUM=2` = 128 effective |
+> | `context_grid_window` — the §5 geo-leakage fix | **not needed yet.** Generation 4 is temporal-only, and the temporal axis splits by date, so no context margin crosses a spatial cut. **§5 becomes live the moment a generation-4 geo family is built.** |
+>
+> **What it bought.** +0.024 to +0.041 patch dice, replicated on three architecture pairs
+> ([RESULTS.md](RESULTS.md) ⑯) — larger than §1's synthetic ΔP of 0.0002 predicted, and
+> larger than this document expected from a margin smaller than the receptive field.
+> **Not confirmed at object level — reversed.** Every context pair scored so far (three
+> architectures at k5 on generation 3, the single frame and attention at k10 on generation
+> 4) loses 0.008–0.029 object F1 to its plain twin: context buys precision and costs more
+> recall ([RESULTS.md](RESULTS.md) ⑯). Plain attention at k10 (0.7907) is the best k10
+> model. §1's warning stands —
+> the receptive field caps the useful margin at ±94–110 px, so growing the input alone is
+> necessary, not sufficient.
 
 The idea: feed the network a large window (e.g. 600×300) and supervise/predict only the middle
 200×100, so the prediction carries spatial context and never sees zero-padding at its own border.
