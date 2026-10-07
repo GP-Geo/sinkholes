@@ -1771,7 +1771,8 @@ job fill fill_tattn_k10_plain_30e \
 
 # ---- evalfill: the generation-4 leaders scored on the generation-5 test lists --
 #
-#     submit_all.sh evalfill --submit         # 2 jobs
+#     submit_all.sh evalfill --only=evalfill_fill_ --submit   # the 2 fill arms
+#     (the two twin rows HAVE RUN -- do not resubmit them)
 #
 # The fill arms will be scored on 24 test scenes at both depths, a superset of
 # th350's 20 (k5) and 17 (k10). Their twins have no score on the added scenes
@@ -1799,6 +1800,22 @@ job evalfill evalfill_posw8_tattn_plain \
 job evalfill evalfill_posw8_tattn_k10_plain \
     scripts/eval/run_eval.sh "RUN=outputs/posw8_tattn_k10_plain_30e_2026-09-16_23h47_lsf_316673 $EVAL_FILL_K10 K_PREVS=10 ARCH=tattn" "$RES_EVAL_S4_T5" \
     "the k10 twin on the 24-scene generation-5 list: 17 old scenes reproduce evalk10plain, 7 new ones it could never be scored on before"
+
+# THE TWO TWINS HAVE RUN (2026-10-06, LSF 261905/261906), ith0.7_b5, best RTh:
+#     posw8_tattn_plain_40e      24: 0.7876   gen-4 20: 0.7920   new 4: 0.7653
+#     posw8_tattn_k10_plain_30e  24: 0.7906   gen-4 17: 0.7907   new 7: 0.7903
+# The k10 twin's 17-scene number reproduces evalk10plain exactly, which is the
+# check that filled-chain inference leaves gap-free scenes untouched.
+#
+# THE FILL ARMS (trained 2026-10-06, both complete): best val/dice 0.6785 @26
+# (twin 0.6764) and 0.6838 @25 (twin 0.6786), both inside the 0.011 noise. Same
+# strings, so every per-scene number lines up with its twin's.
+job evalfill evalfill_fill_tattn_k5_plain \
+    scripts/eval/run_eval.sh "RUN=outputs/fill_tattn_k5_plain_40e_2026-10-06_13h40_lsf_261904 $EVAL_FILL_K5 K_PREVS=5 ARCH=tattn" "$RES_EVAL_S4_T5" \
+    "the k5 fill arm against posw8_tattn_plain_40e on the same 24 scenes: the 20 old ones are the like-for-like, the 4 new ones the coverage"
+job evalfill evalfill_fill_tattn_k10_plain \
+    scripts/eval/run_eval.sh "RUN=outputs/fill_tattn_k10_plain_30e_2026-10-06_12h48_lsf_261016 $EVAL_FILL_K10 K_PREVS=10 ARCH=tattn" "$RES_EVAL_S4_T5" \
+    "the k10 fill arm against posw8_tattn_k10_plain_30e on the same 24 scenes -- k10 is where the gap-free rule dropped the most (+47 train scenes)"
 
 # ---- argument parsing -------------------------------------------------------
 WANT=all; SUBMIT=no; ONLY=()
