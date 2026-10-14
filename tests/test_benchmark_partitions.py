@@ -373,3 +373,99 @@ def test_axis_selects_which_families_are_written(tmp_path):
     both = _run(both_root, dict_path, patches, nonz_th=[100, 100])
     for name, d in only.items():
         assert d["train"] == both[name]["train"], f"{name}: axis choice changed the lists"
+
+
+# -- --temporal_blocks: held-out date blocks with train on both sides ----------------------
+#
+# Chains cross set boundaries in both directions once train sits on both sides of a
+# held-out block, so the rule is full separation: a target's inputs are targets of its own
+# split or of none. Held-out blocks stay whole; train pays for the gaps around them.
+
+VAL_BLOCK, TEST_BLOCK = "val:20230901:20230930", "test:20240601:20241231"
+
+
+def _run_blocks(tmp_path, blocks, **overrides):
+    dict_path, patches, coord = build_archive(tmp_path, n_north=60, n_south=60)
+    files = _run(tmp_path, dict_path, patches, axis=["temporal"], temporal_blocks=blocks,
+                 **overrides)
+    return files, coord
+
+
+def _owner(d):
+    return {i: s for s in ("train", "val", "test") for i in d.get(s, [])}
+
+
+def test_blocks_no_target_takes_another_splits_target_as_input(tmp_path):
+    files, coord = _run_blocks(tmp_path, [VAL_BLOCK, TEST_BLOCK])
+    for k in (5, 10):
+        chains, _ = bp.find_11day_sequences(coord, k_prev=k)
+        for name in (f"partition_temporal_k{k}_clean_fill.json",
+                     f"partition_temporal_k{k}_testeval_clean_fill.json"):
+            owner = _owner(files[name])
+            for intf, s in owner.items():
+                for p in chains[intf]["prevs"]:
+                    assert owner.get(p, s) == s, f"{name}: {s} {intf} takes {owner[p]} {p}"
+
+
+def test_blocks_keep_held_out_whole_and_train_on_both_sides(tmp_path):
+    files, coord = _run_blocks(tmp_path, [VAL_BLOCK, TEST_BLOCK])
+    blocks = bp.parse_temporal_blocks([VAL_BLOCK, TEST_BLOCK])
+    for k in (5, 10):
+        d = files[f"partition_temporal_k{k}_clean_fill.json"]
+        _, valid = bp.find_11day_sequences(coord, k_prev=k)
+        for split, a, b in blocks:
+            inside = sorted(i for i in valid if a <= bp.start_date(i) <= b)
+            assert inside and d[split] == inside, f"k{k} {split}: block not kept whole"
+        assert any(bp.start_date(i) < blocks[0][1] for i in d["train"]), f"k{k}: no train before val"
+    k5 = files["partition_temporal_k5_clean_fill.json"]
+    assert any(blocks[0][2] < bp.start_date(i) < blocks[1][1] for i in k5["train"]), \
+        "k5: no train between the blocks"
+
+
+def test_blocks_drop_the_train_scenes_around_each_block(tmp_path):
+    """The lead-in feeds a held-out block, the lead-out reads from it: both go."""
+    files, coord = _run_blocks(tmp_path, [VAL_BLOCK, TEST_BLOCK])
+    chains, valid = bp.find_11day_sequences(coord, k_prev=5)
+    d = files["partition_temporal_k5_clean_fill.json"]
+    held = set(d["val"]) | set(d["test"])
+    lead_in = {p for i in held for p in chains[i]["prevs"]} - held
+    lead_out = {i for i in valid if set(chains[i]["prevs"]) & held} - held
+    assert lead_in and lead_out
+    assert not (lead_in | lead_out) & set(d["train"])
+
+
+def test_blocks_within_one_chain_drop_the_later_scenes(tmp_path):
+    """A test block right after a val block loses the scenes whose inputs are val."""
+    files, coord = _run_blocks(tmp_path, ["val:20230901:20231031", "test:20231101:20241231"])
+    chains, _ = bp.find_11day_sequences(coord, k_prev=5)
+    d = files["partition_temporal_k5_clean_fill.json"]
+    assert d["test"] and d["val"]
+    assert not any(set(chains[i]["prevs"]) & set(d["val"]) for i in d["test"])
+
+
+def test_blocks_are_recorded_in_provenance(tmp_path):
+    files, _ = _run_blocks(tmp_path, [TEST_BLOCK, VAL_BLOCK])
+    for d in files.values():
+        prov = d["provenance"]
+        assert prov["temporal_blocks"] == [VAL_BLOCK, TEST_BLOCK]
+        assert prov["temporal_bounds"] is None
+        assert prov["separation"] == "full"
+
+
+def test_bounds_run_records_its_weaker_separation(tmp_path):
+    files, _ = run_generator(tmp_path)
+    for name, d in files.items():
+        if "temporal" in name:
+            assert d["provenance"]["separation"] == "held_out_chains"
+            assert d["provenance"]["temporal_blocks"] is None
+
+
+@pytest.mark.parametrize("specs", [
+    ["train:20230101:20230201"],                         # train is everything else
+    ["val:20230101"],                                    # not SPLIT:START:END
+    ["val:20230301:20230201"],                           # ends before it starts
+    ["val:20230101:20230601", "test:20230501:20231231"],  # overlap
+])
+def test_bad_block_specs_are_rejected(specs):
+    with pytest.raises(SystemExit):
+        bp.parse_temporal_blocks(specs)

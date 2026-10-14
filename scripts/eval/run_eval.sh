@@ -85,6 +85,13 @@ GEN="${GEN:-2}"             # PARTITION GENERATION -- assets/PARTITIONS.md.
                             #     both k5 and k10, a SUPERSET of th350's 20 / 17.
                             #     For like-for-like with th350, re-average the
                             #     per-scene results over the th350 list.
+                            # t2026 = partition_<group>_test2026_fill_th350x200.json,
+                            #     the fill family re-split by date blocks with
+                            #     FULL separation: test = 2026 (10 scenes, a
+                            #     SUBSET of fill's 24), val = 2022-2023, train =
+                            #     the rest incl. 2024-25. To compare with a fill
+                            #     model, re-average its per-scene results over
+                            #     these 10 -- same chains, same window.
                             # Generations are NOT comparable: different scene
                             # lists AND different scored ground.
 DATA_STRIDE="${DATA_STRIDE:-2}"  # strides per patch of the reconstruction grid.
@@ -181,7 +188,8 @@ case "$GEN" in
   p23)   GEN_SUFFIX="_pre2023" ;;
   th350) GEN_SUFFIX="_clean_th350x200" ;;
   fill)  GEN_SUFFIX="_clean_fill_th350x200" ;;
-  *)     echo "GEN must be 2, 3, p23, th350 or fill, got '$GEN'" >&2; exit 1 ;;
+  t2026) GEN_SUFFIX="_test2026_fill_th350x200" ;;
+  *)     echo "GEN must be 2, 3, p23, th350, fill or t2026, got '$GEN'" >&2; exit 1 ;;
 esac
 case "$SPLIT" in
   val)  PARTITION="assets/partition_${GROUP}${GEN_SUFFIX}.json" ;;
@@ -210,9 +218,10 @@ esac
 # generation 3's generator with a truncated archive, and th350 is the same
 # generator with a positive-count threshold, so both carry the same per-split
 # window and take the same flags. fill is th350 rebuilt with chains that reach
-# past missing acquisitions (generation 5), same window.
+# past missing acquisitions (generation 5), same window; t2026 is fill re-split
+# by date blocks, same window again.
 AOI_FLAGS=()
-if [ "$GEN" = 3 ] || [ "$GEN" = p23 ] || [ "$GEN" = th350 ] || [ "$GEN" = fill ]; then
+if [ "$GEN" = 3 ] || [ "$GEN" = p23 ] || [ "$GEN" = th350 ] || [ "$GEN" = fill ] || [ "$GEN" = t2026 ]; then
   AOI_FLAGS=(--aoi_from_partition "$PARTITION" --aoi_split val)
 fi
 

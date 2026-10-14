@@ -29,6 +29,12 @@ Two rules the generator exists to enforce, both easy to get wrong by hand:
   confuse "badly digitised" with "few sinkholes in this band". Since an
   in-window count can never exceed the whole-scene one, the filter cannot drop
   a scene that has more than the threshold's worth of positives in the window.
+* **``--temporal_blocks`` separates fully.** A block layout holds out date
+  blocks and trains on everything around them, so chains cross set boundaries
+  in both directions. Every target's inputs must then be targets of its own
+  set or of none: train scenes that feed a held-out block, or take one as
+  input, are dropped (:func:`separate_fully`). The ``--temporal_bounds`` rule
+  is weaker -- a test chain may reach into val -- and stays as it was.
 """
 
 import argparse
@@ -79,7 +85,15 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                    help="fraction of the geo hold-out used for val (rest is test)")
     p.add_argument("--temporal_bounds", nargs=2, type=str, default=["20240101", "20250101"],
                    metavar=("TRAIN_END", "VAL_END"),
-                   help="train < first, val < second, test >= second")
+                   help="train < first, val < second, test >= second "
+                        "(ignored when --temporal_blocks is given)")
+    p.add_argument("--temporal_blocks", nargs="+", type=str, default=None,
+                   metavar="SPLIT:START:END",
+                   help="held-out date blocks, e.g. val:20220101:20231231 test:20260101:20261231 "
+                        "(inclusive, on the interferogram's start date). Everything outside "
+                        "them is train, and every target's 11-day chain must lie in its own "
+                        "set: train scenes next to a block are dropped. Replaces "
+                        "--temporal_bounds for the temporal axis")
     p.add_argument("--k_prevs", nargs="+", type=int, default=[5, 10])
     p.add_argument("--axis", nargs="+", default=["geo", "temporal"], choices=["geo", "temporal"],
                    help="which families to write (default: both). The axes are independent -- "
@@ -240,6 +254,85 @@ def drop_leaky_chains(splits, chains, bounds, axis, k):
     return out
 
 
+def parse_temporal_blocks(specs):
+    """``SPLIT:YYYYMMDD:YYYYMMDD`` strings -> [(split, start, end)] by start date."""
+    blocks = []
+    for spec in specs:
+        try:
+            split, a, b = spec.split(":")
+            start, end = (date(int(x[:4]), int(x[4:6]), int(x[6:8])) for x in (a, b))
+        except ValueError:
+            raise SystemExit(f"--temporal_blocks: {spec!r} is not SPLIT:YYYYMMDD:YYYYMMDD")
+        if split not in ("val", "test"):
+            raise SystemExit(f"--temporal_blocks: {spec!r} -- split must be val or test; "
+                             f"everything outside the blocks is train")
+        if end < start:
+            raise SystemExit(f"--temporal_blocks: {spec!r} ends before it starts")
+        blocks.append((split, start, end))
+    blocks.sort(key=lambda blk: blk[1])
+    for (_, _, end), (split, start, _) in zip(blocks, blocks[1:]):
+        if start <= end:
+            raise SystemExit(f"--temporal_blocks: the {split} block starting {start} "
+                             f"overlaps the block before it")
+    return blocks
+
+
+def separate_fully(splits, chains, label=""):
+    """Make every target's chain belong to its own split, in every direction.
+
+    A target's ``prevs`` may be targets of its own split or of none, never of
+    another. Held-out blocks are kept whole and train pays: a train scene is
+    dropped when it is an input of a held-out target (the lead-in before a
+    block) or takes a held-out target as input (the lead-out after it). A
+    held-out scene whose inputs are targets of the OTHER held-out split is
+    dropped too -- that only happens when a val and a test block sit closer
+    than one chain.
+    """
+    def prevs(intf):
+        return set(chains.get(intf, {}).get("prevs", []))
+
+    held = {i: s for s in ("val", "test") for i in splits.get(s, [])}
+    crossed = sorted(i for i, s in held.items() if any(held.get(p, s) != s for p in prevs(i)))
+    for i in crossed:
+        del held[i]
+    feeds_held = set().union(*(prevs(i) for i in held))
+    train, dropped = [], []
+    for intf in splits["train"]:
+        (dropped if intf in feeds_held or prevs(intf) & set(held) else train).append(intf)
+    if crossed:
+        logging.info(f"{label}: dropped {len(crossed)} held-out scene(s) whose chain holds "
+                     f"the other held-out split: {crossed}")
+    if dropped:
+        logging.info(f"{label}: dropped {len(dropped)} train scene(s) whose chain touches "
+                     f"a held-out block: {sorted(dropped)}")
+    out = dict(splits)
+    out["train"] = sorted(train)
+    for s in ("val", "test"):
+        out[s] = sorted(i for i, x in held.items() if x == s)
+    return out
+
+
+def block_split(valid, chains, blocks, aoi, label=""):
+    """Train = everything outside the held-out blocks, fully separated."""
+    splits = {"train": [], "val": [], "test": []}
+    for intf in valid:
+        s = start_date(intf)
+        splits[next((sp for sp, a, b in blocks if a <= s <= b), "train")].append(intf)
+    box = tuple(aoi)
+    return separate_fully(splits, chains, label), {"train": box, "val": box, "test": box}
+
+
+def check_full_separation(axis, k, splits, chains):
+    """Fail loudly if any target takes an input that is another split's target."""
+    owner = {i: s for s, v in splits.items() if s != "crossview" for i in v}
+    for intf, s in owner.items():
+        foreign = sorted(p for p in chains.get(intf, {}).get("prevs", [])
+                         if owner.get(p, s) != s)
+        if foreign:
+            raise SystemExit(f"{axis}_k{k}: {s} scene {intf} takes inputs that are "
+                             f"{owner[foreign[0]]} targets: {foreign}")
+
+
 def testeval_variant(splits, windows):
     """The parent's test list carried under 'val', as the convention requires."""
     out = {"train": list(splits["train"]) + list(splits["val"]), "val": list(splits["test"])}
@@ -290,6 +383,7 @@ def main(args) -> None:
     nonz = load_nonz_indices(args.patches_dir, args.patch_size, args.strides_per_patch)
     counter = PositiveCounter(nonz, coord, args.patch_size, args.strides_per_patch)
     aoi = tuple(args.aoi)
+    blocks = parse_temporal_blocks(args.temporal_blocks) if args.temporal_blocks else None
     os.makedirs(args.out_dir, exist_ok=True)
 
     ks = sorted(args.k_prevs, reverse=True)          # largest first, for the subset check
@@ -323,6 +417,12 @@ def main(args) -> None:
             if axis == "geo":
                 splits, windows = geo_split(valid, counter, args.cut_lat, aoi,
                                             args.geo_val_share, args.seed)
+            elif blocks:
+                # Assigned once, at the shallowest depth: the deeper ones are
+                # intersected with it below and re-separated on their own chains.
+                if k == k_base:
+                    splits, windows = block_split(valid, chains_by_k[k], blocks, aoi,
+                                                  f"{axis}_k{k}")
             else:
                 splits, windows = temporal_split(valid, chains_by_k[k], counter,
                                                  args.temporal_bounds, aoi, k)
@@ -333,7 +433,13 @@ def main(args) -> None:
                 valid_set = set(valid)
                 splits = {s: sorted(set(v) & valid_set) for s, v in base_splits.items()}
                 windows = base_windows
-                if axis == "temporal":
+                if axis == "temporal" and blocks:
+                    # Full separation re-checked on the deeper chains: a k10
+                    # chain reaches further than a k5 one, so the gaps around
+                    # each block widen. Only train shrinks unless two held-out
+                    # blocks sit within one chain of each other.
+                    splits = separate_fully(splits, chains_by_k[k], f"{axis}_k{k}")
+                elif axis == "temporal":
                     # Chain containment must be re-checked at the deeper k, and
                     # it OUTRANKS the subset rule. A scene whose 5-step chain
                     # starts after the val boundary can still have a 10-step
@@ -345,6 +451,8 @@ def main(args) -> None:
                                                args.temporal_bounds, axis, k)
 
             check_invariants(axis, k, splits, counter, windows)
+            if axis == "temporal" and blocks:
+                check_full_separation(axis, k, splits, chains_by_k[k])
 
             prov = {
                 "generation": generation_label(args.years, args.nonz_th),
@@ -360,7 +468,15 @@ def main(args) -> None:
                 "nonz_th": list(args.nonz_th) if args.nonz_th else None,
                 "cut_lat": args.cut_lat if axis == "geo" else None,
                 "aoi": list(aoi),
-                "temporal_bounds": list(args.temporal_bounds) if axis == "temporal" else None,
+                "temporal_bounds": (list(args.temporal_bounds)
+                                    if axis == "temporal" and not blocks else None),
+                "temporal_blocks": ([f"{sp}:{a:%Y%m%d}:{b:%Y%m%d}" for sp, a, b in blocks]
+                                    if axis == "temporal" and blocks else None),
+                # "full": no target takes an input that is another split's
+                # target. "held_out_chains": held-out chains never reach into
+                # train, but a test chain may reach into val.
+                "separation": (("full" if blocks else "held_out_chains")
+                               if axis == "temporal" else None),
                 "geo_val_share": args.geo_val_share if axis == "geo" else None,
                 "seed": args.seed,
                 "positives_in_window": {s: counter.total(v, windows[s])

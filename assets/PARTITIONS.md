@@ -11,6 +11,7 @@ extend them.
 | Generation | Files | What it is |
 |---|---|---|
 | 5 (filled chains, being evaluated) | `partition_temporal_k{5,10}[_testeval]_clean_fill_th350x200.json` | generation 4 with chains that **reach past missing acquisitions** |
+| 5-t2026 (block split, being trained) | `partition_temporal_k{5,10}[_testeval]_test2026_fill_th350x200.json` | generation 5 re-split: **test 2026, val 2022–23, train the rest**, fully separated |
 | **4** (current) | `partition_temporal_k{5,10}[_testeval]_clean_th350x200.json` | generation 3 plus a **label-quality threshold on targets** |
 | 3 | `partition_{geo,temporal}_k{5,10}[_testeval]_clean.json` | the clean benchmark: AOI + latitude cut, all years |
 | 3b | `partition_{geo,temporal}_k{5,10}[_testeval]_pre2023.json` | the same, archive stopped at 2022-12-31 |
@@ -53,6 +54,57 @@ sinkholes make-benchmark-partitions \
   --aoi 31.25 31.75 35.38 35.46 --axis temporal \
   --temporal_bounds 20240101 20250101 \
   --nonz_th 350 200 --suffix clean_fill_th350x200 --out_dir assets/
+```
+
+---
+
+## Generation 5-t2026 — `*_test2026_fill_th350x200.json` (block split, 2026-10-13)
+
+Generation 5's scenes, chains and threshold, re-split by **date blocks** instead of two
+boundaries: `--temporal_blocks val:20220101:20231231 test:20260101:20261231`. Everything
+outside the blocks is train, so training reaches **2024 and Jan–Oct 2025**: its newest
+target moves from 2023-12 to 2025-10, and the gap to the test scenes shrinks from over a
+year to about four months.
+
+**Full separation.** With train on both sides of a held-out block, chains cross set
+boundaries in both directions, so the rule is stricter than generation 5's: no target takes
+an input that is **another split's target**, in any direction. The held-out blocks are kept
+whole and train pays — a train scene is dropped when it feeds a held-out block (the lead-in)
+or reads from one (the lead-out). `provenance.separation` reads `full` here and
+`held_out_chains` for a `--temporal_bounds` run. Generation 5 does not meet the full rule:
+3 of its test scenes (`20250122`, `20250223`, `20250328`) take val scenes as inputs, which
+its design allows.
+
+| File | train / val / test intfs | positives in window |
+|---|---|---|
+| `partition_temporal_k5_test2026_fill_th350x200.json` | 144 / 11 / 10 | 48,511 / 3,731 / 3,958 |
+| `partition_temporal_k10_test2026_fill_th350x200.json` | 131 / 11 / 10 | 43,944 / 3,731 / 3,958 |
+| `partition_temporal_k5_testeval_test2026_fill_th350x200.json` | 155 / 10 (test-as-val) | 52,242 / 3,958 |
+| `partition_temporal_k10_testeval_test2026_fill_th350x200.json` | 142 / 10 (test-as-val) | 47,675 / 3,958 |
+
+Unused at k10: `20240102`, `20240103`, `20240216`, `20240319` (their chains hold val
+scenes) and `20250818`, `20251024`, `20251103`, `20251126` (they feed the 2026 test scenes).
+
+Three things to know before reading a number off it:
+
+- **The test list is 10 scenes of one season** (Feb–Apr 2026), 8 of them relabelled. It is
+  a subset of generation 5's 24, with the same chains and window, so a generation-5 model is
+  compared by re-averaging its per-scene results over these 10: the fill k10 leader scores
+  **0.8660** there (original labels, RTh 0.125), its no-fill twin 0.8499. Per-scene sd is
+  0.07, so a gap under ~0.02–0.03 is noise.
+- **Feb–Apr is the season the models already do best on** (0.862 mean per-scene F1 against
+  0.726 for the May–Dec test scenes of generation 5). The weak summer scenes are not tested.
+- **Nine relabelled 2025 scenes become training targets.** Training reads the original
+  labels from the patch trees; the corrections help only if those scenes' mask patches are
+  rebuilt from the corrected export.
+
+```bash
+sinkholes make-benchmark-partitions \
+  --intf_dict assets/intf_coord.json \
+  --patches_dir $D/patches --seed 0 \
+  --aoi 31.25 31.75 35.38 35.46 --axis temporal \
+  --temporal_blocks val:20220101:20231231 test:20260101:20261231 \
+  --nonz_th 350 200 --suffix test2026_fill_th350x200 --out_dir assets/
 ```
 
 ---

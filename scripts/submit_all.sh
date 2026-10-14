@@ -1817,11 +1817,61 @@ job evalfill evalfill_fill_tattn_k10_plain \
     scripts/eval/run_eval.sh "RUN=outputs/fill_tattn_k10_plain_30e_2026-10-06_12h48_lsf_261016 $EVAL_FILL_K10 K_PREVS=10 ARCH=tattn" "$RES_EVAL_S4_T5" \
     "the k10 fill arm against posw8_tattn_k10_plain_30e on the same 24 scenes -- k10 is where the gap-free rule dropped the most (+47 train scenes)"
 
+# ---- t2026: the fill k10 leader on the test-2026 block split ----------------
+#
+#     submit_all.sh t2026 --submit
+#
+# assets/partition_temporal_k10_test2026_fill_th350x200.json (assets/PARTITIONS.md,
+# "test2026"): the fill family re-split by DATE BLOCKS with FULL separation --
+# no target takes an input that is another split's target, in any direction
+# (fill lets 3 test chains reach into val; this does not):
+#     test   2026 (Feb-Apr)   10 scenes, 8 of them relabelled
+#     val    2022-2023        11 scenes
+#     train  everything else, incl. 2024 and Jan-Oct 2025: 131 scenes / 43,944
+#            AOI positives (fill: 121 / 41,032). 4 scenes next to the blocks unused.
+# The fill k10 leader with the partition swapped and every other variable
+# reused verbatim, so the delta is the split alone: the newest training target
+# moves from 2023-12 to 2025-10, and val moves from 2024 to 2022-23.
+#
+# WHAT IT ANSWERS. Whether training up to the year before the test scenes helps.
+# Read it against fill_tattn_k10_plain_30e re-averaged over the same 10 scenes
+# -- its 24-scene eval already holds them, same chains, same window:
+#     fill_tattn_k10_plain_30e    10 scenes: 0.8660 @RTh 0.125 (original labels)
+#     posw8_tattn_k10_plain_30e   10 scenes: 0.8499
+# Ten scenes of one season, per-scene sd 0.07: only a gap past ~0.02-0.03 says
+# anything. Read the ten per-scene pairs, not just the means.
+#
+# RESOURCES: the fill k10 tier. ~88k train samples against fill's 82,010 (+7%),
+# so ~134 GB / ~9.2 h against 208G / 16:00. Stride-2 trees hold all 341 ids the
+# train/val chains need, stride-4 all 32 the test chains need (checked 2026-10-13).
+# ---- SUPERSEDED 2026-10-13, NEVER SUBMITTED -- DO NOT ADD IT BACK ------------
+# This exact configuration (plain, lr 3e-4, wd 1e-2, pos_w 8, 30 epochs, 32x4, on
+# this partition) is the HPO study's baseline trial plain/s0 -- study
+# k10t2026_hpo_v1, docs/HPO.md, run by `sinkholes hpo` (its first jobs went out
+# from the worktree sinkholes-hpo, since merged here). Running both would train the same
+# model twice. plain/s0 also keeps epoch-10/20/30 snapshots and is scored on
+# the 2022-23 validation scenes; score its chosen checkpoint on the 10 test
+# scenes against the fill leader's 0.8660 above, read per scene.
+#     T2026_K10_BASE="PARTITION=assets/partition_temporal_k10_test2026_fill_th350x200.json K_PREVS=10 POS_W=8"
+#     job t2026 t2026_tattn_k10_plain_30e scripts/train/train_tattn.sh \
+#         "$T2026_K10_BASE $TH350_NEG $TH350_OPT $K10_RUN30 BATCH=32 ACCUM=4 AUGMENT=hv FUSE_SKIPS=0 RECURRENCE=none" \
+#         "$RES_FILL_K10_TATTN_PLAIN" "fill_tattn_k10_plain_30e on the test-2026 block split"
+# Test scoring of a t2026 model through run_eval.sh stays as it was:
+#     EVAL_T2026_K10="GEN=t2026 GROUP=temporal_k10 DATA_STRIDE=4 PROTOCOL=rth JOB_NAME=scenes_temporal_k10_t2026_rth"
+
 # ---- argument parsing -------------------------------------------------------
 WANT=all; SUBMIT=no; ONLY=()
 while [ $# -gt 0 ]; do
   case "$1" in
     eval6ref|ampfix|lrscan|evalampfix|evalctx|reg|dropscan|lossscan|momscan|adamscan|combo|th350|evalth350|posw8|evalposw8|k10|k10plain|evalk10|evalk10plain|k10plain45|k5plain|evalk5plain|fill|evalfill|all)   WANT="$1" ;;
+    t2026)
+      echo "'t2026' is superseded by the HPO study's baseline trial plain/s0 (same configuration," >&2
+      echo "same partition) -- see the t2026 block in this file and docs/HPO.md. Nothing to submit." >&2
+      exit 1 ;;
+    dd300)
+      echo "'dd300' (fill k10, 300 epochs, cosine) was dropped before submission: the HPO study's" >&2
+      echo "300-epoch runs (\`sinkholes hpo long\`, docs/HPO.md) cover it. Nothing to submit." >&2
+      exit 1 ;;
     # Retired by name rather than left to select zero jobs, so the mistake is
     # visible instead of looking like an empty batch. See docs/EXPERIMENTS.md.
     long200|long500|ctx50|evallong200|\
