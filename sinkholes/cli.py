@@ -52,6 +52,8 @@ _COMMANDS = {
     # ground-truth relabelling of the test set
     "relabel": ("sinkholes.relabel.command", "add_arguments", "main",
                 "test-set relabelling: workspace, validation, change review, re-scoring"),
+    "hpo": ("sinkholes.hpo.command", "add_arguments", "main",
+            "the Optuna study: init, approve, step (dry run / --submit), status, coverage, ..."),
     "curves": (None, None, None, "regenerate curves.png for a finished run"),
     "architectures": (None, None, None, "list the registered model architectures"),
 }

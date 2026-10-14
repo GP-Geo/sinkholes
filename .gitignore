@@ -34,3 +34,6 @@ __pycache__/
 
 # Status decks: kept on disk, out of git
 docs/reference/*.pptx
+
+# HPO study roots (ledger, runs, evaluations, caches) -- protected study state, never in git
+/studies/

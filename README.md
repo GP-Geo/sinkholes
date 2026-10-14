@@ -27,6 +27,8 @@ pip install -e . && sinkholes <command>
 | `test-patches` | patch-level metrics on a pickled split **or** a partition JSON |
 | `eval-scenes` | full-scene reconstruction → confidence maps, polygons, arrays |
 | `eval-outputs` | object-level metrics + figures over saved eval-scenes outputs |
+| `eval-snapshots` | the same RTh protocol for many checkpoints from one data pass (model selection) |
+| `hpo` | the plain-vs-ctx50 Optuna study: `init`, `approve`, `step` (dry run / `--submit`), `status`, `coverage`, `report`, `panel` -- see [`docs/HPO.md`](docs/HPO.md) |
 | `predict` | predict polygons on new raw `.unw` scenes (no ground truth) |
 | `inspect-run` | learning curve + decision-threshold sweep for a finished run |
 | `attention-probe` | where a `tattn_unet`'s attention lands over a long, gappy history |
@@ -50,6 +52,7 @@ Where to look for what:
 | Which published numbers a correctness fix moved | [`docs/CORRECTNESS_FIXES.md`](docs/CORRECTNESS_FIXES.md) |
 | What is on disk, what is safe to delete | [`docs/OUTPUTS.md`](docs/OUTPUTS.md) |
 | How to run a stage | [`docs/PIPELINE.md`](docs/PIPELINE.md) |
+| The HPO / long-training protocol | [`docs/HPO.md`](docs/HPO.md) |
 
 **Object-level F1 decides everything.** Patch `val/dice` ranks these models
 *backwards* and is a training-health signal only — see `RESULTS.md` finding ②.
