@@ -78,6 +78,11 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--fallback_replicate", action="store_true",
                    help="replicate the current frame when predecessors are missing "
                         "instead of skipping the interferogram")
+    p.add_argument("--allow_missing_history", action="store_true",
+                   help="pad a predecessor whose grid FILE is absent from the patch tree "
+                        "with the current frame (marked invalid) instead of refusing. "
+                        "Before 2026-10-13 this happened silently, and against a subset "
+                        "tree it produced a finished job with a plausible, wrong number")
     p.add_argument("--unioned_mask", action="store_true",
                    help="ground truth = union of masks over the temporal stack")
 
@@ -367,6 +372,13 @@ def main(args) -> None:
                 age = dict(zip(chain["prevs"], chain_offsets(chain)[:-1]))
                 prev_ids = chain["prevs"][: args.k_prevs][::-1]  # newest first
                 available = [pid for pid in prev_ids if os.path.exists(grid_path("data", pid))]
+                if len(available) < len(prev_ids) and not getattr(args, "allow_missing_history", False):
+                    absent = [pid for pid in prev_ids if pid not in available]
+                    raise SystemExit(
+                        f"{intf}: {len(absent)} predecessor grid(s) missing from {data_dir}: "
+                        f"{absent}. Refusing to pad them with the current frame -- build them "
+                        f"(scripts/data/make_context_stride4_patches.sh for a ctx50 stride-4 "
+                        f"tree) or pass --allow_missing_history to accept the substitution")
                 prevs = [np.load(grid_path("data", pid)).astype(np.float32, copy=False)
                          for pid in available]
                 offsets_newest_first = [0] + [age[pid] for pid in available]
