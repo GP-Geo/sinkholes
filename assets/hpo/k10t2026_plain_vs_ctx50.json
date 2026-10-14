@@ -1,0 +1,81 @@
+{
+  "study": "k10t2026_hpo_v1",
+  "description": "Plain (200x100) vs ctx50 (300x200 in, centre 200x100 supervised) temporal attention, k10, generation 5-t2026 (filled chains re-split by date blocks, full separation: val 2022-2023, test Feb-Apr 2026, train the rest). Optuna over lr / weight decay / pos_w, scored on whole validation scenes.",
+  "root": "/home/labs/rudich/pinkas/sinkholes_studies/k10t2026_hpo_v1",
+  "repo": null,
+  "conda_sh": "/apps/easybd/easybuild/amd/software/Miniconda3/24.7.1-0/etc/profile.d/conda.sh",
+  "conda_env": "/home/labs/rudich/pinkas/.conda/envs/sinkholes",
+  "patches_dir": "/home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/patches",
+  "partition": "assets/partition_temporal_k10_test2026_fill_th350x200.json",
+  "test_partition": "assets/partition_temporal_k10_testeval_test2026_fill_th350x200.json",
+  "k_prevs": 10,
+
+  "geometries": {
+    "plain": {"context_margin": [0, 0], "batch_size": 32, "accum_steps": 4},
+    "ctx50": {"context_margin": [50, 50], "batch_size": 32, "accum_steps": 4}
+  },
+
+  "fixed": {
+    "optimizer": "adamw", "beta1": 0.9, "beta2": 0.999,
+    "seg_loss": "dice", "augment_flips": "hv", "amp": true,
+    "add_ring_negatives": true, "neg_ring_inner": 1, "neg_ring_outer": 10, "neg_per_pos": 1.0,
+    "tattn_dim": 0, "tattn_heads": 8, "tattn_layers": 1, "tattn_recurrence": "none",
+    "tattn_fuse_skips": 0, "tattn_contrast": true, "tattn_qk_norm": true, "convlstm_hidden": 256,
+    "patch_size": [200, 100], "stride": 2,
+    "patience": 0,
+    "fit_eval_samples": 2048
+  },
+  "hpo_schedule": {"lr_schedule": "plateau", "lr_patience": 8, "lr_factor": 0.5, "min_lr": 1e-8},
+
+  "search_space": {
+    "lr": {"low": 1e-4, "high": 8e-4, "log": true},
+    "weight_decay": {"low": 1e-4, "high": 3e-2, "log": true},
+    "pos_w": {"choices": [2, 4, 8, 12]}
+  },
+  "baseline_index": 0,
+  "shared_configs": [
+    {"lr": 3.0e-4, "weight_decay": 1.0e-2, "pos_w": 8},
+    {"lr": 1.1e-4, "weight_decay": 1.5e-2, "pos_w": 4},
+    {"lr": 1.9e-4, "weight_decay": 1.3e-3, "pos_w": 12},
+    {"lr": 2.6e-4, "weight_decay": 1.4e-4, "pos_w": 2},
+    {"lr": 4.9e-4, "weight_decay": 7.0e-4, "pos_w": 12},
+    {"lr": 7.1e-4, "weight_decay": 6.9e-3, "pos_w": 4}
+  ],
+  "shared_design_note": "Configs 1-5: maximin Latin hypercube over (log10 lr, log10 wd) anchored on the baseline (numpy seed 20261013, 200k candidates, min distance 0.415 in the unit square), values rounded to 2 significant figures; pos_w 2/4/4/12/12 assigned so it is not confounded with lr.",
+
+  "tpe": {"n_trials": 2, "seed": 20261013, "n_startup_trials": 6, "multivariate": true,
+          "constant_liar": true},
+
+  "budget": {"initial_epochs": 30, "initial_seed": 42, "promote_top": 2,
+             "promoted_epochs": 60, "repeat_seeds": [7, 123]},
+
+  "evaluation": {
+    "split": "val", "aoi_split": "val", "data_stride": 4,
+    "rth": [0.125, 0.25, 0.375, 0.5], "ith": 0.7, "buffer": 5, "min_positives": 150,
+    "tile_batch": {"plain": 32, "ctx50": 16},
+    "initial_epochs": "10,20,30", "objective_epochs": [20, 30],
+    "promoted_epochs": "40,50,60", "promoted_objective_epochs": [50, 60],
+    "seed_epochs": "10:60:10",
+    "save_maps": true
+  },
+
+  "long": {
+    "epochs": 300, "lr_floor_ratio": 0.01,
+    "eval_epochs": "1,10:60:10,80:300:20",
+    "first_seeds": [42], "later_seeds": [7, 123],
+    "constant_lr_control": false
+  },
+
+  "resources": {
+    "train": {
+      "plain": {"queue": "long-gpu", "mem_gb": 160, "gmem_gb": 24, "wall": "24:00", "time_budget_hours": 22.5},
+      "ctx50": {"queue": "long-gpu", "mem_gb": 340, "gmem_gb": 40, "wall": "24:00", "time_budget_hours": 22.5}
+    },
+    "eval": {
+      "plain": {"queue": "long-gpu", "mem_gb": 80, "gmem_gb": 24, "wall": "12:00"},
+      "ctx50": {"queue": "long-gpu", "mem_gb": 192, "gmem_gb": 40, "wall": "16:00"}
+    },
+    "minmax": {"queue": "short", "mem_gb": 16, "wall": "24:00"},
+    "profile": {"queue": "short-gpu", "mem_gb": 48, "gmem_gb": 40, "wall": "1:00"}
+  }
+}

@@ -41,6 +41,8 @@ _COMMANDS = {
                     "full-scene reconstruction, polygons and saved arrays"),
     "eval-outputs": ("sinkholes.inference.outputs", "add_arguments", "main",
                      "metrics and figures over saved eval-scenes outputs"),
+    "eval-snapshots": ("sinkholes.inference.snapshot_eval", "add_arguments", "main",
+                       "score many checkpoints on whole scenes from one data pass (RTh protocol)"),
     "predict": ("sinkholes.inference.predict", "add_arguments", "main",
                 "predict polygons on new raw .unw scenes (no ground truth)"),
     "inspect-run": ("sinkholes.inference.inspect_run", "add_arguments", "main",
@@ -50,6 +52,8 @@ _COMMANDS = {
     # ground-truth relabelling of the test set
     "relabel": ("sinkholes.relabel.command", "add_arguments", "main",
                 "test-set relabelling: workspace, validation, change review, re-scoring"),
+    "hpo": ("sinkholes.hpo.command", "add_arguments", "main",
+            "the Optuna study: init, approve, step (dry run / --submit), status, coverage, ..."),
     "curves": (None, None, None, "regenerate curves.png for a finished run"),
     "architectures": (None, None, None, "list the registered model architectures"),
 }

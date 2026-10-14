@@ -15,6 +15,8 @@ starting over. See :mod:`sinkholes.training.resume`.
 """
 
 import argparse
+import contextlib
+import copy
 import json
 import logging
 import math
@@ -80,6 +82,7 @@ from .reporter import (
     save_prediction_grid,
     setup_logger,
 )
+from . import provenance
 from .resume import (
     RESUME_NAME,
     PreemptionGuard,
@@ -87,17 +90,124 @@ from .resume import (
     check_config_compatible,
     fresh_run_location,
     is_full_resume,
+    isolated_rng,
     learning_rate_of,
     load_legacy_weights,
-    load_resume_checkpoint,
+    load_resume_with_fallback,
     resolve_run_location,
     restore_rng_state,
     resume_banner,
     run_config,
     save_atomic,
+    save_resume_rotating,
 )
+from .schedules import ConstantSchedule, CosineToFloor, parse_epoch_spec
 
 REPORTER_NAME = "sinkholes.train"
+
+#: results.csv columns added 2026-10-13. ``lr_used`` is the LR the epoch trained
+#: at (``lr`` is read after scheduler.step() and is the next epoch's).
+EXTRA_COLUMNS = ["lr_used", "grad/norm_mean", "grad/norm_max", "opt/steps", "opt/skipped",
+                 "amp/scale_min", "epoch_s"]
+#: The training-fit probe's columns, present only with --fit_eval_samples.
+FIT_COLUMNS = ["fit/loss", "fit/dice", "fit/F1", "fit/P", "fit/R"]
+
+#: --time_budget_hours keeps this much in hand: the slowest epoch so far times
+#: the factor, plus a fixed allowance for checkpoint writes and the curves.
+BUDGET_EPOCH_MARGIN = 1.15
+BUDGET_FIXED_MARGIN_S = 300.0
+
+#: Written into the run directory at every state change; the HPO controller
+#: and anyone else read it instead of parsing logs.
+STATUS_NAME = "run_status.json"
+
+#: The fit probe's subset is drawn from its own stream, so changing it cannot
+#: move anything else seeded from --seed.
+FIT_EVAL_STREAM = 0x5EED_F17
+
+
+def snapshot_path(dir_checkpoint, epoch: int) -> Path:
+    """Where the model-only snapshot of ``epoch`` lives."""
+    return Path(dir_checkpoint) / "snapshots" / f"epoch_{int(epoch):03d}.pt"
+
+
+def write_run_status(outpath, **fields) -> Path:
+    """Atomically (re)write ``run_status.json``; never raises into training."""
+    path = Path(outpath) / STATUS_NAME
+    snaps = sorted(p.name for p in (Path(outpath) / "checkpoints" / "snapshots").glob("epoch_*.pt"))
+    record = dict(fields, snapshots=snaps, updated=time.strftime("%Y-%m-%d %H:%M:%S"),
+                  lsf_job_id=os.environ.get("LSB_JOBID"), pid=os.getpid())
+    try:
+        tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+        tmp.write_text(json.dumps(record, indent=2, default=float))
+        os.replace(tmp, path)
+    except OSError as exc:  # a status file must never take a run down
+        logging.warning(f"could not write {path}: {exc}")
+    return path
+
+
+def _without_augmentation(dataset):
+    """A view of ``dataset`` that never flips, sharing its arrays (shallow copy)."""
+    if hasattr(dataset, "augment_flips"):
+        view = copy.copy(dataset)
+        view.augment_flips = "none"
+        return view
+    if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):  # a Subset
+        view = copy.copy(dataset)
+        view.dataset = _without_augmentation(dataset.dataset)
+        return view
+    return dataset
+
+
+def _positive_indices(dataset) -> list:
+    """Indices of samples whose target holds at least one positive pixel."""
+    if hasattr(dataset, "index_map") and hasattr(dataset, "mask_data"):
+        positive = {}
+        out = []
+        for k, (intf_idx, patch_idx) in enumerate(dataset.index_map):
+            if intf_idx not in positive:
+                m = np.asarray(dataset.mask_data[intf_idx])
+                m = m.reshape(m.shape[0], m.shape[1], -1) if m.ndim > 2 else m
+                positive[intf_idx] = (m[0] > 0).reshape(m.shape[1], -1).any(axis=1)
+            if positive[intf_idx][patch_idx]:
+                out.append(k)
+        return out
+    return [k for k in range(len(dataset)) if bool(torch.as_tensor(dataset[k]["mask"]).any())]
+
+
+def fit_eval_subset(train_set, n: int, seed):
+    """A fixed, seeded subset of the POSITIVE training samples, unaugmented.
+
+    Positives only, so fit/dice is on the same footing as val/dice (validation
+    is positives-only): a ring negative scores dice 1.0 for predicting nothing
+    and would inflate it. The draw uses its own seed stream and happens before
+    any training RNG is consumed, so it never moves the training trajectory.
+    """
+    from torch.utils.data import Subset
+
+    pool = _positive_indices(train_set)
+    if not pool:
+        raise SystemExit("--fit_eval_samples: the training split holds no positive sample")
+    k = min(int(n), len(pool))
+    rng = np.random.default_rng(np.random.SeedSequence([int(seed or 0), FIT_EVAL_STREAM]))
+    chosen = sorted(int(pool[i]) for i in rng.choice(len(pool), size=k, replace=False))
+    return Subset(_without_augmentation(train_set), chosen), chosen
+
+
+def validate_schedule_args(args) -> None:
+    """Refuse schedule combinations that would not mean what they say."""
+    horizon = int(getattr(args, "lr_horizon", 0) or 0)
+    if horizon < 0:
+        raise SystemExit(f"--lr_horizon must be >= 0, got {horizon}")
+    if horizon and args.lr_schedule != "cosine":
+        raise SystemExit(f"--lr_horizon applies to --lr_schedule cosine only, not "
+                         f"{args.lr_schedule!r}")
+    if horizon and args.epochs > horizon:
+        raise SystemExit(f"--epochs {args.epochs} exceeds --lr_horizon {horizon}: the cosine "
+                         f"decay is fixed at the start of the run and does not restart")
+    if horizon and not 0.0 <= args.min_lr <= args.lr:
+        raise SystemExit(f"--min_lr {args.min_lr:g} must lie in [0, --learning-rate {args.lr:g}]")
+    parse_epoch_spec(getattr(args, "snapshot_epochs", "") or "")  # raises on a bad spec
 
 
 def add_arguments(p: argparse.ArgumentParser) -> None:
@@ -316,10 +426,20 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                    help="per-epoch table + results.csv + curves.png")
     p.add_argument("--patience", type=int, default=0,
                    help="early-stop after N epochs without val/dice improvement (0 = off)")
-    p.add_argument("--lr_schedule", type=str, default="plateau", choices=["plateau", "cosine"],
+    p.add_argument("--lr_schedule", type=str, default="plateau",
+                   choices=["plateau", "cosine", "constant"],
                    help="plateau: cut the LR when val/dice stops improving. cosine: decay "
                         "from --learning-rate to --min_lr over --epochs, ignoring val "
-                        "(deterministic, so runs stay comparable when val is small and noisy)")
+                        "(deterministic, so runs stay comparable when val is small and noisy); "
+                        "with --lr_horizon the decay length is fixed independently of "
+                        "--epochs. constant: the LR never moves -- a diagnostic control")
+    p.add_argument("--lr_horizon", type=int, default=0,
+                   help="cosine only: the decay length in epochs, fixed at the start of the run "
+                        "and refused if a resume changes it. 0 (default) keeps the historical "
+                        "CosineAnnealingLR(T_max=--epochs). With a horizon the decay is the "
+                        "closed form, clamped at --min_lr (never restarts), so a 300-epoch "
+                        "schedule trained in wall-limited chunks is the same schedule as one "
+                        "uninterrupted run. --epochs may not exceed it")
     p.add_argument("--lr_factor", type=float, default=0.5,
                    help="plateau: multiply the LR by this on each plateau")
     p.add_argument("--lr_patience", type=int, default=5,
@@ -331,6 +451,38 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                    help="floor for both schedules; stops the LR decaying into dead epochs")
     p.add_argument("--save_best_only", action="store_true",
                    help="write only best.pt / last.pt, not one checkpoint per epoch")
+    p.add_argument("--snapshot_epochs", type=str, default="",
+                   help="model-only weights at exactly these epochs, to "
+                        "checkpoints/snapshots/epoch_NNN.pt (same format as best.pt). "
+                        "'10,20,30' or ranges 'a:b:step', e.g. '1,10:60:10,80:300:20'. "
+                        "These are what scene evaluation scores; nothing else is kept "
+                        "per epoch under --save_best_only")
+    p.add_argument("--keep_prev_resume", action="store_true",
+                   help="rotate the recovery checkpoint: the previous epoch's resume.pt is "
+                        "kept as resume_prev.pt, and a resume falls back to it when "
+                        "resume.pt is missing or unreadable")
+    p.add_argument("--time_budget_hours", type=float, default=0.0,
+                   help="stop cleanly after the last epoch that fits in this many hours of "
+                        "THIS execution (dataset build included), leaving run_status.json "
+                        "'paused' so a continuation job can resume. Sized from the slowest "
+                        "epoch seen so far plus a margin. 0 = no budget")
+    p.add_argument("--eval_rng_isolation", action="store_true",
+                   help="run validation (and --fit_eval_samples) inside a saved/restored RNG "
+                        "context, so how often a run evaluates cannot change its training "
+                        "trajectory. Changes the trajectory relative to a run without it "
+                        "(the val loader used to draw one seed per epoch), so it is a "
+                        "STRICT resume key")
+    p.add_argument("--fit_eval_samples", type=int, default=0,
+                   help="each epoch, also score this many TRAINING samples -- a fixed, "
+                        "seeded subset, no augmentation, eval-mode BatchNorm -- into the "
+                        "fit/* columns. The online train/loss is measured on augmented "
+                        "batches while the weights move, so it cannot show whether the "
+                        "model interpolates its training set; this can. 0 = off")
+    p.add_argument("--strict_resume", action="store_true",
+                   help="also refuse a resume that changes lr, schedule, min_lr, plateau "
+                        "factor/patience, early-stopping patience, pos_w or amp (normally "
+                        "only reported). Recorded in the checkpoint, so the lock holds for "
+                        "every later execution of the run")
     p.add_argument("--save_val", action="store_true",
                    help="save validation arrays under validation/")
     p.add_argument("--sample_every", type=int, default=1,
@@ -756,6 +908,28 @@ def build_datasets(args, rep):
     return train_set, val_set, test_set, "random_by_patch"
 
 
+def dataset_files(dataset) -> list:
+    """The patch grid files a SubsiDataset was built from (for provenance)."""
+    while not hasattr(dataset, "ids") and hasattr(dataset, "dataset"):
+        dataset = dataset.dataset
+    ids = getattr(dataset, "ids", None)
+    image_dir, mask_dir = getattr(dataset, "image_dir", None), getattr(dataset, "mask_dir", None)
+    if not ids or image_dir is None:
+        return []
+    seq = getattr(dataset, "seq_dict", None) or {}
+    tids = set(ids)
+    if getattr(dataset, "temporal", False):
+        for i in ids:
+            tids.update(seq.get(i, {}).get("prevs", []))
+    H, W = getattr(dataset, "patch_size", (200, 100))
+    stride = H // dataset._grid_stride[0] if hasattr(dataset, "_grid_stride") else 2
+    out = []
+    for t in sorted(tids):
+        out.append(os.path.join(image_dir, patch_file_name("data", t, H, W, stride)))
+        out.append(os.path.join(mask_dir, patch_file_name("mask", t, H, W, stride)))
+    return out
+
+
 def mask_values_of(dataset):
     """mask_values of a SubsiDataset, seen through any random_split wrappers."""
     while not hasattr(dataset, "mask_values") and hasattr(dataset, "dataset"):
@@ -772,6 +946,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
     ``--epochs`` is the total target, so a resumed run stops at the same place
     an uninterrupted one would have.
     """
+    validate_schedule_args(args)
     dir_checkpoint = Path(outpath) / "checkpoints"
     dir_validation = Path(outpath) / "validation"
 
@@ -812,9 +987,17 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
     # 'plateau' reacts to val/dice, so a noisy validation curve can trigger a cut
     # that has nothing to do with real progress; 'cosine' follows a fixed path and
     # keeps runs comparable. Both stop at --min_lr rather than decaying to nothing.
-    if args.lr_schedule == "cosine":
+    horizon = int(getattr(args, "lr_horizon", 0) or 0)
+    if args.lr_schedule == "cosine" and horizon:
+        # The fixed-horizon form: its shape lives in its own state and a resume
+        # that tries to change it is refused (schedules.py).
+        scheduler = CosineToFloor(optimizer, base_lr=args.lr, floor=args.min_lr,
+                                  horizon=horizon)
+    elif args.lr_schedule == "cosine":
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=args.epochs, eta_min=args.min_lr)
+    elif args.lr_schedule == "constant":
+        scheduler = ConstantSchedule(optimizer, base_lr=args.lr)
     else:
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, "max", factor=args.lr_factor, patience=args.lr_patience,
@@ -844,6 +1027,23 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                 grad_stats["clipped"] = grad_stats.get("clipped", 0) + 1
         else:
             grad_stats["nonfinite"] = grad_stats.get("nonfinite", 0) + 1
+
+    def optimizer_step() -> None:
+        """Clip, step and update the scaler, counting the steps AMP skipped.
+
+        GradScaler.update() backs the scale off exactly when step() found an
+        inf/NaN gradient and therefore did NOT apply the update, so a scale that
+        went down across the pair is a skipped update -- no other cause lowers it.
+        """
+        clip_and_record()
+        before = grad_scaler.get_scale() if args.amp else None
+        grad_scaler.step(optimizer)
+        grad_scaler.update()
+        if args.amp:
+            after = grad_scaler.get_scale()
+            if after < before:
+                grad_stats["skipped"] = grad_stats.get("skipped", 0) + 1
+            grad_stats["scale_min"] = min(grad_stats.get("scale_min", after), after)
     criterion = (nn.CrossEntropyLoss() if model.n_classes > 1
                  else nn.BCEWithLogitsLoss(pos_weight=torch.tensor([args.pos_w], device=device)))
 
@@ -855,6 +1055,20 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
 
     n_train, n_val = len(train_set), len(val_set)
     rep = setup_logger(REPORTER_NAME) if args.reporter else None
+    # The training-fit probe: a fixed, unaugmented subset of the train split,
+    # scored like validation. None when --fit_eval_samples is 0.
+    fit_loader = None
+    if int(getattr(args, "fit_eval_samples", 0) or 0) > 0:
+        fit_subset, fit_indices = fit_eval_subset(train_set, args.fit_eval_samples, args.seed)
+        fit_loader = DataLoader(fit_subset, shuffle=False, drop_last=False, batch_size=1,
+                                num_workers=1, pin_memory=True)
+        logging.info(f"training-fit probe: {len(fit_indices)} fixed positive training "
+                     f"samples, unaugmented (first indices {fit_indices[:5]})")
+    snapshot_epochs = set(parse_epoch_spec(getattr(args, "snapshot_epochs", "") or ""))
+    keep_prev = bool(getattr(args, "keep_prev_resume", False))
+    isolate = bool(getattr(args, "eval_rng_isolation", False))
+    budget_s = float(getattr(args, "time_budget_hours", 0.0) or 0.0) * 3600.0
+    exec_start = float(getattr(args, "_exec_start", 0.0) or time.time())
     table = results_csv = None
     tracker = BestTracker("val/dice", mode="max", patience=args.patience)
     guard = guard if guard is not None else PreemptionGuard(rep or logging.getLogger())
@@ -868,7 +1082,10 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
         check_config_compatible(checkpoint.get("config", {}), run_config(args), "resume state")
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
-        scheduler.load_state_dict(checkpoint["scheduler"])
+        try:
+            scheduler.load_state_dict(checkpoint["scheduler"])
+        except (ValueError, KeyError) as exc:
+            raise SystemExit(f"cannot resume: {exc}") from exc
         # An empty scaler state means the checkpoint ran without AMP; feeding
         # that to an enabled scaler raises, so only restore a real one.
         if checkpoint.get("scaler"):
@@ -888,6 +1105,21 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
         load_legacy_weights(checkpoint, model, rep or logging.getLogger())
 
     start_epoch = completed_epoch + 1
+
+    try:
+        provenance.append_execution_record(outpath, provenance.run_record(
+            args, config=run_config(args), scheduler=scheduler,
+            files_read=dataset_files(train_set) + dataset_files(val_set),
+            extra={"resumed_from_epoch": completed_epoch if resuming else None,
+                   "start_epoch": start_epoch, "target_epochs": int(args.epochs),
+                   "batch": {"micro": int(args.batch_size), "accum": accum,
+                             "effective": int(args.batch_size) * accum},
+                   "fit_eval_samples": int(getattr(args, "fit_eval_samples", 0) or 0),
+                   "snapshot_epochs": sorted(parse_epoch_spec(
+                       getattr(args, "snapshot_epochs", "") or "")),
+                   "time_budget_hours": float(getattr(args, "time_budget_hours", 0) or 0)}))
+    except Exception as exc:  # provenance must never take a run down
+        logging.warning(f"could not write the run manifest: {exc}")
 
     if rep is not None:
         if device.type == "cpu":
@@ -966,7 +1198,9 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
         columns = ["epoch", "time", "train/loss", "val/loss", "val/dice", "val/jaccard",
                    "val/IoU", "val/F1", "val/P", "val/R", "lr",
                    "train/bce", "train/dice", "train/jaccard",
-                   "grad/norm", "grad/clip%", "amp/scale"]
+                   "grad/norm", "grad/clip%", "amp/scale"] + EXTRA_COLUMNS
+        if fit_loader is not None:
+            columns += FIT_COLUMNS
         table = EpochTable(columns, rep, header_every=25)
         # Resuming keeps epochs 1..completed and appends from there; a fresh run
         # starts the file over exactly as before.
@@ -1018,7 +1252,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
 
     def save_resume(epoch: int) -> None:
         """Atomically record a *completed* epoch as the recovery point."""
-        save_atomic(
+        save_resume_rotating(
             build_resume_state(
                 epoch=epoch, global_step=global_step, model=model, optimizer=optimizer,
                 scheduler=scheduler, grad_scaler=grad_scaler, tracker=tracker,
@@ -1032,11 +1266,25 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                        "job_name": args.job_name, "run_dir": str(outpath)},
             ),
             resume_path,
+            keep_prev,
         )
+
+    def write_status(state: str, **extra) -> None:
+        write_run_status(outpath, state=state, completed_epoch=completed_epoch,
+                         target_epochs=args.epochs, best_epoch=tracker.best_epoch,
+                         best_val_dice=tracker.best, **extra)
+
+    slowest_epoch = 0.0
+    paused = False
+    write_status("running")
 
     try:
         for epoch in range(start_epoch, args.epochs + 1):
             partial_epoch = epoch
+            epoch_t0 = time.time()
+            # The LR this epoch actually trains at. The historical `lr` column is
+            # read AFTER scheduler.step(), so it is the NEXT epoch's LR.
+            lr_used = optimizer.param_groups[0]["lr"]
             model.train()
             epoch_loss = 0.0
             n_batches = 0
@@ -1083,9 +1331,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                     grad_scaler.scale(loss / accum).backward()
                     micro += 1
                     if micro == accum:
-                        clip_and_record()
-                        grad_scaler.step(optimizer)
-                        grad_scaler.update()
+                        optimizer_step()
                         micro = 0
 
                     pbar.update(images.shape[0])
@@ -1108,9 +1354,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                 # away. Retain the historical loss/accum weighting for this
                 # shorter group; unscale once at the optimiser boundary.
                 if micro:
-                    clip_and_record()
-                    grad_scaler.step(optimizer)
-                    grad_scaler.update()
+                    optimizer_step()
                     optimizer.zero_grad(set_to_none=True)
                     micro = 0
 
@@ -1128,12 +1372,19 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
             val_samples = ({"n": args.n_samples, "channel": cur_channel,
                             "min_sep": args.sample_min_sep} if want_samples else None)
 
-            val_score = evaluate(
-                model, val_loader, device, args.amp,
-                mode="val", epoch=epoch, out_path=str(dir_validation),
-                save_val=args.save_val, metrics_out=val_metrics,
-                loss_fn=val_loss_fn, samples_out=val_samples,
-            )
+            fit_metrics = {} if fit_loader is not None else None
+            with (isolated_rng() if isolate else contextlib.nullcontext()):
+                val_score = evaluate(
+                    model, val_loader, device, args.amp,
+                    mode="val", epoch=epoch, out_path=str(dir_validation),
+                    save_val=args.save_val, metrics_out=val_metrics,
+                    loss_fn=val_loss_fn, samples_out=val_samples,
+                )
+                if fit_loader is not None:
+                    fit_metrics["dice"] = float(evaluate(
+                        model, fit_loader, device, args.amp, mode="val", epoch=epoch,
+                        metrics_out=fit_metrics, loss_fn=loss_of,
+                    ))
             # ReduceLROnPlateau steps on the metric; CosineAnnealingLR on the epoch.
             if args.lr_schedule == "cosine":
                 scheduler.step()
@@ -1177,6 +1428,19 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
             row["grad/norm"] = round(float(np.median(g_norms)), 8) if g_norms else float("nan")
             row["grad/clip%"] = round(100.0 * g_clipped / g_steps, 1) if g_steps else float("nan")
             row["amp/scale"] = grad_scaler.get_scale() if args.amp else 1.0
+            row["lr_used"] = lr_used
+            row["grad/norm_mean"] = round(float(np.mean(g_norms)), 8) if g_norms else float("nan")
+            row["grad/norm_max"] = round(float(np.max(g_norms)), 8) if g_norms else float("nan")
+            row["opt/steps"] = g_steps
+            row["opt/skipped"] = int(grad_stats.get("skipped", 0))
+            row["amp/scale_min"] = grad_stats.get("scale_min", row["amp/scale"])
+            row["epoch_s"] = round(time.time() - epoch_t0, 1)
+            if fit_metrics is not None:
+                row["fit/loss"] = round(fit_metrics.get("loss", float("nan")), 6)
+                row["fit/dice"] = round(fit_metrics["dice"], 6)
+                row["fit/F1"] = round(fit_metrics["f1"], 4)
+                row["fit/P"] = round(fit_metrics["precision"], 4)
+                row["fit/R"] = round(fit_metrics["recall"], 4)
             if epoch == start_epoch and rep is not None and g_steps:
                 rep.info(f"  gradients: clip bit on {row['grad/clip%']:.1f}% of "
                          f"{g_steps} steps, median true norm {row['grad/norm']:.3g}, "
@@ -1203,12 +1467,15 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                 improved = tracker.update(epoch, row)
                 if improved:
                     save_atomic(state, best_path)
+                if epoch in snapshot_epochs:
+                    save_atomic(state, snapshot_path(dir_checkpoint, epoch))
                 early_stopped = tracker.should_stop
                 # Written last: its epoch number is what declares everything above
                 # complete and consistent for this epoch.
                 save_resume(epoch)
                 last_epoch = completed_epoch = epoch
                 partial_epoch = None
+                write_status("running")
 
             if improved:
                 msg = (f"  new best val/dice={tracker.best:.4f} @ epoch {epoch}"
@@ -1220,6 +1487,20 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                        f"(best val/dice={tracker.best:.4f} @ epoch {tracker.best_epoch})")
                 rep.warning(msg) if rep is not None else logging.warning(msg)
                 break
+
+            # Wall budget: stop while the next epoch still cannot be cut off. The
+            # continuation is a NEW job resuming this directory -- nothing here
+            # relies on LSF requeueing anything.
+            slowest_epoch = max(slowest_epoch, time.time() - epoch_t0)
+            if budget_s and epoch < args.epochs:
+                left = budget_s - (time.time() - exec_start)
+                if left < slowest_epoch * BUDGET_EPOCH_MARGIN + BUDGET_FIXED_MARGIN_S:
+                    paused = True
+                    msg = (f"Time budget: {left / 3600:.2f} h of {budget_s / 3600:.2f} h left, "
+                           f"slowest epoch {slowest_epoch / 60:.1f} min -- pausing after epoch "
+                           f"{epoch} of {args.epochs}. Resume with --resume {outpath}")
+                    rep.warning(msg) if rep is not None else logging.warning(msg)
+                    break
 
     except KeyboardInterrupt:
         interrupted = True
@@ -1244,6 +1525,13 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
             log.warning(f"Resume with:  --resume {resume_path}   (or --resume auto "
                         f"under the same LSF job)")
 
+    final_state = ("interrupted" if interrupted
+                   else "early_stopped" if early_stopped
+                   else "paused" if paused
+                   else "complete" if completed_epoch >= args.epochs
+                   else "stopped")
+    write_status(final_state)
+
     # Leave `model` holding the best weights, not the last epoch's.
     if best_path.exists() and tracker.best_epoch:
         best_state = torch.load(best_path, map_location=device)
@@ -1263,6 +1551,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
         rep.info("=" * 72)
         status = ("interrupted" if interrupted
                   else "complete" if completed_epoch >= args.epochs or early_stopped
+                  else "paused (time budget)" if paused
                   else "stopped")
         rep.info(f"Training {status} — {completed_epoch} epochs done in "
                  f"{human_time(elapsed)}"
@@ -1303,6 +1592,9 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
 
 def main(args) -> None:
     logging.basicConfig(level=logging.INFO)
+    # The wall budget counts the whole execution, dataset build included.
+    args._exec_start = time.time()
+    validate_schedule_args(args)
     # Without --resume this is the old timestamped directory; with it, a fixed
     # one a requeued LSF execution lands in again.
     location = resolve_run_location(args)
@@ -1313,7 +1605,7 @@ def main(args) -> None:
     checkpoint = None
     legacy_source = None
     if location.resume_path is not None:
-        checkpoint = load_resume_checkpoint(location.resume_path)
+        checkpoint, location.resume_path = load_resume_with_fallback(location.resume_path)
         if not is_full_resume(checkpoint) and location.from_file:
             legacy_source = location.resume_path
             location = fresh_run_location(args)
@@ -1418,8 +1710,14 @@ def main(args) -> None:
                         f"reuses {outpath} and starts again.")
             return
 
-        train_model(args, model, device, train_set, val_set, test_set, outpath,
-                    checkpoint=checkpoint, guard=guard)
+        try:
+            train_model(args, model, device, train_set, val_set, test_set, outpath,
+                        checkpoint=checkpoint, guard=guard)
+        except Exception as exc:
+            # Recorded so a controller never mistakes a crashed chunk for a
+            # paused one and resubmits it blindly; the traceback still propagates.
+            write_run_status(outpath, state="failed", error=f"{type(exc).__name__}: {exc}"[:2000])
+            raise
 
 
 if __name__ == "__main__":

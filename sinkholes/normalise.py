@@ -30,7 +30,24 @@ def normalise_phase(channel: np.ndarray, *, range_tol: float) -> np.ndarray:
     """
     mn = float(np.nanmin(channel))
     mx = float(np.nanmax(channel))
-    if (mn < -range_tol) or (mx > 1.0 + range_tol):
+    return normalise_phase_given_range(channel, mn, mx, range_tol=range_tol)
+
+
+def is_radian_range(mn: float, mx: float, *, range_tol: float) -> bool:
+    """The branch :func:`normalise_phase` takes for data spanning [mn, mx]."""
+    return bool((mn < -range_tol) or (mx > 1.0 + range_tol))
+
+
+def normalise_phase_given_range(channel: np.ndarray, mn: float, mx: float, *,
+                                range_tol: float) -> np.ndarray:
+    """:func:`normalise_phase` with the range supplied rather than measured.
+
+    The branch is decided over the WHOLE array the caller would have passed,
+    but the arithmetic is elementwise -- so a caller holding only part of a
+    scene (the AOI tiles) gets bit-identical values by passing the full
+    scene's min/max here. Returns a new array.
+    """
+    if is_radian_range(mn, mx, range_tol=range_tol):
         return (channel + np.pi) / (2 * np.pi)
     out = channel.copy()
     zeros = out == 0.0
