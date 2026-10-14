@@ -440,6 +440,22 @@ Plain attention at k10 (0.7907) is the best k10 model.
 
 ## 3. The best models we have
 
+> **Reference model (2026-10-07): `posw8_tattn_k10_plain_30e`**, plain attention at k10. Use
+> it for inspection, relabelling and comparisons; **not** a ctx50 model. The two leaders'
+> headline numbers below (0.7905 ctx50 k5, 0.7907 plain k10) look tied only because they come
+> from different scene lists. On the **same 17 scenes** (strict tolerance, best of four RTh):
+>
+> | model | mean object F1 | area-weighted F1 |
+> |---|---|---|
+> | `posw8_tattn_k10_plain_30e` | **0.7907** | **0.7881** |
+> | `th350_tattn_ctx50_neg10` | 0.7863 | 0.7725 |
+>
+> That matches the context finding: plain beat ctx50 in all 5 pairs scored. The "mean" figure
+> is the per-scene mean of recall/precision that every number in this section uses; the
+> area-weighted one weights scenes by GT area, as the paper does. Newer plain runs exist
+> (`posw8_tattn_plain_40e`, k5 and generation 5, mean F1 0.7876 on 24 scenes; `fill_tattn_*`,
+> 2026-10-06, not yet scored), so re-rank before quoting a winner.
+
 **Generation 4 (current), temporal k5** — all eight scored on the same 20 scenes under the
 RTh protocol, best of four thresholds, strict tolerance `ith0.7_b5`. Directly comparable
 with each other and **with nothing else in this file**.
