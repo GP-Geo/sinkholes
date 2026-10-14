@@ -51,6 +51,11 @@ RESUME_VERSION = 1
 #: Name of the full-state checkpoint inside a run's ``checkpoints/`` directory.
 RESUME_NAME = "resume.pt"
 
+#: The previous epoch's full state, kept by ``--keep_prev_resume``. It is what a
+#: resume falls back to when ``resume.pt`` is missing (a kill between the two
+#: renames of a rotation) or unreadable.
+RESUME_PREV_NAME = "resume_prev.pt"
+
 #: Settings that change what is being trained or on what data. Resuming across
 #: a change to any of these would silently produce a run that is neither the
 #: old experiment nor a clean new one, so it is refused.
@@ -96,6 +101,14 @@ STRICT_CONFIG_KEYS: Sequence[str] = (
     "batch_size",
     "accum_steps",
     "seed",
+    # Absent from every config written before 2026-10-13 (and emitted only when
+    # they apply), so older checkpoints skip them and stay resumable. Each one
+    # changes what is optimised or how: Adam's averaging windows, the shape of a
+    # fixed-horizon schedule, and whether evaluation draws on the training RNG.
+    "beta1",
+    "beta2",
+    "lr_horizon",
+    "eval_rng",
 )
 
 #: Settings a resume may legitimately change (extending --epochs is the whole
@@ -111,6 +124,12 @@ ADVISORY_CONFIG_KEYS: Sequence[str] = (
     "pos_w",
     "amp",
 )
+
+#: The advisory keys that ``--strict_resume`` locks as well. Everything above
+#: except ``epochs``, whose extension is the whole point of a continuation. A
+#: run started with --strict_resume records it, and the lock then holds for
+#: every later execution whether or not the flag is passed again.
+STRICT_RESUME_LOCKS: Sequence[str] = tuple(k for k in ADVISORY_CONFIG_KEYS if k != "epochs")
 
 logger = logging.getLogger(__name__)
 
@@ -259,7 +278,30 @@ def run_config(args) -> Dict[str, Any]:
         "patience": int(args.patience),
         "pos_w": float(args.pos_w),
         "amp": bool(args.amp),
+        # The keys below are emitted only when they apply, so every checkpoint
+        # written before them keeps its exact fingerprint.
+        **_optional_config(args),
     }
+
+
+def _optional_config(args) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    if str(getattr(args, "optimizer", "rmsprop")) in ("adam", "adamw"):
+        out["beta1"] = float(args.beta1)
+        out["beta2"] = float(args.beta2)
+    horizon = int(getattr(args, "lr_horizon", 0) or 0)
+    if horizon > 0:
+        out["lr_horizon"] = horizon
+    if getattr(args, "eval_rng_isolation", False):
+        out["eval_rng"] = EVAL_RNG_ISOLATED
+    if getattr(args, "strict_resume", False):
+        out["strict_resume"] = True
+    return out
+
+
+#: Recorded as ``eval_rng`` when validation/fit evaluation runs inside
+#: :func:`isolated_rng`, i.e. cannot move the training RNG streams.
+EVAL_RNG_ISOLATED = "isolated-v1"
 
 
 class IncompatibleResume(SystemExit):
@@ -300,9 +342,16 @@ def check_config_compatible(saved: Mapping[str, Any], current: Mapping[str, Any]
             f"fresh run, or continue it with the pre-2026-09-08 source tree."
         )
     missing = object()
+    strict_keys = list(STRICT_CONFIG_KEYS)
+    # --strict_resume on EITHER side locks the run's optimisation settings: the
+    # run that started with it must not be loosened by a continuation that
+    # forgot the flag.
+    locked = bool(saved.get("strict_resume") or current.get("strict_resume"))
+    if locked:
+        strict_keys += [k for k in STRICT_RESUME_LOCKS if k not in strict_keys]
     breaking = [
         (key, saved.get(key, missing), current.get(key))
-        for key in STRICT_CONFIG_KEYS
+        for key in strict_keys
         if saved.get(key, missing) is not missing and saved.get(key) != current.get(key)
     ]
     if breaking:
@@ -325,7 +374,8 @@ def check_config_compatible(saved: Mapping[str, Any], current: Mapping[str, Any]
     return [
         f"{key}: checkpoint {saved.get(key)!r} -> now {current.get(key)!r}"
         for key in ADVISORY_CONFIG_KEYS
-        if saved.get(key, missing) is not missing and saved.get(key) != current.get(key)
+        if key not in strict_keys
+        and saved.get(key, missing) is not missing and saved.get(key) != current.get(key)
     ]
 
 
@@ -410,7 +460,18 @@ def auto_run_dir(output_dir: str, job_name: str,
 
 
 def _checkpoint_in(run_dir: Path) -> Path:
-    return Path(run_dir) / "checkpoints" / RESUME_NAME
+    """The recovery point of a run directory.
+
+    ``resume.pt`` normally. Only when it is ABSENT and the rotated previous copy
+    exists is ``resume_prev.pt`` returned: a kill between the two renames of
+    :func:`save_resume_rotating` leaves exactly that state, and the previous
+    epoch is then the newest complete record there is.
+    """
+    ckpt = Path(run_dir) / "checkpoints" / RESUME_NAME
+    prev = ckpt.with_name(RESUME_PREV_NAME)
+    if not ckpt.exists() and prev.exists():
+        return prev
+    return ckpt
 
 
 def fresh_run_location(args) -> RunLocation:
@@ -512,6 +573,55 @@ def save_atomic(obj: Any, path) -> Path:
             tmp.unlink()
         raise
     return path
+
+
+def save_resume_rotating(state: Any, path, keep_previous: bool) -> Path:
+    """Write the recovery checkpoint, keeping the one it replaces when asked.
+
+    The new state is written and fsynced to a temp file FIRST, so at every
+    instant at least one complete recovery point exists on disk:
+
+        tmp written -> resume.pt renamed to resume_prev.pt -> tmp renamed to resume.pt
+
+    A kill after the first rename leaves only ``resume_prev.pt``, which
+    :func:`_checkpoint_in` then picks up. Without ``keep_previous`` this is
+    exactly :func:`save_atomic`.
+    """
+    path = Path(path)
+    if not keep_previous:
+        return save_atomic(state, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    try:
+        with tmp.open("wb") as handle:
+            torch.save(state, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if path.exists():
+            os.replace(path, path.with_name(RESUME_PREV_NAME))
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    return path
+
+
+@contextlib.contextmanager
+def isolated_rng():
+    """Run a block without letting it move any training RNG stream.
+
+    Evaluation draws on the global RNGs even though it is deterministic: every
+    DataLoader iterator takes a base seed from torch's generator, shuffled or
+    not. Left alone, how often (and on what) a run evaluates would therefore
+    change its training trajectory. Inside this block the streams are saved and
+    put back exactly, whatever the block drew.
+    """
+    saved = rng_state()
+    try:
+        yield
+    finally:
+        restore_rng_state(saved)
 
 
 def rng_state() -> Dict[str, Any]:
@@ -617,6 +727,25 @@ def load_resume_checkpoint(path, map_location="cpu") -> Dict[str, Any]:
             f"If it is corrupt, delete it — the run then restarts from epoch 1 in the "
             f"same directory (best.pt / last.pt are left untouched)."
         ) from exc
+
+
+def load_resume_with_fallback(path, log=None, map_location="cpu"):
+    """Load ``path``; if it is unreadable, fall back to its rotated previous copy.
+
+    Returns ``(state, path_actually_loaded)``. Only a ``resume.pt`` has a
+    fallback, and only when ``resume_prev.pt`` sits beside it.
+    """
+    log = log or logger
+    path = Path(path)
+    prev = path.with_name(RESUME_PREV_NAME)
+    try:
+        return load_resume_checkpoint(path, map_location=map_location), path
+    except SystemExit:
+        if path.name != RESUME_NAME or not prev.exists():
+            raise
+        log.warning(f"{path} is unreadable -- falling back to {prev} (one epoch older); "
+                    f"the epoch after it will be repeated.")
+        return load_resume_checkpoint(prev, map_location=map_location), prev
 
 
 def resume_banner(path, state: Mapping[str, Any], target_epochs: int,
