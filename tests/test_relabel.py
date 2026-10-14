@@ -185,6 +185,49 @@ def test_gt_dir_rescore(tmp_path):
         outputs.main(_outputs_args(src, gt_dir=alt, out_json=tmp_path / "bad.json"))
 
 
+def test_ignore_map_makes_flagged_ground_dont_care(tmp_path):
+    from sinkholes.inference import outputs
+
+    intf = "20250329_20250409"
+    src, alt = tmp_path / "src", tmp_path / "alt"
+    src.mkdir(), alt.mkdir()
+    kept = np.zeros((60, 50), np.float32)
+    kept[10:20, 10:20] = 1
+    flagged = np.zeros_like(kept)
+    flagged[40:50, 30:40] = 1
+    np.save(src / f"{intf}_gt.npy", kept + flagged)
+    np.save(alt / f"{intf}_gt.npy", kept)              # the GT without the flagged polygon
+    np.save(tmp_path / "ign.npy", flagged)
+    (tmp_path / "ign.json").write_text(json.dumps({intf: str(tmp_path / "ign.npy")}))
+
+    def score(pred, name, **kw):
+        np.save(src / f"{intf}_pred.npy", pred)
+        outputs.main(_outputs_args(src, out_json=tmp_path / name, **kw))
+        return json.load(open(tmp_path / name))["per_intf"][intf]["0.5"]
+
+    hit = 0.9 * (kept + flagged)                      # finds both
+    miss = 0.9 * kept                                 # misses the flagged one
+    assert score(miss, "a.json")["recall"] < 0.6
+    assert score(miss, "b.json", gt_dir=alt, ignore_map=tmp_path / "ign.json")["recall"] > 0.99
+    assert score(hit, "c.json", gt_dir=alt)["precision"] < 0.6     # background: a false positive
+    r = score(hit, "d.json", gt_dir=alt, ignore_map=tmp_path / "ign.json")
+    assert r["precision"] > 0.99 and r["gt_area"] == pytest.approx(100, abs=1)
+
+    # A blob over the flagged polygon that runs 20 px out into background: only
+    # its 200 px outside count (as a false positive), not the 100 px on the flag.
+    straddle = miss.copy()
+    straddle[40:50, 10:40] = 0.9
+    r = score(straddle, "f.json", gt_dir=alt, ignore_map=tmp_path / "ign.json")
+    assert r["precision"] == pytest.approx(100 / (100 + 200), abs=1e-3)
+    # A prediction 2 px wider than the flagged polygon leaves a rim inside the
+    # buffer: tolerated, as at a GT edge.
+    rim = miss.copy()
+    rim[38:52, 28:42] = 0.9
+    assert score(rim, "g.json", gt_dir=alt, ignore_map=tmp_path / "ign.json")["precision"] > 0.99
+    with pytest.raises(SystemExit):                   # the saved GT still holds that ground
+        score(hit, "e.json", ignore_map=tmp_path / "ign.json")
+
+
 def test_export_writer_keeps_date_fields(tmp_path):
     """The corrected GT must be matchable the way prepare-patches matches it."""
     import sqlite3

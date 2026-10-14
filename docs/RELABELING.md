@@ -348,16 +348,29 @@ operating points are RTh 0.125–0.25. The map is zero where no tile was predict
 the AOI tiles and the LiDAR2022 gate (the dashed `predictable_area`). Colours are greens,
 the one hue the phase colour scale never uses.
 
-**Reference model:** `th350_tattn_ctx50_neg10`, from
-`outputs/predictions/th350_tattn_ctx50_neg10_2026-09-10_01h16_lsf_816217/best/scenes_temporal_th350_rth_09_14_12h21`.
+**Reference model: `posw8_tattn_k10_plain_30e`**, plain temporal attention at k10, no
+context margin. Its predictions come from its generation-5 evaluation,
+`outputs/predictions/temporal_k10_th350_tattn_posw8_30e/best/scenes_temporal_k10_fill_rth_10_06_13h28`,
+which covers all 24 scenes: the 20 official ones plus the 4 that filled chains admit.
 
-- It is the best generation-4 temporal k5 model in `docs/RESULTS.md` §3 (object F1 0.7905,
-  P 0.869, R 0.725, strict tolerance).
-- It ranks first on the area-weighted F1 recomputed from its saved metrics at RTh 0.25 and
-  0.5.
-- It has predictions for all 20 official scenes.
-- The nominally equal k10 leader, `posw8_tattn_k10_plain_30e` (0.7907), covers only 17. It
-  has nothing for 20260304, 20260326 or 20260406.
+**Do not use a ctx50 model as the reference.** Context (ctx50) lost to plain in every pair
+scored (5/5, `docs/RESULTS.md`). The two leaders' headline numbers (0.7905 for
+`th350_tattn_ctx50_neg10`, 0.7907 for this model) look tied, but they come from different
+scene lists. On the **same 17 scenes**, strict tolerance, best of four RTh (2026-10-07):
+
+| model | mean object F1 | area-weighted F1 |
+|---|---|---|
+| `posw8_tattn_k10_plain_30e` | **0.7907** | **0.7881** |
+| `th350_tattn_ctx50_neg10` (k5, ctx50) | 0.7863 | 0.7725 |
+
+(`th350_tattn_ctx50_neg10` was the reference until 2026-10-07; its rasters remain in
+`predictions/th350_tattn_ctx50_neg10/`. The first corrected-label comparison was run on it
+too, and is kept.)
+
+**Choosing a reference later:** rank every evaluation of the current generation on the
+**same scene list**, with both mean and area-weighted object F1, and check `outputs/predictions/`
+for runs newer than the docs (the `fill_tattn_*` runs of 2026-10-06 had no metrics yet on
+2026-10-07).
 
 **Adding another model.** Pass any other saved eval directory; it becomes its own group, also
 off:
@@ -557,6 +570,22 @@ false positive that was missing GT*. Every GT object is marked detected/missed u
 labeling. These use the exact `object_level_evaluate` rules (a test pins the equivalence),
 georeferenced from the actual canvas origin.
 
+**Flagged polygons left out (`--exclude_flagged`).** This scores a third time, into
+`olm_corrected_<label>_noflag.json`. The GT is the corrected labels minus every qc-flagged
+polygon, and the flagged polygons become **don't-care ground** that is not counted at all
+(`eval-outputs --ignore_map`, `object_level_evaluate(ignore=...)`):
+
+- missing a flagged polygon costs no recall: it is not in the GT;
+- predicted pixels on a flagged polygon are cut away before scoring (GT wins where the two
+  overlap). A predicted object that straddles one is judged by its part outside alone;
+- the rim a cut leaves within the 5/10 px buffer of a flagged polygon is tolerated, as it
+  would be at a GT edge.
+
+Removing the flagged polygons as plain background would instead turn every hit on them into a
+false positive. A test pins all three behaviours. The canvases are cached as
+`gt_canvases/<label>_noflag_*` and `<label>_flagged_*`, and `meta.json` records how many
+polygons were ignored per scene (`flagged_polygons_ignored`).
+
 **Comparison.** `relabel eval compare` writes `eval/v2/comparison/`:
 
 - `aggregate_th0.25.csv`: per model and tolerance, weighted/mean recall, precision and F1,
@@ -570,6 +599,95 @@ Default scope: the 12 generation-4 vote-protocol evaluations (8 on the k=5 list,
 k=10 list). Pass `--eval_dirs` for others; each must pass the bit-identity check.
 
 Nothing is written to any `outputs/predictions/...` directory.
+
+## 6b. First results: 10 relabelled scenes (export `v2_partial_20261006`)
+
+These are provisional. The labels are as saved on 2026-10-06 15:49: 10 of 20 official scenes
+(all 2025), 182 changes, 36 flags. One split piece with an empty geometry in
+20250830_20250910 was exported with `--allow_errors`; it rasterises to nothing. Both models'
+saved GTs reproduce bit for bit, and the re-score of the original labels matches the archived
+metrics exactly. The numbers below cover the 10 relabelled scenes only, at strict tolerance.
+
+| model | RTh | recall old → new | precision old → new | area-weighted F1 | mean F1 |
+|---|---|---|---|---|---|
+| `posw8_tattn_k10_plain_30e` (reference) | 0.125 | 0.691 → 0.763 | 0.816 → 0.816 | 0.748 → **0.788** | 0.768 → 0.802 |
+| | 0.25 | 0.603 → 0.689 | 0.852 → 0.858 | 0.706 → 0.764 | 0.751 → 0.798 |
+| `th350_tattn_ctx50_neg10` | 0.125 | 0.609 → 0.696 | 0.846 → 0.854 | 0.708 → 0.767 | 0.757 → 0.804 |
+| | 0.25 | 0.587 → 0.682 | 0.849 → 0.859 | 0.694 → 0.760 | 0.748 → 0.801 |
+| `posw8_single_k10_plain_30e` (single-frame U-Net) | 0.125 | 0.642 → 0.738 | 0.762 → 0.773 | 0.697 → 0.755 | 0.735 → 0.779 |
+| | 0.25 | 0.579 → 0.671 | 0.813 → 0.825 | 0.676 → 0.740 | 0.730 → 0.781 |
+
+- **The gain is recall.** Missed GT objects roughly halve (plain: 220 → 125; ctx50:
+  228 → 117). Precision barely moves: few false positives were missing labels (18 and 23
+  turned FP → TP).
+- **The flags mark what the models miss.** On flagged polygons (26 objects, 22% of the
+  labelled area) recall is 0.13 (plain) and 0.12 (ctx50), against 0.84 on the rest.
+- **Model order.** Plain k10 stays ahead on area-weighted F1 (0.788 vs 0.767). On mean F1 the
+  two are now level (0.802 vs 0.804, inside the ±0.006 noise floor). Ten scenes cannot
+  separate them.
+- **Temporal vs single frame.** The single-frame U-Net gains as much from the corrections as
+  the tattn models (area-weighted F1 0.697 → 0.755) and stays third. The plain-tattn lead
+  narrows: 0.052 → 0.034 area-weighted, 0.034 → 0.021 mean. Part of the old gap was label
+  noise, but not all of it. On unflagged polygons the two have the same recall (0.845 vs
+  0.843). The tattn lead comes from precision (0.816 vs 0.773 at RTh 0.125) and from the
+  flagged hard polygons (recall 0.13 vs 0.04).
+- **Caveat.** If predictions were visible while a scene was edited, deleting labels the model
+  misses raises recall by construction. Record which scenes were labelled blind.
+
+Outputs: `eval/v2_partial_20261006/<model>/…/` (`olm_original.json`,
+`olm_corrected_v2_partial_20261006.json`, `objects_th0.25.gpkg`, `meta.json`).
+
+## 6c. All 20 scenes relabelled (export `v2_20_20261013`)
+
+Labels as saved on 2026-10-13 11:41: every official scene relabelled, 366 changes (97 added,
+152 deleted, 117 modified) and 46 flagged polygons. 37 of the flagged polygons lie inside the
+AOI, where they hold 12% of the corrected GT area (`noisy_large` alone 9.7%). The export used
+`--allow_errors` for two harmless errors, both fixed the same day:
+
+- the known empty split piece in 20250830_20250910 was marked `deleted`;
+- the 0.1-pixel self-intersection loop of `20260326_20260406_O73857` was removed (`make_valid`,
+  largest part kept).
+
+The clean export, **`v2_20_20261013_fixed`** (0 validation errors, 2,519 polygons), burns the
+same pixels as `v2_20_20261013` in all 20 scenes (checked on every scene's raster grid), so
+the numbers below hold for it unchanged. All 20 scenes are marked `reviewed` in
+`manifest.csv`.
+
+Three k10 models, all on the **same 20 scenes**. The fill and no-fill twins come from their
+24-scene generation-5 evaluations, restricted with `--only_relabelled`. The single U-Net
+comes from its 17-scene evaluation plus local same-protocol runs for the three South scenes
+it lacked (`scenes_relabel17_missing2_rth_10_07_12h09`, `scenes_relabel20_missing1_rth_10_13_11h49`).
+Every saved GT reproduces bit for bit, and every re-score of an archived evaluation matches
+it exactly. Scored on WEXAC with `scripts/relabel/eval_v2.sh` and pooled per model by
+`eval/v2_20_20261013/comparison_3models/pool_v2_20.py`.
+
+Strict tolerance (`ith0.7_b5`), best of four RTh (RTh 0.125 unless marked), area-weighted F1 /
+mean F1:
+
+| labels | fill k10 tattn | no-fill k10 tattn | single U-Net k10 |
+|---|---|---|---|
+| original | **0.8081** / **0.8146** | 0.7917 / 0.7974 | 0.7671 / 0.7777 |
+| corrected | **0.8444** / **0.8455** | 0.8292 / 0.8291 | 0.8122 / 0.8140 |
+| corrected, flagged not counted | **0.8863** / **0.8757** | 0.8660 / 0.8557 | 0.8583 / 0.8523 (RTh 0.25) |
+
+- **Fill leads under every labeling.** Its lead over the no-fill twin holds steady at about
+  +0.015 to +0.020 area-weighted F1, three times the ±0.006 noise floor. With flagged
+  polygons not counted it wins 16/20 scenes against the twin and 18/20 against the single
+  U-Net (RTh 0.125). It gains in both recall (0.899 vs 0.880) and precision (0.874 vs 0.852).
+  Its largest loss is 20260406_20260417 (−0.08 F1 vs the twin), one of the three South
+  scenes without a gap-free k10 chain. The other two split: 20260304_20260315 +0.08,
+  20260326_20260406 −0.02.
+- **The no-fill twin's lead over the single U-Net shrinks as labels get cleaner:** +0.025,
+  then +0.017, then +0.008. With flagged polygons not counted, the two have the same recall
+  (0.880 vs 0.882 at RTh 0.125) and the twin keeps only its precision edge. At the lenient
+  tolerance the single U-Net passes it (0.9303 vs 0.9262). So much of the plain temporal
+  advantage sits on the hard flagged polygons; the fill model's does not.
+- **Bias check.** The QGIS prediction layer for pass 2 was the no-fill reference model, so
+  any edits made against predictions would favour the twin, not the fill model.
+
+Outputs: `eval/v2_20_20261013/<model>/…/` (`olm_original.json`, `olm_corrected_v2_20_20261013.json`,
+`olm_corrected_v2_20_20261013_noflag.json`, `objects_th0.25.gpkg`, `meta.json`), and
+`comparison_3models/{aggregate,per_scene_strict}.csv`.
 
 ## 7. Found while building this
 

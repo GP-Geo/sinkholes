@@ -12,6 +12,7 @@ In the QGIS Python console (Plugins > Python Console) of relabel_test_v2.qgz:
     pred_threshold(0.5)           # binary layer: confidence > 0.5, and turn it on
     pred_bands()                  # nested classes 0.125/0.25/0.5/0.7/0.9 instead
     pred_opacity(0.4)             # see more of the interferogram
+    phase_colormap('Turbo')       # interferogram colours: any QGIS ramp, or 'twilight' 
     predictions_off()             # back to blind
 
     # quality flags -- the polygon STAYS in the GT; select it first (Select Features tool):
@@ -216,6 +217,31 @@ def pred_opacity(alpha=0.6, model=None):
     print(f"prediction opacity {alpha}")
 
 
+def phase_colormap(name="Turbo"):
+    """Recolour every interferogram layer (-pi..pi) with a QGIS colour ramp."""
+    import math
+
+    from qgis.core import QgsStyle
+
+    ramp = QgsStyle.defaultStyle().colorRamp(name)
+    if ramp is None:
+        raise ValueError(f"no colour ramp {name!r}; try 'Turbo', 'Viridis', 'Spectral'")
+    n = 0
+    for role in ("interferogram", "full"):
+        for _, lyr in _nodes(role):
+            fn = QgsColorRampShader(-math.pi, math.pi, ramp.clone())
+            fn.classifyColorRamp(64, -1)
+            sh = QgsRasterShader()
+            sh.setRasterShaderFunction(fn)
+            r = QgsSingleBandPseudoColorRenderer(lyr.dataProvider(), 1, sh)
+            r.setClassificationMin(-math.pi)
+            r.setClassificationMax(math.pi)
+            lyr.setRenderer(r)
+            lyr.triggerRepaint()
+            n += 1
+    print(f"{n} interferogram layer(s) now use {name}")
+
+
 # --------------------------------------------------------------------------- quality flags
 
 QC_FLAGS = ("noisy_large", "low_coherence", "uncertain_boundary", "uncertain_existence", "other")
@@ -278,9 +304,13 @@ def _check_project_is_current():
     in_project = {g.customProperty("relabel/pred_group") for g in _pred_groups()}
     missing = sorted(models - in_project)
     if missing:
-        print(f"WARNING: this project has no layers for {missing}, which exist in predictions/. "
-              "It is an older copy of relabel_test_v2.qgz. Close QGIS WITHOUT saving and reopen "
-              "the project (or rebuild it: scripts/relabel/build_qgis_project.py).")
+        print(f"NOTE: this project has no layers for {missing}, which exist in predictions/; "
+              "the project needs a rebuild. Your labels are NOT affected (they live in "
+              "gt_test_working.gpkg). To pick the new layers up: 1) save your layer edits "
+              "(pencil -> Save Layer Edits), 2) close QGIS -- answer 'Don't Save' for the "
+              "PROJECT only, 3) rebuild: scripts/relabel/qgis_python.sh "
+              "scripts/relabel/build_qgis_project.py --workspace <ws>, 4) reopen. "
+              "Until then everything else works as before.")
 
 
 _check_project_is_current()

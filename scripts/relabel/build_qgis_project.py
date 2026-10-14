@@ -45,14 +45,29 @@ def qgis_init():
     return app
 
 
-def phase_renderer(layer):
-    from qgis.core import (QgsColorRampShader, QgsGradientColorRamp, QgsGradientStop,
-                           QgsRasterShader, QgsSingleBandPseudoColorRenderer)
+#: Colour ramp of the interferograms (-pi..pi). 'Turbo' at the user's request
+#: (2026-10-07); any ramp name from QGIS's default style works, and 'twilight'
+#: selects the cyclic ramp the project used before.
+PHASE_RAMP = "Turbo"
+
+
+def phase_ramp(name=PHASE_RAMP):
+    from qgis.core import QgsGradientColorRamp, QgsGradientStop, QgsStyle
     from qgis.PyQt.QtGui import QColor
 
+    if name.lower() != "twilight":
+        ramp = QgsStyle.defaultStyle().colorRamp(name)
+        if ramp is not None:
+            return ramp
     n = len(TWILIGHT) - 1
     stops = [QgsGradientStop(k / n, QColor(c)) for k, c in enumerate(TWILIGHT[1:-1], 1)]
-    ramp = QgsGradientColorRamp(QColor(TWILIGHT[0]), QColor(TWILIGHT[-1]), False, stops)
+    return QgsGradientColorRamp(QColor(TWILIGHT[0]), QColor(TWILIGHT[-1]), False, stops)
+
+
+def phase_renderer(layer, ramp_name=PHASE_RAMP):
+    from qgis.core import QgsColorRampShader, QgsRasterShader, QgsSingleBandPseudoColorRenderer
+
+    ramp = phase_ramp(ramp_name)
     shader_fn = QgsColorRampShader(-math.pi, math.pi, ramp)
     shader_fn.classifyColorRamp(64, -1)
     shader = QgsRasterShader()

@@ -41,6 +41,7 @@ def object_level_evaluate(
     th: float = 0.7,
     buffer: float = 5,
     round_ndigits: Optional[int] = 2,
+    ignore: Optional[np.ndarray] = None,
 ):
     """Object-level recall/precision over a batch of binary masks.
 
@@ -62,6 +63,15 @@ def object_level_evaluate(
     that. Leave the default alone for the patch-level path, whose numbers are
     published at 2 decimals anyway.
 
+    ``ignore`` (same shape as ``gt``, default None = no change) marks
+    don't-care ground, e.g. polygons a labeller flagged as doubtful, and is not
+    counted at all. It holds no object to find (``gt`` must already leave it
+    out), and the predicted pixels on it are cut away before polygonising, so
+    a predicted object is judged by its part outside it alone (ground truth
+    wins where the two overlap). It also joins the buffered ground-truth union
+    of the false-positive test, so the rim a cut leaves within ``buffer`` of it
+    gets the same tolerance a prediction gets at a ground-truth edge.
+
     Returns (recall, precision, batch_gt_area, {feature: [detected, undetected]}).
     """
     def _round(x):
@@ -72,6 +82,9 @@ def object_level_evaluate(
         image = np.expand_dims(image, axis=0)
     gt = gt.astype(np.float32)
     pred = pred.astype(np.float32)
+    if ignore is not None:
+        ignore = ignore.astype(np.float32)
+        pred = np.where((ignore > 0) & (gt <= 0), 0, pred)
 
     transform = Affine.identity()
     intersect_recall, intersect_precision, patch_gt_areas = [], [], []
@@ -102,6 +115,11 @@ def object_level_evaluate(
                 )
 
         buffered_gt_union = unary_union([pgt.buffer(buffer) for pgt in gt_polygons])
+        if ignore is not None:
+            ignore_polygons = [shape(g) for g, v in rasterio.features.shapes(ignore[i], transform=transform)
+                               if v > 0]
+            buffered_gt_union = unary_union(
+                [buffered_gt_union] + [p.buffer(buffer) for p in ignore_polygons])
         fp_area = sum(
             pp.area for pp in pred_polygons
             if pp.intersection(buffered_gt_union).area / pp.area < th

@@ -67,6 +67,18 @@ def add_arguments(p):
     e.add_argument("--objects", action="store_true",
                    help="also write per-object old/new classification at --object_th")
     e.add_argument("--object_th", type=float, default=0.25)
+    e.add_argument("--only_relabelled", action="store_true",
+                   help="score only the scenes whose labels changed (the others are identical "
+                        "under both labelings by construction)")
+    e.add_argument("--old_from_archive", action="store_true",
+                   help="take the original-label metrics from the directory's archived "
+                        "olm_results_*.json instead of re-scoring them (they have matched "
+                        "exactly every time they were checked); falls back to re-scoring "
+                        "when no archive exists")
+    e.add_argument("--exclude_flagged", action="store_true",
+                   help="also score the corrected labels WITHOUT the qc-flagged polygons, as "
+                        "don't-care ground: missing one costs no recall, and a prediction on "
+                        "one is not a false positive (olm_corrected_<label>_noflag.json)")
     e.add_argument("--verify_only", action="store_true",
                    help="only prove each saved _gt.npy is reproduced from the original GT "
                         "(no corrected GT needed, nothing scored); writes eval/verify_*.json")
@@ -120,7 +132,7 @@ def fingerprint(geoms):
     return h.hexdigest()
 
 
-def outputs_args(src_dir, a, out_json, gt_map=None):
+def outputs_args(src_dir, a, out_json, gt_map=None, intfs=None, ignore_map=None):
     """Namespace for inference.outputs.main reproducing the directory's scoring."""
     from ..inference import outputs
 
@@ -141,11 +153,16 @@ def outputs_args(src_dir, a, out_json, gt_map=None):
         argv += ["--intf_dict_path", a["intf_dict_path"]]
     if gt_map:
         argv += ["--gt_map", str(gt_map)]
+    if intfs:
+        argv += ["--intfs", ",".join(intfs)]
+    if ignore_map:
+        argv += ["--ignore_map", str(ignore_map)]
     return p.parse_args(argv)
 
 
 def run_one(src_dir, ws, label, orig_by, corr_by, orig_fp, corr_fp, objects, object_th,
-            flagged_by=None):
+            flagged_by=None, only_relabelled=False, old_from_archive=False,
+            unflagged_by=None, exclude_flagged=False):
     from ..inference import outputs
 
     a = read_eval_args(src_dir)
@@ -159,10 +176,14 @@ def run_one(src_dir, ws, label, orig_by, corr_by, orig_fp, corr_fp, objects, obj
     out_dir.mkdir(parents=True, exist_ok=True)
     cache = ws_path(ws, "eval") / "gt_canvases"
     intfs = list_eval_intfs(src_dir)
-    verify, gt_map = {}, {}
+    if only_relabelled:
+        intfs = [i for i in intfs if corr_fp.get(i) != orig_fp.get(i)]
+        if not intfs:
+            raise SystemExit(f"{src_dir}: none of its scenes is relabelled")
+    verify, gt_map, shapes = {}, {}, {}
     for intf in intfs:
         conf = np.load(os.path.join(src_dir, f"{intf}_pred.npy"), mmap_mode="r")
-        shape = conf.shape
+        shape = shapes[intf] = conf.shape
         saved = np.load(os.path.join(src_dir, f"{intf}_gt.npy"), mmap_mode="r")
         rebuilt = build_gt_canvas(intf, orig_by.get(intf, []), shape, patch, stride)
         same = bool(np.array_equal(rebuilt, saved))
@@ -181,7 +202,7 @@ def run_one(src_dir, ws, label, orig_by, corr_by, orig_fp, corr_fp, objects, obj
                 arr = rebuilt                       # unchanged scene: identical by construction
             else:
                 arr = build_gt_canvas(intf, corr_by.get(intf, []), shape, patch, stride)
-            tmp = cp.with_name(cp.name + ".tmp.npy")
+            tmp = cp.with_name(f"{cp.name}.{os.getpid()}.tmp.npy")   # parallel runs share the cache
             np.save(tmp, arr)
             os.replace(tmp, cp)
         gt_map[intf] = str(cp)
@@ -190,13 +211,50 @@ def run_one(src_dir, ws, label, orig_by, corr_by, orig_fp, corr_fp, objects, obj
     write_json(out_dir / "gt_map.json", gt_map)
 
     old_json, new_json = out_dir / "olm_original.json", out_dir / f"olm_corrected_{label}.json"
-    outputs.main(outputs_args(src_dir, a, old_json))
-    outputs.main(outputs_args(src_dir, a, new_json, gt_map=out_dir / "gt_map.json"))
+    sub = intfs if only_relabelled else None
+    archived = sorted(glob.glob(os.path.join(src_dir, "olm_results_*.json")))
+    if old_from_archive and archived:
+        # The archived per-scene numbers ARE the old-label scores; copy them,
+        # restricted to the scored scenes, instead of recomputing them.
+        A = json.load(open(archived[-1]))
+        keep = set(intfs)
+        for k in ("per_intf", "per_intf_by_tolerance"):
+            A[k] = {i: v for i, v in A.get(k, {}).items() if i in keep}
+        A["source"] = f"archived {archived[-1]} (not re-scored)"
+        write_json(old_json, A)
+    else:
+        outputs.main(outputs_args(src_dir, a, old_json, intfs=sub))
+    outputs.main(outputs_args(src_dir, a, new_json, gt_map=out_dir / "gt_map.json", intfs=sub))
+
+    excluded = None
+    if exclude_flagged:
+        # The corrected labels minus the flagged polygons, which become
+        # don't-care ground (eval-outputs --ignore_map), not background.
+        excluded, nf_map, ign_map = {}, {}, {}
+        for intf in intfs:
+            fl = (flagged_by or {}).get(intf, [])
+            excluded[intf] = len(fl)
+            if not fl:
+                nf_map[intf] = gt_map[intf]
+                continue
+            for geoms, tag, dst in ((unflagged_by.get(intf, []), "noflag", nf_map),
+                                    (fl, "flagged", ign_map)):
+                cp = canvas_path(cache, f"{label}_{tag}_{fingerprint(geoms)[:12]}", stride, patch,
+                                 shapes[intf], intf)
+                if not cp.exists():
+                    tmp = cp.with_name(f"{cp.name}.{os.getpid()}.tmp.npy")
+                    np.save(tmp, build_gt_canvas(intf, geoms, shapes[intf], patch, stride))
+                    os.replace(tmp, cp)
+                dst[intf] = str(cp)
+        write_json(out_dir / "gt_map_noflag.json", nf_map)
+        write_json(out_dir / "ignore_map.json", ign_map)
+        outputs.main(outputs_args(src_dir, a, out_dir / f"olm_corrected_{label}_noflag.json",
+                                  gt_map=out_dir / "gt_map_noflag.json", intfs=sub,
+                                  ignore_map=out_dir / "ignore_map.json"))
 
     # Is today's scoring code reproducing the archived numbers for the old GT?
-    archived = sorted(glob.glob(os.path.join(src_dir, "olm_results_*.json")))
     repro = None
-    if archived:
+    if archived and not old_from_archive:
         A = json.load(open(archived[-1]))
         B = json.load(open(old_json))
         diffs = [abs(A["per_intf"][i][t][k] - B["per_intf"][i][t][k])
@@ -208,7 +266,8 @@ def run_one(src_dir, ws, label, orig_by, corr_by, orig_fp, corr_fp, objects, obj
             "model": rel.parts[0], "job": rel.parts[-1], "eval_scenes_args": a,
             "saved_gt_reproduced": verify, "rescore_vs_archived": repro,
             "corrected_gt_fingerprints": {i: corr_fp[i] for i in intfs},
-            "relabelled_scenes": sorted(i for i in intfs if corr_fp[i] != orig_fp.get(i))}
+            "relabelled_scenes": sorted(i for i in intfs if corr_fp[i] != orig_fp.get(i)),
+            "flagged_polygons_ignored": excluded}
     write_json(out_dir / "meta.json", meta)
     if objects:
         object_analysis(src_dir, a, gt_map, out_dir, object_th, flagged_by or {})
@@ -476,10 +535,18 @@ def main(args):
     orig = read_active_gt(os.path.join(args.data_dir, ORIGINAL_GT_SHP))
     scope = set(corr["intf_id"]) | set(
         __import__("geopandas").read_file(ws_path(ws, "original_gpkg"), layer="scenes")["intf_id"])
-    orig = orig[orig["intf_id"].isin(scope)]
-    orig_by, corr_by = _geoms_by_scene(orig), _geoms_by_scene(corr)
-    flagged_by = (_geoms_by_scene(corr[corr["qc_flag"].notna() & (corr["qc_flag"].astype(str) != "")])
-                  if "qc_flag" in corr.columns else {})
+    # Every scene keeps its original labels unless it is a workspace scene: an
+    # evaluation can hold scenes the workspace does not (generation 5 added four),
+    # and those are scored identically under both labelings.
+    orig_by = _geoms_by_scene(orig)
+    corr_by = dict(orig_by)
+    corr_in_scope = _geoms_by_scene(corr)
+    for intf in scope:
+        corr_by[intf] = corr_in_scope.get(intf, [])
+    scope = set(orig_by) | scope
+    is_flagged = ((corr["qc_flag"].notna() & (corr["qc_flag"].astype(str) != ""))
+                  if "qc_flag" in corr.columns else np.zeros(len(corr), bool))
+    flagged_by, unflagged_by = _geoms_by_scene(corr[is_flagged]), _geoms_by_scene(corr[~is_flagged])
     orig_fp = {i: fingerprint(orig_by.get(i, [])) for i in scope}
     corr_fp = {i: fingerprint(corr_by.get(i, [])) for i in scope}
     dirs = args.eval_dirs or discover(args.predictions_root)
@@ -488,5 +555,7 @@ def main(args):
     for d in dirs:
         logging.info(f"== {d}")
         out = run_one(d, ws, args.label, orig_by, corr_by, orig_fp, corr_fp,
-                      args.objects, args.object_th, flagged_by)
+                      args.objects, args.object_th, flagged_by,
+                      only_relabelled=args.only_relabelled, old_from_archive=args.old_from_archive,
+                      unflagged_by=unflagged_by, exclude_flagged=args.exclude_flagged)
         logging.info(f"-> {out}")

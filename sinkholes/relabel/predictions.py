@@ -34,10 +34,14 @@ from .common import (
     ws_path,
 )
 
-#: The reference model for the second pass (docs/RESULTS.md section 3: best
-#: generation-4 temporal k5 model, and it covers all 20 official scenes).
-DEFAULT_EVAL_DIR = ("outputs/predictions/th350_tattn_ctx50_neg10_2026-09-10_01h16_lsf_816217/"
-                    "best/scenes_temporal_th350_rth_09_14_12h21")
+#: The reference model for inspection: plain (no ctx50) temporal attention, k10.
+#: Its generation-5 (filled-chain) evaluation covers all 24 test scenes -- the 20
+#: official ones plus the 4 filled chains admit. NOT a ctx50 model: plain beat
+#: ctx50 in every pair scored, and on the same 17 scenes this model beats the
+#: k5 ctx50 one (mean object F1 0.7907 vs 0.7863, area-weighted 0.7881 vs 0.7725);
+#: docs/RELABELING.md "Reference model".
+DEFAULT_EVAL_DIR = ("outputs/predictions/temporal_k10_th350_tattn_posw8_30e/"
+                    "best/scenes_temporal_k10_fill_rth_10_06_13h28")
 NODATA = -1.0
 
 

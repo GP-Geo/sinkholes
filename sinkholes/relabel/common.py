@@ -447,7 +447,9 @@ def write_gt(gdf, path, layer=None):
         out = out.set_geometry([MultiPolygon([g]) if g is not None and g.geom_type == "Polygon" else g
                                 for g in out.geometry], crs=out.crs)
     schema = {"geometry": gtype, "properties": props}
-    kw = {"layer": layer, **GPKG_OPTIONS} if is_gpkg else {}
+    # Shapefiles default to Latin-1, which mangles non-Latin names (the editor's
+    # name lands in 'reporter'); write UTF-8 and say so in the .cpg.
+    kw = {"layer": layer, **GPKG_OPTIONS} if is_gpkg else {"encoding": "utf-8"}
     out.to_file(path, engine="fiona", schema=schema, **kw)
 
 

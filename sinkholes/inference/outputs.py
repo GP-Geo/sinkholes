@@ -92,8 +92,15 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                         "SAME saved confidence maps against a different ground truth (e.g. "
                         "relabelled polygons rasterised onto the identical canvas by "
                         "'sinkholes relabel eval'). Requires --out_json; --path is only read")
+    p.add_argument("--intfs", type=str, default=None,
+                   help="comma list: score only these interferograms of --path")
     p.add_argument("--gt_map", type=str, default=None,
                    help="JSON {intf: path to its _gt.npy}; like --gt_dir but per scene")
+    p.add_argument("--ignore_map", type=str, default=None,
+                   help="JSON {intf: path to a canvas-shaped .npy}: don't-care ground (e.g. "
+                        "flagged polygons left out of the GT). A prediction lying on it is "
+                        "not a false positive. Scenes without an entry ignore nothing. "
+                        "Needs --gt_dir/--gt_map")
 
 
 def scene_figure(out_png, image, gt, preds_by_th, confidence, extent):
@@ -220,6 +227,13 @@ def main(args) -> None:
     logging.basicConfig(level=logging.INFO)
     path = args.path
     gt_path = _gt_resolver(args)
+    ignore_map = {}
+    if getattr(args, "ignore_map", None):
+        if not (args.gt_dir or args.gt_map):
+            raise SystemExit("--ignore_map needs --gt_dir/--gt_map: the saved GT still holds "
+                             "the ground it would ignore")
+        with open(args.ignore_map) as fh:
+            ignore_map = json.load(fh)
 
     tolerances = _resolve_tolerances(args)
     if args.rth:
@@ -240,6 +254,12 @@ def main(args) -> None:
         for f in os.listdir(path)
         if f.endswith(".npy") and (m := INTF_ID_RE.search(f))
     })
+    if getattr(args, "intfs", None):
+        wanted = set(args.intfs.split(","))
+        missing = sorted(wanted - set(intf_ids))
+        if missing:
+            raise SystemExit(f"--intfs not under {path}: {missing}")
+        intf_ids = [i for i in intf_ids if i in wanted]
     if not intf_ids:
         raise SystemExit(f"no <intf>_*.npy files under {path}")
     logging.info(f"{len(intf_ids)} interferograms under {path}")
@@ -255,6 +275,10 @@ def main(args) -> None:
         if gt.shape != confidence.shape:
             raise SystemExit(f"{intf}: ground truth {gt.shape} does not match the confidence "
                              f"map {confidence.shape} -- not the same evaluation canvas")
+        ignore = np.load(ignore_map[intf]) if intf in ignore_map else None
+        if ignore is not None and ignore.shape != confidence.shape:
+            raise SystemExit(f"{intf}: ignore mask {ignore.shape} does not match the confidence "
+                             f"map {confidence.shape}")
 
         # _image.npy is the (T, H, W) input stack -- ~3.7 GB per scene and by
         # far the largest thing eval-scenes writes (78% of an eval directory).
@@ -310,6 +334,8 @@ def main(args) -> None:
             cs = col_slice or slice(None)
             confidence = confidence[rs, cs]
             gt = gt[rs, cs]
+            if ignore is not None:
+                ignore = ignore[rs, cs]
             preds = {th: p[rs, cs] for th, p in preds.items()}
             if image is not None:
                 image = image[:, rs, cs] if image.ndim == 3 else image[rs, cs]
@@ -326,6 +352,7 @@ def main(args) -> None:
                     r, p, gt_area, _ = object_level_evaluate(
                         gt[None], pred[None], None,
                         features=(), th=ith, buffer=buf, round_ndigits=None,
+                        ignore=None if ignore is None else ignore[None],
                     )
                     entry = {"recall": r, "precision": p, "gt_area": float(gt_area)}
                     tol_results[_tolerance_key(ith, buf)][str(th)] = entry
@@ -424,6 +451,7 @@ def main(args) -> None:
                    # Where the ground truth came from: absent/None = the saved
                    # eval-scenes _gt.npy (every result before relabelling).
                    "gt_source": getattr(args, "gt_dir", None) or getattr(args, "gt_map", None),
+                   "ignore_source": getattr(args, "ignore_map", None),
                    "ol_th": tolerances[0][0], "buffer": tolerances[0][1],
                    "thresholds": list(args.thresholds),
                    # 'vote' means the thresholds above are the paper's RTh

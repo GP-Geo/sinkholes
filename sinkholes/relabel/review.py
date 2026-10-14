@@ -32,7 +32,7 @@ STYLE = {
     "FLAG": dict(edgecolor="#d500f9", linewidth=2.2, facecolor="#d500f91a", linestyle=":", hatch=".."),
 }
 COLOR = {"ADD": "#39ff14", "DEL": "#ff1744", "MOD": "#ff9100", "FLAG": "#d500f9"}
-CMAP = "twilight"            # cyclic, and free of the overlay colours
+CMAP = "turbo"               # as in the QGIS project (was the cyclic 'twilight')
 ZOOM_PAD_PX = 80             # context around a change in a zoom panel
 ZOOM_MIN_PX = 260            # smallest zoom window side (~720 m)
 
