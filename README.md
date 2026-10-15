@@ -89,7 +89,7 @@ assets/               committed data assets (intf_coord.json, partitions, LiDAR 
 docs/                 see the table above; reference/ holds the benchmark paper
 tests/                pytest suite (pins the behavioural invariants)
 data/, outputs/, models/, test_data/   local data and run artifacts (gitignored);
-                     data/scenes_11day and data/scenes_all are the scene symlink farms
+                     data/scenes_11day is the scene symlink farm scripts/data/*.sh read
 studies/              HPO study roots -- ledger, runs, evaluations (gitignored, protected)
 logs/                 LSF stdout/stderr of the scripts/ jobs (gitignored)
 ```

@@ -14,7 +14,7 @@ WEXAC, `/Volumes/rudich/pinkas/sinkholes` on a Mac).
 | `outputs/archive/` | every other run and evaluation, mirroring the tree above (`archive/<date>/`, `archive/predictions/`, `archive/screens/`, …) |
 | `studies/<study>/` | an HPO study's ledger, runs, evaluations and caches — never touch by hand ([`HPO.md`](HPO.md)) |
 | `logs/` | LSF stdout/stderr of `scripts/` jobs |
-| `data/scenes_11day`, `data/scenes_all` | symlink farms onto the raw scenes (`scripts/data/link_scenes.py`) |
+| `data/scenes_11day` | symlink farm onto the raw 11-day scenes (`scripts/data/link_scenes.py`), the default `SCENES` of `scripts/data/*.sh` |
 
 The run-naming convention and the history of every rename are in
 [`outputs/README.md`](../outputs/README.md), which travels with the tree.
@@ -22,10 +22,10 @@ The run-naming convention and the history of every rename are in
 ## Server-side symlinks: move on WEXAC, not from the Mac
 
 Every `<intf>_gt.npy` in an evaluation directory is a **relative** symlink into
-`outputs/predictions/_gt/`, and `data/scenes_*` hold ~1,900 links onto the raw `.unw` / `.ers`
+`outputs/predictions/_gt/`, and `data/scenes_11day` holds 874 links onto the raw `.unw` / `.ers`
 files. The Mac's SMB client cannot see them — it shows the scene folders as empty and the
 `_gt.npy` links as plain files — and a symlink made from the Mac is not one the server
-understands. So **any move or deletion of an evaluation directory, or of `data/scenes_*`,
+understands. So **any move or deletion of an evaluation directory, or of `data/scenes_11day`,
 runs on WEXAC**, and a move one level deeper re-points the relative links. Count dangling
 links before and after (`find -L <dir> -type l | wc -l`).
 
