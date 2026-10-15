@@ -11,7 +11,8 @@
 /test_data/
 /out_polygs/
 
-# locally downloaded patches and the train-ready tree derived from them
+# on WEXAC: the scene symlink farms (data/scenes_11day, read by scripts/data/*.sh);
+# on a laptop: downloaded patches and the train-ready tree (prepare-local-subset)
 /data/
 
 # LSF scheduler stdout/stderr from the scripts/ jobs (the directory itself stays tracked)

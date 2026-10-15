@@ -2,9 +2,9 @@
 
 One document for the whole pipeline: the conventions the science depends on, then each
 stage with its command. Companion to the top-level [`README.md`](../README.md)
-(orientation + quickstart), [`RESULTS.md`](./RESULTS.md) (what the runs so far actually
-scored) and [`MODEL_RUNS.md`](./MODEL_RUNS.md) (the per-run registry). WEXAC paths below
-refer to the data host at
+(orientation + quickstart), [`RESULTS.md`](./RESULTS.md) (what the runs actually scored),
+[`assets/PARTITIONS.md`](../assets/PARTITIONS.md) (the partition generations) and
+[`HPO.md`](./HPO.md) (the study controller). WEXAC paths below refer to the data host at
 `/home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/`.
 
 ```
@@ -56,10 +56,15 @@ inference per scene; the archive mixes `[0, 1]`-scaled and radian scenes, and th
 conditional rule handles both.
 
 **Temporal chains.** `--add_temporal --k_prevs k` stacks each interferogram with its
-`k` predecessors — **exactly `i × 11` days earlier, same frame** (`meta.find_11day_sequences`).
-Ids missing any predecessor are dropped from training; at evaluation time
-`--fallback_replicate` keeps them and missing predecessor *files* are padded with the
-current frame. The stack is always **chronological, oldest → newest, current frame
+`k` predecessors on the same frame (`meta.find_11day_sequences`). Up to generation 4 a
+chain had to be gap-free — **exactly `i × 11` days back** — and an id missing any
+predecessor was dropped. Generation 5 partitions (`*_fill_*`) record chains that **skip a
+missing acquisition** and take an older one, up to `3k` slots back; temporal attention is
+then told each frame's real age (`meta.chain_offsets` → `models.temporal.run_model`).
+At evaluation time `--fallback_replicate` keeps an id whose chain is short, but a
+predecessor whose grid *file* is missing from the patch tree is refused unless
+`--allow_missing_history` is passed (until 2026-10-13 it was silently padded with the
+current frame, which produced plausible, wrong numbers). The stack is always **chronological, oldest → newest, current frame
 last** — in the dataset, inside the ConvLSTM, and through scene reconstruction. The
 training target is the **newest timestep's mask** (`--union_temporal_mask` restores the
 legacy union-over-stack target). Samples are the **positive patches of the interferogram
@@ -280,8 +285,7 @@ term + a false-positive suppression term inside no-data areas. Validation report
 > in fp16 and overflowed to `inf` above a mean predicted probability of 2.56% at batch
 > 128, returning loss exactly 1.0 with zero gradient. Fixed by widening every region term
 > to fp32 before it reduces; recorded as `region_loss_dtype=fp32-v2` in `run_config`.
-> [`CORRECTNESS_FIXES.md`](./CORRECTNESS_FIXES.md) has the measurement and the list of
-> affected runs.
+> The measurement and the affected runs: `git show notebook-2026-10-15:docs/CORRECTNESS_FIXES.md`.
 
 **Optimisation.** `--optimizer rmsprop|adam|adamw`, `ReduceLROnPlateau` on val Dice
 (`--lr_patience`, `--lr_factor`, `--min_lr`), gradient clipping at 1.0 **after** AMP
@@ -307,6 +311,45 @@ effective batch is `batch_size × accum_steps`). Device selection is automatic
   the one tensor the whole sequence has been compressed into. `0.0` builds `nn.Identity`
   and is the network exactly as it was before the option existed.
 
+### LSF templates and the current recipe
+
+`scripts/train/train_{tattn,convlstm,control}.sh` wrap `sinkholes train` for `bsub`
+(`control` is the single-frame and channel-stacked U-Net baselines, `ARCH=single|stack`). Every setting is an environment variable with a
+default, so a job is `VAR=value … bsub < template`, which is what `scripts/submit_all.sh`
+issues. `PARTITION` has no default on purpose.
+
+**The defaults are historical, not recommended.** `OPTIM=rmsprop MOMENTUM=0.999 LR=1e-6
+WEIGHT_DECAY=1e-8` is what every run before 2026-09-08 used and it stays the default so
+nothing shifts under an old run; with correct gradient clipping it diverges within an
+epoch. Submit the current recipe — the leader's, written out as building blocks at the top
+of `scripts/submit_all.sh`:
+
+```
+PARTITION=assets/partition_temporal_k10_clean_fill_th350x200.json K_PREVS=10 POS_W=8
+OPTIM=adamw LR=3e-4 WEIGHT_DECAY=1e-2 SEG_LOSS=dice
+RING_NEGS=yes NEG_RING_INNER=1 NEG_RING_OUTER=10 NEG_PER_POS=1.0
+SCHEDULE=plateau LR_PATIENCE=8 EPOCHS=30 PATIENCE=0
+BATCH=32 ACCUM=4 AUGMENT=hv FUSE_SKIPS=0 RECURRENCE=none        # train_tattn.sh
+```
+
+`BATCH × ACCUM` is the effective batch (128 here); the micro-batch sets the VRAM. A
+context run sets `CTX_MY=50 CTX_MX=50` (both or neither) and needs ~3× the host memory.
+`VAL_NEGS` survives only so old runs resume; no template may default it on. A run's exact
+flags are in its log header and, since 2026-10-13, its `run_manifest.json`.
+
+The HPO study's jobs are not templates: `sinkholes hpo` writes each one with the
+long-run flags below ([`HPO.md`](HPO.md)).
+
+**Long-run flags** (2026-10-13, all off by default): `--snapshot_epochs 10,20,30` keeps
+model-only weights at exactly those epochs (`checkpoints/snapshots/`); `--lr_schedule
+cosine --lr_horizon N` fixes a cosine decay independent of `--epochs`, so a run trained in
+wall-limited chunks follows one schedule (`constant` is the diagnostic control);
+`--time_budget_hours` stops cleanly after the last epoch that fits and leaves the run
+`paused`; `--keep_prev_resume` keeps the previous `resume.pt` as `resume_prev.pt`;
+`--eval_rng_isolation` stops validation from moving the training RNG; `--fit_eval_samples
+N` scores a fixed unaugmented subset of positive training samples each epoch (`fit/*`);
+`--strict_resume` also refuses a resume that changes the LR settings, `pos_w` or AMP.
+
 **Outputs** under `outputs/<job>_<ts>/`: `checkpoints/best.pt` + `last.pt` (+ one
 `.pth` per epoch unless `--save_best_only`; `interrupted.pt` on Ctrl-C), `results.csv`
 (one row per epoch), `curves.png`, `validation/preds/epoch_*.png` (input/GT/probability
@@ -327,6 +370,8 @@ held-out split that feeds `test-patches`. `--patience N` early-stops; `--reporte
 | `val/dice`, `val/jaccard` | per-sample means (macro). A training-health signal — see the warning above about ranking |
 | `val/IoU`, `val/F1`, `val/P`, `val/R` | pooled over raw pixel counts (micro), so negative-aware |
 | `grad/norm`, `grad/clip%`, `amp/scale` | what the gradient clip actually did that epoch, and whether AMP was rescaling. A clip% that sits near 100 means the clip, not the LR, is setting the step |
+| `lr_used`, `grad/norm_mean`, `grad/norm_max`, `opt/steps`, `opt/skipped`, `amp/scale_min`, `epoch_s` | added 2026-10-13. `lr_used` is the LR the epoch trained at (`lr` is read after the scheduler steps, so it is the *next* epoch's); `opt/skipped` counts the updates AMP dropped on inf/NaN gradients |
+| `fit/loss`, `fit/dice`, `fit/F1`, `fit/P`, `fit/R` | only with `--fit_eval_samples`: the training-fit probe, the read on whether the model interpolates its training set |
 
 Note `val/F1` pools every pixel (micro) while `val/dice` averages per batch (macro); they
 differ by design. `val/jaccard` is the per-sample twin of `val/dice`, and is **not** the
@@ -350,7 +395,9 @@ and `--resume <file.pt>` do the same for an explicit location; an explicitly giv
 legacy `last.pt` loads *weights only*, with a warning that it is not a resume. Without
 `--resume` nothing changes: a fresh `outputs/<job>_<ts>/`. The recovery point is the
 last fully completed epoch, so an epoch interrupted part-way is repeated, not resumed
-mid-stream. `best.pt` and `last.pt` keep their model-only format.
+mid-stream. `best.pt` and `last.pt` keep their model-only format. Every state change also
+rewrites `run_status.json` (`running`, `paused`, `complete`, `early_stopped`, `interrupted`,
+`stopped` or `failed`, with the completed epoch and the snapshots on disk), which is what the HPO controller reads.
 
 ## (3a) Patch-level test
 
@@ -365,20 +412,19 @@ covered fraction exceeds `--th`). Test pickles from before the rewrite still loa
 `--k_prevs` must match training — a mismatch is reported against the checkpoint's real
 channel count.
 
-Runs trained with `--partition_mode preset_by_intf` pickle no test split (the whole
-`geo_*` / `temporal_*` family), so point the command at the partition instead and it
-builds the split in place:
+Runs trained with `--partition_mode preset_by_intf` (every run since August) pickle no
+test split, so point the command at the partition instead and it builds the split in
+place:
 
 ```bash
-sinkholes test-patches --partition_file assets/partition_geo_k10.json --split test \
-  --patches_dir <patches root> --model outputs/<run>/checkpoints/best.pt \
-  --add_temporal --k_prevs 10 --convlstm_unet --patch_size 200 100 --stride 2
+sinkholes test-patches --partition_file assets/partition_temporal_k10_clean_fill_th350x200.json \
+  --split test --patches_dir <patches root> --model outputs/<run>/checkpoints/best.pt \
+  --add_temporal --k_prevs 10 --tattn_unet --patch_size 200 100 --stride 2
 ```
 
 `--split` is `val`, `test` or `train`; the dataset flags mirror `train.py`'s names so they
-can be pasted out of a run's log header. Either way the set is positives-only — see
-[POSITIVES_ONLY_EVAL.md](POSITIVES_ONLY_EVAL.md) for what that number may and may not be
-compared against.
+can be pasted out of a run's log header. Either way the set is positives-only, so the
+number ranks nothing ([`RESULTS.md`](RESULTS.md) ② and ⑩).
 
 ## (3b) Full-scene evaluation
 
@@ -398,7 +444,7 @@ thresholded at `--recon_th` and polygonised. `--intf_source` is one of `intf_lis
 `--replicate_input` feeds the current frame in every temporal slot;
 `--no-add_lidar_mask` disables gating. `--positives_only` restricts prediction to tiles
 whose ground truth is non-empty — the benchmark paper's protocol, off by default, and not
-comparable with a full-scene number ([POSITIVES_ONLY_EVAL.md](POSITIVES_ONLY_EVAL.md)).
+comparable with a full-scene number ([`RESULTS.md`](RESULTS.md) ⑩).
 
 Outputs under `<output_dir>/<model>/<job>_<ts>/` (default root `outputs/predictions`):
 `polygs/<intf>_predicted_polygs.shp` (EPSG:4326), `<intf>_image.npy` (`(C, H, W)`,
@@ -426,8 +472,12 @@ Two threshold families, and **they are not comparable with each other**:
 | `--rth` | 0.125 / 0.25 / 0.375 / 0.5 | the **fraction of overlapping tiles** voting positive | a map from `eval-scenes --recon_average vote` |
 
 `--rth` is the benchmark paper's Reconstruction Threshold protocol and is what every
-generation-3 evaluation from `eval6` on reports. It is opt-in because on a probability
-map the numbers are silently meaningless rather than wrong-looking.
+evaluation since 2026-09-01 reports. It is opt-in because on a probability map the numbers
+are silently meaningless rather than wrong-looking. **RTh 0.25 means "at least 4 of the 16
+overlapping tiles voted positive"**, so it needs the stride-4 grid (`--data_stride 4`);
+at stride 2 there are only 4 tiles per pixel and the thresholds stop meaning what the
+paper says. Per the paper, recall is the primary metric: full-range reconstruction scores
+much unannotated ground, so precision partly measures the digitisation.
 
 Object matching runs under one or more **Intersection Tolerances** — `--th` (covered
 fraction for a GT object to count as detected) with `--buffer` (pixels the prediction is
@@ -441,6 +491,21 @@ Crop the canvas with `--aoi_from_partition <partition.json>` (preferred) or
 cover different ground than the predictions. `--legacy_south_half` reproduces the pre-AOI
 rule that scored only the northern half of a South-frame canvas, kept so archived
 evaluations re-score exactly as they were.
+
+**In practice** both stages run through `scripts/eval/run_eval.sh` (one `bsub` job,
+`GEN` / `GROUP` / `SPLIT` pick the partition, defaults score the leader under the current
+protocol). `eval-scenes` only ever reads a partition's `"val"` list, so `SPLIT=test`
+resolves to the `_testeval` file, whose `"val"` is the parent's `"test"`. Size a stride-4
+job off host memory, not the GPU: the input stack alone is `T × 5.47 GB` (60 GB at k10),
+and measured peaks are 48 GB (k5) / 75 GB (k10) for plain temporal models, 224 GB for the
+legacy ctx50 k10 engine. `_image.npy` is ~78% of an evaluation directory and is
+reconstructible; the metrics JSON is what to keep.
+
+**Many checkpoints at once.** `sinkholes eval-snapshots` scores several checkpoints on
+whole scenes under the RTh protocol from one data pass (AOI tiles only), writing the same
+metrics as `eval-scenes` + `eval-outputs`. The engine check (LSF 797689) found it
+bit-identical to them at `--tile_batch 1`; at 32, recall is identical and precision within
+4.2e-5. It is what the HPO study scores with.
 
 ### Inspect a finished run
 
@@ -492,7 +557,8 @@ One run takes ~3 min on MPS and writes ~1.3 GB — delete the output directory a
 - [ ] Both the full grids and the `nonz` files exist in the patch directories.
 - [ ] `--k_prevs` at evaluation matches training (the channel warning names the fix).
 - [ ] Temporal evaluation of an interferogram needs its predecessors' grids on disk —
-      `--fallback_replicate` pads missing ones with the current frame.
+      a missing one is refused (`--allow_missing_history` pads it, knowingly).
+      `scripts/data/make_context_stride4_patches.sh` builds missing ctx50 stride-4 ids.
 - [ ] `--x_pxls_offset` (predict) matches how the scenes were cropped.
 - [ ] Partition mode is leakage-free for the claim you're making: `random_by_patch`
       leaks overlapping patches; `random_by_intf` still shares locations across dates;

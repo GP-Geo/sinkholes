@@ -43,19 +43,22 @@ Where to look for what:
 
 | Question | File |
 |---|---|
-| What do we know? What should I not repeat? | [`docs/RESULTS.md`](docs/RESULTS.md) |
-| What did each batch settle? | [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) |
-| The object-level numbers | [`docs/PREDICTIONS.md`](docs/PREDICTIONS.md) |
-| Per-run registry, and attention selectivity | [`docs/MODEL_RUNS.md`](docs/MODEL_RUNS.md) |
+| What do we know, which model is best, what not to repeat? | [`docs/RESULTS.md`](docs/RESULTS.md) |
+| How to run a stage, and the current training recipe | [`docs/PIPELINE.md`](docs/PIPELINE.md) |
 | Which partition file, and why | [`assets/PARTITIONS.md`](assets/PARTITIONS.md) |
-| How does the temporal attention work, and does it select? | [`docs/ATTENTION.md`](docs/ATTENTION.md) |
-| Which published numbers a correctness fix moved | [`docs/CORRECTNESS_FIXES.md`](docs/CORRECTNESS_FIXES.md) |
+| The HPO / long-training study | [`docs/HPO.md`](docs/HPO.md) |
+| The relabelled test set | [`docs/RELABELING.md`](docs/RELABELING.md) |
+| What the 11-day dataset holds, and how it is rebuilt | [`docs/DATASET_11DAY.md`](docs/DATASET_11DAY.md) |
 | What is on disk, what is safe to delete | [`docs/OUTPUTS.md`](docs/OUTPUTS.md) |
-| How to run a stage | [`docs/PIPELINE.md`](docs/PIPELINE.md) |
-| The HPO / long-training protocol | [`docs/HPO.md`](docs/HPO.md) |
+| The full lab notebooks (every batch, run and evaluation to 2026-10-15) | tag `notebook-2026-10-15` |
 
 **Object-level F1 decides everything.** Patch `val/dice` ranks these models
 *backwards* and is a training-health signal only — see `RESULTS.md` finding ②.
+
+**Where things stand (2026-10-15).** The best model is plain temporal attention at k10 on
+filled history chains, `outputs/2026-10-06/temporal_k10_th350_fill_tattn_posw8_30e`
+(object F1 0.8114 on the 24 generation-5 test scenes). The active work is the HPO study
+in `studies/k10t2026_hpo_v1`, driven by `sinkholes hpo`.
 
 ## Layout
 
@@ -77,14 +80,13 @@ scripts/              cluster-side wrappers — the package does the work
 ├── submit_all.sh     the shield in front of bsub; only jobs that never ran
 ├── tidy_outputs.sh   file a finished run under outputs/<date>/ with its proper name
 ├── train/            LSF templates, one per architecture
-├── eval/             run_eval.sh (2-stage scoring), run_eval_positives.sh,
-│                    rescore.sh, run_probe.sh
+├── eval/             run_eval.sh (2-stage scoring), rescore.sh, run_probe.sh
 ├── data/             patch generation and dataset verification
 ├── relabel/          QGIS workspace helpers, eval_v2.sh
 ├── hpo/              the engine check
 └── viewer/           interferogram viewer
 assets/               committed data assets (intf_coord.json, partitions, LiDAR coverage)
-docs/                 see the table above; reference/ holds the paper and status deck
+docs/                 see the table above; reference/ holds the benchmark paper
 tests/                pytest suite (pins the behavioural invariants)
 data/, outputs/, models/, test_data/   local data and run artifacts (gitignored);
                      data/scenes_11day and data/scenes_all are the scene symlink farms
@@ -95,8 +97,11 @@ logs/                 LSF stdout/stderr of the scripts/ jobs (gitignored)
 ## Requirements
 
 Python ≥ 3.10 with torch, numpy, scipy, pandas, matplotlib, tqdm, geopandas, pyogrio,
-rasterio, shapely, affine, scikit-image — `pip install -e .` installs them. CUDA and
-Apple Silicon (MPS) are picked up automatically; CPU works but is ~10x slower.
+rasterio, shapely, affine, scikit-image — `pip install -e .` installs them;
+`pip install -e '.[hpo]'` adds Optuna for the `hpo` controller (the GPU jobs never import
+it). CUDA and Apple Silicon (MPS) are picked up automatically; CPU works but is ~10x
+slower. On WEXAC the environment is `/home/labs/rudich/pinkas/.conda/envs/sinkholes`, with
+an editable install of this checkout.
 
 ## Quickstart on a local subset
 
@@ -137,6 +142,8 @@ with its `200×100` target (`io_geometry`, see `docs/PIPELINE.md`).
 python -m pytest
 ```
 
-Data-dependent tests skip themselves when the local subset is absent. The end-to-end
+Data-dependent tests skip themselves when the local subset is absent; the `hpo` tests
+need Optuna. On macOS, if DataLoader workers abort with `OMP: Error #15`, run with
+`KMP_DUPLICATE_LIB_OK=TRUE`. The end-to-end
 regression check is in `docs/PIPELINE.md` ("Regression oracle"): full-scene inference
 with `models/run_v2_best.pt` on `20190205_20190216` must produce **464 polygons**.

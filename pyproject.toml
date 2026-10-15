@@ -24,6 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+hpo = ["optuna==5.0.0"]
 
 [project.scripts]
 sinkholes = "sinkholes.cli:main"

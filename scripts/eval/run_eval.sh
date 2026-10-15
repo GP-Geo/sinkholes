@@ -17,7 +17,7 @@
 #
 #  ARCH, K_PREVS and the patch geometry must match how the checkpoint was
 #  TRAINED, not what you wish it were -- a mismatch either fails to load or
-#  silently feeds the network the wrong stack. scripts/train/PRESETS.md records
+#  silently feeds the network the wrong stack. The run's log header records
 #  what each run was trained with.
 # ============================================================================
 #BSUB -J eval_temporal_k10_fill
@@ -47,12 +47,12 @@ SPLIT="${SPLIT:-test}"      # val = the split the model was selected on
 GEN="${GEN:-fill}"          # PARTITION GENERATION -- assets/PARTITIONS.md. Every
                             # one carries a per-split aoi_window, passed to BOTH
                             # stages below (see AOI_FLAGS).
-                            # 3 = partition_<group>_clean.json, the AOI benchmark;
-                            #     the relabelled test set (docs/RELABELING.md).
+                            # 3 = partition_<group>_clean.json, the AOI benchmark
+                            #     with no label-quality threshold.
                             # th350 = partition_<group>_clean_th350x200.json,
                             #     generation 3 with the 350N/200S label-quality
                             #     threshold on every split (generation 4): 20 test
-                            #     scenes at k5, 17 at k10.
+                            #     scenes at k5 (the official relabelled set), 17 at k10.
                             # fill = partition_<group>_clean_fill_th350x200.json,
                             #     th350 with chains that skip missing
                             #     acquisitions (generation 5): 24 test scenes at
@@ -254,7 +254,7 @@ fi
 # run's own group is recoverable. Evaluating a model outside the partition it
 # was trained on is a legitimate transfer experiment, but it is far more often
 # a typo -- and its score is NOT comparable to that model's usual numbers
-# (docs/MODEL_RUNS.md).
+# (docs/RESULTS.md).
 #
 # Two naming schemes are in play and both must parse. Runs up to 2026-08-09
 # lead with the group ("geo_k10_convlstm_posw4"); the
