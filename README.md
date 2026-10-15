@@ -82,7 +82,6 @@ scripts/              cluster-side wrappers — the package does the work
 ├── data/             patch generation and dataset verification
 ├── relabel/          QGIS workspace helpers, eval_v2.sh
 ├── hpo/              the engine check
-├── archive_outputs.py, clean_outputs.py   outputs/ housekeeping (run on WEXAC)
 └── viewer/           interferogram viewer
 assets/               committed data assets (intf_coord.json, partitions, LiDAR coverage)
 docs/                 see the table above; reference/ holds the paper and status deck

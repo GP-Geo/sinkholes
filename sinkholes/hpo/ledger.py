@@ -152,6 +152,6 @@ def write_protect_marker(root: Path, study: str) -> None:
         f"Live state of HPO study {study!r}: ledger, Optuna journal, runs (with the\n"
         f"resume checkpoints promotions continue from), evaluations and caches.\n\n"
         f"Do NOT delete, move or prune anything under this directory by hand or with\n"
-        f"scripts/clean_outputs.py / archive_outputs.py / tidy_outputs.sh. Retention is\n"
+        f"an outputs/ clean-up script. Retention is\n"
         f"applied explicitly by `sinkholes hpo retain --apply`, which knows which\n"
         f"checkpoints are still needed.\n")

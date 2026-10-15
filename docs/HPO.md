@@ -162,9 +162,9 @@ interpolated precision at a common recall — the number that separates "cleaner
 
 The study root is **`/home/labs/rudich/pinkas/sinkholes/studies/k10t2026_hpo_v1`** (moved from
 `pinkas/sinkholes_studies/` on 2026-10-15; job scripts and run manifests written before that keep
-the old path). `studies/` is gitignored and outside `outputs/`, so `scripts/clean_outputs.py`
-(which deletes `resume.pt` in finished runs), `archive_outputs.py` and `tidy_outputs.sh`, which
-only walk `outputs/`, cannot reach it; a `PROTECTED_STUDY_STATE` file says so in the root. Per run: `best.pt` (patch Dice), `last.pt`
+the old path). `studies/` is gitignored and outside `outputs/`, so `scripts/tidy_outputs.sh`
+and any other `outputs/` clean-up cannot reach it; a `PROTECTED_STUDY_STATE` file says so in
+the root. Per run: `best.pt` (patch Dice), `last.pt`
 (final), `resume.pt` + `resume_prev.pt`, snapshots only at scheduled epochs, and
 `best_scene.pt` once evaluated. No per-epoch `.pth`, no input stacks, no shapefiles.
 
