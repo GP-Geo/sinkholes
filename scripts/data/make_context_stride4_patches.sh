@@ -16,17 +16,13 @@
 # holding ~61 of the 437 interferograms, and NOTHING ELSE. No mask tree (see
 # "masks are not rewritten"), and no attempt at the other 376 (see "A SUBSET").
 #
-# ---- what it unblocks ------------------------------------------------------
-# submit_all.sh evalampfix_base30 and evalampfix_ctx30, both marked BLOCKED on
-# exactly this directory (they died in seconds on FileNotFoundError, LSF
-# 680921/680926). EVAL6_TEMP sets DATA_STRIDE=4 and the context tree existed
-# only at strpp2.
-#
-# WHY NOT JUST USE THE evalctx STRIDE-2 BATCH. It works and it is already
-# defined, but it is self-contained: stride 2 AND prob rather than stride 4 and
-# rth, so it shares no number with RESULTS.md and needed a third job
-# (evalctx_baseline) purely to manufacture a reference. These two run the eval6
-# protocol, so they are readable against the 0.7797 anchor directly.
+# ---- what it is for -------------------------------------------------------
+# Whole-scene evaluation of ctx50 models at DATA_STRIDE=4 (run_eval.sh,
+# eval-snapshots): the predecessors of every scored scene must be in this tree,
+# and eval-scenes refuses a chain with a missing grid (--allow_missing_history).
+# It was first built for the ampfix evaluations (LSF 680921/680926 died on
+# FileNotFoundError without it) and extended for the HPO study's 2022-23
+# validation chains (LSF 790948, docs/HPO.md).
 #
 # ---- the design is make_context_patches.sh's, unchanged --------------------
 # A context tree is the SAME GRID as its plain parent with a 50 px margin grown
@@ -376,6 +372,4 @@ PY
 du -sh "$CTX4" 2>/dev/null || true
 echo
 echo "COMPLETE -- every interferogram the evaluation will open is present."
-echo "next: bash scripts/submit_all.sh evalampfix --only=ctx30      # dry run"
-echo "      bash scripts/submit_all.sh evalampfix --only=base30     # dry run"
-echo "      (drop the BLOCKED notes in scripts/submit_all.sh, then add --submit)"
+echo "next: submit the ctx50 evaluation that needed it (run_eval.sh DATA_STRIDE=4, or hpo step)"

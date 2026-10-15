@@ -164,5 +164,4 @@ python scripts/data/verify_dataset.py \
   --gt_polygon_file_path "$GT"
 
 echo "done: stride-4 11-day tree filled"
-echo "next: bash scripts/submit_all.sh eval5           # dry run"
-echo "      bash scripts/submit_all.sh eval5 --submit"
+echo "next: submit the DATA_STRIDE=4 evaluation that needed it (scripts/eval/run_eval.sh)"
