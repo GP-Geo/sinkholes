@@ -1,7 +1,7 @@
 {
   "study": "k10t2026_hpo_v1",
   "description": "Plain (200x100) vs ctx50 (300x200 in, centre 200x100 supervised) temporal attention, k10, generation 5-t2026 (filled chains re-split by date blocks, full separation: val 2022-2023, test Feb-Apr 2026, train the rest). Optuna over lr / weight decay / pos_w, scored on whole validation scenes.",
-  "root": "/home/labs/rudich/pinkas/sinkholes_studies/k10t2026_hpo_v1",
+  "root": "/home/labs/rudich/pinkas/sinkholes/studies/k10t2026_hpo_v1",
   "repo": null,
   "conda_sh": "/apps/easybd/easybuild/amd/software/Miniconda3/24.7.1-0/etc/profile.d/conda.sh",
   "conda_env": "/home/labs/rudich/pinkas/.conda/envs/sinkholes",

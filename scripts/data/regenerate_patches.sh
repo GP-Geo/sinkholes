@@ -25,7 +25,7 @@ set -o pipefail
 
 REPO=/home/labs/rudich/pinkas/sinkholes
 DATA=/home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data
-SCENES=/home/labs/rudich/pinkas/scenes_11day
+SCENES=/home/labs/rudich/pinkas/sinkholes/data/scenes_11day
 OUT=$DATA/patches
 GT=$DATA/sub_20260701.shp
 DICT=$REPO/assets/intf_coord.json

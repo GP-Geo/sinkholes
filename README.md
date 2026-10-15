@@ -70,7 +70,9 @@ sinkholes/            the package
 │                    and the checkpoint factory that detects which is which
 ├── dataprep/         patchify, the dataset, partitioning, prep commands
 ├── training/         losses, the training loop, evaluation, run reporter
-└── inference/        shared scene reconstruction + the evaluation/predict commands
+├── inference/        shared scene reconstruction + the evaluation/predict commands
+├── relabel/          test-set relabelling and re-scoring (docs/RELABELING.md)
+└── hpo/              the Optuna study controller (docs/HPO.md)
 scripts/              cluster-side wrappers — the package does the work
 ├── submit_all.sh     the shield in front of bsub; only jobs that never ran
 ├── tidy_outputs.sh   file a finished run under outputs/<date>/ with its proper name
@@ -78,11 +80,17 @@ scripts/              cluster-side wrappers — the package does the work
 ├── eval/             run_eval.sh (2-stage scoring), run_eval_positives.sh,
 │                    rescore.sh, run_probe.sh
 ├── data/             patch generation and dataset verification
+├── relabel/          QGIS workspace helpers, eval_v2.sh
+├── hpo/              the engine check
+├── archive_outputs.py, clean_outputs.py   outputs/ housekeeping (run on WEXAC)
 └── viewer/           interferogram viewer
 assets/               committed data assets (intf_coord.json, partitions, LiDAR coverage)
 docs/                 see the table above; reference/ holds the paper and status deck
 tests/                pytest suite (pins the behavioural invariants)
-data/, outputs/, models/, test_data/   local data and run artifacts (gitignored)
+data/, outputs/, models/, test_data/   local data and run artifacts (gitignored);
+                     data/scenes_11day and data/scenes_all are the scene symlink farms
+studies/              HPO study roots -- ledger, runs, evaluations (gitignored, protected)
+logs/                 LSF stdout/stderr of the scripts/ jobs (gitignored)
 ```
 
 ## Requirements

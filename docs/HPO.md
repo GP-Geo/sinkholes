@@ -160,10 +160,11 @@ interpolated precision at a common recall — the number that separates "cleaner
 
 ## 7. Storage, retention, protection
 
-The study root is **`/home/labs/rudich/pinkas/sinkholes_studies/k10t2026_hpo_v1`** — outside
-`outputs/` and outside both checkouts, so `scripts/clean_outputs.py` (which deletes `resume.pt`
-in finished runs), `archive_outputs.py` and `tidy_outputs.sh` cannot reach it; a
-`PROTECTED_STUDY_STATE` file says so in the root. Per run: `best.pt` (patch Dice), `last.pt`
+The study root is **`/home/labs/rudich/pinkas/sinkholes/studies/k10t2026_hpo_v1`** (moved from
+`pinkas/sinkholes_studies/` on 2026-10-15; job scripts and run manifests written before that keep
+the old path). `studies/` is gitignored and outside `outputs/`, so `scripts/clean_outputs.py`
+(which deletes `resume.pt` in finished runs), `archive_outputs.py` and `tidy_outputs.sh`, which
+only walk `outputs/`, cannot reach it; a `PROTECTED_STUDY_STATE` file says so in the root. Per run: `best.pt` (patch Dice), `last.pt`
 (final), `resume.pt` + `resume_prev.pt`, snapshots only at scheduled epochs, and
 `best_scene.pt` once evaluated. No per-epoch `.pth`, no input stacks, no shapefiles.
 
@@ -215,7 +216,7 @@ roughly double that estimate. To be redone once ctx50/s0 completes.
 # on a WEXAC login node, once
 conda activate /home/labs/rudich/pinkas/.conda/envs/sinkholes
 pip install optuna==5.0.0                    # the controller only; GPU jobs do not import it
-cd /home/labs/rudich/pinkas/sinkholes-hpo    # the worktree (or the main checkout once merged)
+cd /home/labs/rudich/pinkas/sinkholes        # every study job runs from this checkout
 python -m pytest -q tests/test_hpo_training.py tests/test_snapshot_eval.py tests/test_hpo_controller.py
 python -m sinkholes hpo coverage
 python -m sinkholes hpo preview              # the baseline pair's scripts and bsub lines, no state
@@ -245,7 +246,7 @@ Later phases are the same two lines: `approve --phase shared|tpe|promote|seeds`,
   the locked threshold, retention, long-run creation, the report. Every generated command line
   is parsed by the real `train` / `eval-snapshots` parsers.
 * Real-data engine check: **passed** (LSF 797689, 2026-10-14, L40S, 32 min; output
-  `/home/labs/rudich/pinkas/sinkholes_studies/engine_check_20261014_0942/report.json`). Legacy
+  `/home/labs/rudich/pinkas/sinkholes/studies/engine_check_20261014_0942/report.json`). Legacy
   `eval-scenes` + `eval-outputs` vs `eval-snapshots`, the fill k10 `best.pt`, whole AOI, t2026 val
   scenes 20230116_20230127 (offsets 13..4) and 20230322_20230402 (offsets 12..3).
   - tile batch 1: confidence **bit-identical** on both scenes (51.0 M and 16.0 M pixels scored),
