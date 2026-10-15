@@ -1,663 +1,232 @@
-# Results — the short version
+# Results
 
-*Last updated 2026-09-17. For the exhaustive per-run registry see
-[MODEL_RUNS.md](MODEL_RUNS.md); for the evaluation outputs, both full-scene and
-positives-only, see [PREDICTIONS.md](PREDICTIONS.md); for what each batch was
-for, [EXPERIMENTS.md](EXPERIMENTS.md). This file is the readable summary.*
+*Rewritten 2026-10-15 as the one results document. It condenses the lab notebooks that
+used to sit beside it — `EXPERIMENTS.md` (what each batch was for), `MODEL_RUNS.md` (every
+run), `PREDICTIONS.md` (every evaluation), `ATTENTION.md`, `CORRECTNESS_FIXES.md`,
+`POSITIVES_ONLY_EVAL.md` and the two executed `PLAN_*` documents. They are kept verbatim at
+the tag `notebook-2026-10-15`:*
 
-> ### ⚠️ Read this before comparing any two numbers in this file
->
-> There are **four partition generations** here, and the numbers are not comparable
-> across them — different scene lists mean different denominators, so two "mean object F1"
-> figures from different generations are averages over different ground.
-> [`assets/PARTITIONS.md`](../assets/PARTITIONS.md) is the registry. Compare within a
-> generation; never across.
->
-> The September 2026 results (§2 findings ⑬–⑯) change **five things at once** against the
-> August ones: the partition, the optimiser, two correctness fixes, the patch geometry and
-> the ring radius. Only one of the five has been isolated — see ⑬.
->
-> A second discontinuity runs through the same date. Two correctness fixes
-> ([CORRECTNESS_FIXES.md](CORRECTNESS_FIXES.md)) landed on 2026-09-07/08: every `--amp`
-> run before them clipped a scaled gradient **and** optimised BCE alone, because the
-> region term overflowed fp16. Rankings survive (both models in a pair had the same
-> objective); claims about what the Dice term did, do not.
+```bash
+git show notebook-2026-10-15:docs/EXPERIMENTS.md      # or any other of them
+```
 
-> **Run directories were renamed on 2026-08-17** to
-> `<partition>_<arch>[_<variant>]`, and the names in this file follow the new
-> scheme. Anything without a `posw*` suffix is `pos_w` 4. See
-> `outputs/README.md`.
-
-We detect sinkhole subsidence in 11-day InSAR interferograms over the Dead Sea.
-A model sees the current interferogram plus *k* previous ones and predicts which
-pixels are subsiding. Counted on disk 2026-09-17: **86 run directories carry a `results.csv`** (54 live —
-19 of them September runs and 22 of those `screens/` — plus 32 under
-`outputs/archive_2019_2026_noisy_data/`), and **62 evaluation job directories exist**.
-All 19 runs of 2026-08-20 are scored (finding ⑨) and all 12 of their attention arms
-probed (finding ⑩); the eight generation-4 arms are scored in findings ⑬–⑭.
+We detect sinkhole subsidence in 11-day Sentinel-1 interferograms over the Dead Sea. A
+model sees the current interferogram plus the *k* before it and predicts which pixels
+subside; whole scenes are reconstructed from overlapping 200×100 tiles and scored object
+by object against the mapped sinkhole polygons.
 
 ---
 
-## The one-paragraph summary
+## How to read a number
 
-The big open problem — models flagging far too much ground — **is fixed.**
-Adding "ring negatives" (training patches taken from a ring *around* each
-sinkhole, not just on it) **lifted precision by 20% on geo and 60% on temporal**,
-with no loss of recall on geo. This is the first change in the project that
-clearly improved the metric that matters. It also came with an uncomfortable
-lesson: **patch dice said this batch did nothing.** The single best model at
-scene level was *last* on dice. Stop ranking models by dice.
-
-**What September added.** The best detector in the project is now
-**`th350_tattn_ctx50_neg10` at object F1 0.7905**, on the generation-4 temporal list, at
-object precision 0.869 — where the best generation-3 temporal runs sat at 0.72–0.80. Three
-things that were previously false became true on that ground: spatial context helps
-(+0.02 to +0.04 dice, replicated three ways), **temporal attention beats recurrence**
-(+0.042 F1), and the gain is *recall*. Dice ranked that table backwards too. What
-September did **not** produce is an attribution: five things changed together and only the
-scene list has been isolated (⑬).
-
----
-
-## 1. The two metrics, and why only one counts
-
-| | What it measures | Where it comes from |
-|---|---|---|
-| **`val/dice`** | pixel overlap on validation **patches** | `results.csv`, every epoch |
-| **object P/R** | whether real sinkholes are **found**, on whole scenes | `predictions/*/olm_results*.json` |
-
-**Object-level is the one that counts, and dice is now actively misleading.**
-Not just uninformative — wrong. Details in finding ② below.
-
-Three rules that are easy to get wrong:
-
-- **±0.006 dice is noise.** Most "improvements" in this project are smaller.
-- **Only compare within a partition.** Geo and temporal share no scenes.
-- **Always quote the confidence threshold.** A model's precision doubles
-  between 0.25 and 0.9. A number without a threshold is meaningless.
-
-> Throughout this file, **F1 is computed from the mean precision and mean recall**
-> across scenes, so it is a summary of the table, not a separately measured
-> quantity.
+- **Object-level F1 on whole scenes decides everything.** Patch `val/dice` ranked models
+  backwards in four separate batches (finding ②); it is a training-health signal only.
+- **F1 is computed from the per-scene mean precision and mean recall** (`2PR/(P+R)`), the
+  convention every table here uses. "Area-weighted" F1, where quoted, weights scenes by
+  ground-truth area as the benchmark paper does.
+- **The protocol** is the paper's: tiles at stride 4 (16 per pixel), each binarised at
+  0.5, the pixel's confidence is the fraction voting positive, swept at Reconstruction
+  Thresholds 0.125 / 0.25 / 0.375 / 0.5. Numbers are the best of the four, at the strict
+  Intersection Tolerance `ith0.7_b5` unless marked; the soft `ith0.5_b10` compresses every
+  table into a band ~0.02 wide, so always quote the tolerance.
+- **Compare within one scene list.** A partition generation changes the scenes *and* the
+  scored ground ([`assets/PARTITIONS.md`](../assets/PARTITIONS.md)). Re-average a model's
+  saved per-scene results over the other list instead.
+- **The noise.** Two runs of an identical configuration differed by **0.011 val/dice**
+  (`combo_ctx_p00`, submitted twice by accident) — nearly twice the ±0.006 the August notes
+  used. Per-scene object F1 has a standard deviation of ~0.07, so a mean over 10 scenes
+  moves ~0.02–0.03 on scene sampling alone. The HPO study's seed repeats are the first
+  deliberate measurement ([`HPO.md`](HPO.md)).
+- **Two correctness fixes split the record on 2026-09-07/08.** Every `--amp` run before
+  them clipped the *scaled* gradient (so clipping fired on nearly every step), and at batch
+  ≥ 32 the region loss reduced in fp16 and overflowed, so the run optimised BCE alone.
+  Both are recorded in the checkpoint (`gradient_clipping=unscaled-v2`,
+  `region_loss_dtype=fp32-v2`) and a resume across them is refused. Rankings inside an
+  older batch survive (both arms had the same objective); absolute numbers and claims
+  about the Dice term do not.
 
 ---
 
-## 2. What we know
+## The best models
 
-### ① Ring negatives fix over-prediction — the headline result
+The five focus models (`outputs/README.md`); everything else is under `outputs/archive/`.
+Strict tolerance, best RTh (all peak at 0.125), original labels.
 
-Models used to be trained only on patches that contain subsidence (~2.5% of the
-map), then applied to all of it. They found nearly everything and flagged far
-too much. Training on a ring of nearby negative patches fixes this:
-
-**Geo partition** (18 scenes, at confidence 0.5):
-
-| Model | recall | precision | F1 |
+| Run (`outputs/<date>/…`) | Role | 24-scene gen-5 list | 17-scene gen-4 k10 list |
 |---|---|---|---|
-| `geo_k5` baseline | 0.834 | 0.449 | 0.584 |
-| `geo_k5` + ring negatives 1:1 | 0.862 | **0.545** | **0.668** |
-| `geo_k5` + ring negatives 3:1 | 0.870 | 0.537 | 0.664 |
+| `2026-10-06/temporal_k10_th350_fill_tattn_posw8_30e` | **best model** | **0.8114** (area-weighted 0.8155) | — |
+| `2026-10-06/temporal_k5_th350_fill_tattn_posw8_40e` | best k5 | 0.7934 | — |
+| `2026-09-16/temporal_k10_th350_tattn_posw8_30e` | reference model; the leader's no-fill twin | 0.7906 | 0.7907 |
+| `2026-09-17/temporal_k5_th350_tattn_posw8_40e` | the k5 leader's twin | 0.7876 | — |
+| `2026-09-16/temporal_k10_th350_single_posw8_30e` | single-frame baseline | — | 0.7685 |
 
-**Temporal partition** (20 scenes, at confidence 0.25):
+All four temporal models are plain (200×100 in, no context margin) temporal attention,
+`pos_w` 8, AdamW 3e-4 / wd 1e-2, ring negatives 1–10, flips `hv`. The leader's exact
+configuration is the building-block block at the top of `scripts/submit_all.sh`.
 
-| Model | recall | precision | F1 |
+**On the corrected labels** (the 20 relabelled official test scenes,
+[`RELABELING.md`](RELABELING.md) §6c), area-weighted / mean F1:
+
+| labels | fill k10 (leader) | no-fill twin | single-frame k10 |
 |---|---|---|---|
-| `temporal_k5` baseline | 0.743 | 0.451 | 0.561 |
-| `temporal_k5` + ring3 (near) | 0.664 | 0.591 | 0.626 |
-| `temporal_k5` + ring10 (far) | 0.673 | **0.726** | **0.698** |
-
-Precision improves by **+0.10 on geo and +0.28 on temporal**. On geo, recall
-does not drop at all. This is the largest real gain the project has produced.
-
-### ② Patch dice got this exactly backwards
-
-Every ring-negative run was **flat or down on dice**, and the worst one on dice
-is the best one on scenes:
-
-| Model | dice (rank) | best object F1 (rank) |
-|---|---|---|
-| `geo_k5` baseline | 0.6558 (1st) | 0.667 (3rd) |
-| `geo_k5` ring3 1:1 | 0.6541 (2nd) | 0.712 (2nd) |
-| `geo_k5` ring3 **3:1** | 0.6386 (**last**) | **0.724 (1st)** |
-
-The reason is known: ring negatives are added to the **train** split only, so
-validation stays positives-only and the false positives being suppressed are
-mostly outside the val set. Dice cannot see the thing that changed.
-
-**Consequence: never promote or kill a model on dice again.** Dice is now only
-a training-health signal (is it learning at all, is it diverging).
-
-**We tried fixing the measurement, and it did not work.** `--add_val_negatives`
-put a fixed 1:1 negative set into validation — same ring 1..3 the training
-negatives use, drawn once from the validation interferograms with the run seed —
-so that a false positive on background would cost dice. It was used by the
-`valneg` reruns and by all 14 `clean22` runs.
-
-**Removed 2026-08-20.** It made dice *look* different without making it
-discriminate: an empty prediction on an empty mask scores dice **1.0**
-(`losses.py:21`), so at 1:1 the mean is roughly `(1 + dice_on_positives)/2` —
-which is exactly why `clean22` reads 0.72–0.80 against everything else's
-0.63–0.66. What it bought was a second incomparable dice scale on top of the
-first. Meanwhile `val/F1` / `val/P` / `val/R` are pooled over raw pixel counts
-(`evaluate.py:300-306`) and were **already** negative-aware the whole time.
-
-So the rule above stands, unchanged and now permanent: **dice is a
-training-health signal only** — and if you want a negative-aware number from
-`results.csv`, read `val/F1`. Promote/kill still belongs to `run_eval.sh`.
-Validation is positives-only for every run from 2026-08-20 on; nothing under
-`scripts/` can turn negatives on. The flag survives, deprecated, only so the
-`attnfix` runs of 2026-08-19 stay resumable.
-
-### ③ Temporal context helps much less than we thought: +0.012, not +0.046
-
-The old "+0.046 dice from temporal context" was mostly **optimizer settings**,
-not temporal context. The old single-frame baselines ran at batch 64 / lr 1e-5;
-everything else ran batch 128 / lr 1e-6. With settings matched, the gap
-collapses — and it now replicates at the smaller value on both geo groups:
-
-| Partition | single-frame | ConvLSTM | gap |
-|---|---|---|---|
-| `geo_k5` (new, 2026-08-11) | 0.6434 | 0.6558 | **+0.0124** |
-| `geo_k10` (2026-08-09) | 0.6513 | 0.6646 | **+0.0133** |
-| `geo_k5` (old, confounded) | 0.6084 | 0.6539 | +0.0455 ✗ |
-
-Temporal context is still a real gain, but it is about **2× the noise floor,
-not 8×**. This is a downgrade of what used to be finding ①.
-
-### ④ ~~Attention matches or slightly beats recurrence~~ — SUPERSEDED by ⑨
-
-> **Overturned 2026-09-01.** This finding rested on a single temporal pairing
-> whose evaluation directories have since been deleted. Nineteen runs on
-> generation-3 ground now say the opposite: attention **never** beats ConvLSTM
-> on either axis, and loses significantly at k10 on both. Attention is *not* the
-> default architecture. The parameter-count argument below still stands; the
-> accuracy claim does not. Kept for the record.
-
-On temporal, under ring negatives, at confidence 0.25:
-
-| Model | F1 | params |
-|---|---|---|
-| attention (`tattn` fuse0) | **0.642** | 32.1 M |
-| attention + ConvLSTM hybrid | 0.639 | — |
-| ConvLSTM | 0.626 | 43.1 M |
-
-On dice these were a dead tie (0.6459 vs 0.6460). At object level attention is
-nominally ahead. Given it is the cheaper model, **attention is now the sensible
-default architecture** — though this margin is small and rests on one pairing.
-
-### ⑤ `pos_w` 4 is the operating point
-
-Unchanged and still well-established. Do not revisit.
-
-### ⑥ Capacity is saturated
-
-hidden 256 → 512 changed nothing; 1024 was *worse*. `lr 5e-6 + cosine` is
-harmful. Both settled; do not revisit.
-
-### ⑦ The first honest geo object-level numbers — and they demote the geo table below
-
-*Added 2026-09-01 from the five `eval5` evaluations of 2026-08-19. Full tables:
-[PREDICTIONS.md](PREDICTIONS.md) §3a.*
-
-Everything in §3's geo table was measured on generation-2 partitions, whose geo
-split divides by **frame** — so the 31.25–31.44° band sits in train *and* in the
-hold-out. Generation 3 replaces that with a hard 31.4° latitude cut. Scored on
-that clean ground, under the paper's RTh protocol at stride 4:
-
-| geo, 32 scenes, RTh 0.5 | recall | precision | F1 |
-|---|---|---|---|
-| `geo_k5_convlstm_ring3` | 0.797 | **0.400** | **0.532** |
-| `geo_k5_convlstm_ring3_3x` | 0.767 | 0.395 | 0.522 |
-| `geo_k5_single_ring3` | 0.795 | 0.320 | 0.456 |
-
-The same architecture reads **0.652 precision / 0.712 F1** in §3. The partition
-and the threshold definition both changed, so this is not a clean subtraction —
-but the direction is the one the leakage predicts. **§3's geo table is
-superseded, not extended.** Two consequences follow immediately:
-
-- **"3:1 negatives is the best model in the project" is withdrawn.** On clean
-  ground 3:1 is *behind* 1:1 at every threshold, on recall and F1 alike.
-- **Geo precision is the open problem, not geo recall.** All three models find
-  ~0.8 of the objects and disagree only about how much else they flag.
-
-### ⑧ Recurrence beats the single-frame U-Net on both axes — in opposite currencies
-
-The same five evaluations carry the single-frame control on both axes, and this
-is the cleanest measurement of temporal context the project has:
-
-| Axis, RTh 0.5 | single-frame R / P | ConvLSTM R / P | what recurrence bought |
-|---|---|---|---|
-| geo (32 scenes) | 0.795 / 0.320 | 0.797 / **0.400** | **+0.080 precision, identical recall** |
-| temporal (22 scenes) | 0.516 / 0.751 | **0.601** / 0.754 | **+0.085 recall, identical precision** |
-
-Both margins hold across all four RTh thresholds and neither model gives
-anything back on the other metric. **This is a larger and better-established
-effect than finding ③ measured** — ③ read temporal context off patch dice at
-+0.012, and patch dice is measuring the wrong thing again.
-
-**Because on geo the patch curve says the opposite.** In the 2026-08-20
-positives-only reruns the single-frame arm is *top* of its geo batch on both
-`val/dice` and `val/F1` (`MODEL_RUNS.md`, "The 2026-08-20 batches"). Object
-level reverses it. Finding ② in its sharpest form yet: what separates these two
-models on geo is **precision on background**, and a positives-only patch curve
-holds no background to be wrong about.
-
-### ⑨ All 19 runs of 2026-08-20 are scored — recurrence wins, attention never does
-
-Scored 2026-09-01 (`eval6`, 19 jobs). Two batches — `attnpos` (8 runs) and
-`pre23` (11 runs) — on the generation-3 RTh protocol, 23 geo scenes and 20
-temporal, audited comparable. Full tables in
-[PREDICTIONS.md §3b](PREDICTIONS.md).
-
-| | geo | temporal |
-|---|---|---|
-| best | `geo_k5_pre2023_convlstm_ring3` **0.648** | `temporal_k5_pre2023_convlstm_ring3` **0.780** |
-| single-frame baseline | `geo_k5_pre2023_single_ring3` 0.612 | `temporal_k5_pre2023_single_ring3` 0.733 |
-| worst | `geo_k10_pre2023_tattn_ring3` 0.584 | `temporal_k5_pre2023_single_ring3` 0.733 |
-
-**Recurrence beats the single-frame U-Net on both axes**, +0.038 geo and +0.047
-temporal, both significant on a paired per-scene bootstrap. It is a *recall*
-gain: the single-frame model is the most conservative in the field, competitive
-on precision and last on recall.
-
-**Attention never beats recurrence.** Not on either axis, not at either depth.
-At k10 it loses significantly on both (+0.066 geo, +0.030 temporal in ConvLSTM's
-favour). The hybrid ties. This **supersedes finding ④**, which made attention
-the default off a single temporal pairing whose evaluation directories have
-since been deleted.
-
-The dice curve remains useless here, exactly as finding ② says: geo k10 spans
-0.0149 dice across the three architectures and changes leader on `val/F1`,
-against a ±0.006 noise floor.
-
-### ⑩ The attention selects on most arms — and it does not help
-
-Probed 2026-09-02, all 12 attention checkpoints, on real data. **8 of 12
-select**; 7 of 8 *pure*-attention arms do, one better than any 2026-08-19
-reference. So `contrast` + `qk_norm` works, and that is a real positive result.
-
-**3 of 4 hybrids fail the collapse alarm**, two at exactly 1.000 —
-indistinguishable from the pre-fix control. That is the predicted failure mode:
-when a ConvLSTM already integrates over time, nothing pushes the attention to
-select.
-
-**But selectivity buys nothing.** Measured selectivity correlates with object F1
-at **r = −0.10**, and only **1 of 7** attention arms beats its matched ConvLSTM.
-The second-most-selective arm is the worst geo model on record (0.595); the
-fully dead hybrid scores 0.641, ahead of five arms that genuinely select. The
-question "is the attention real?" is now answered yes — and it turns out not to
-be the question that mattered.
-
-Two practical notes: the probe **runs on a laptop in ~5 min per checkpoint**, no
-cluster needed, despite `run_probe.sh` being written as a `bsub` job; and
-`logit_scale` temperature predicts measured selectivity only weakly (r = −0.61),
-reliably *only* at exactly 1.000. Rank on the probe, never the temperature.
-
-### ⑪ The 2023–2026 training years buy nothing measurable
-
-Six matched `pre23` vs `clean` pairs — same architecture, same depth, same
-positives-only validation, same scored ground, differing only in whether the
-training archive stops at 2022-12-31. **`pre23` is ahead in 4 of 6** and
-significantly ahead in two, despite an archive ending three and a half years
-before the test scenes. No pair favours `clean` significantly.
-
-That is the question the `pre23` batch was built to answer, and the answer is
-negative. Before scoping more GPU-hours on the larger archive it is worth
-understanding why — the LiDAR mask ending 20240605 (finding ⑫) is one candidate.
-
-### ⑫ The stale LiDAR mask is a real gap — but it is not inflating false positives
-
-`assets/lidar_intf_mask.txt` ends 20240605. On the generation-3 **temporal** test
-split **0 of 22** interferograms have a mapping of their own; every one falls
-back to LiDAR2022. Geo is 28 of 35.
-
-`eval7` (2026-09-02) re-scored the eleven `pre23` arms on the `pre2023` splits,
-which are 100 % mapped. The LiDAR gating worked — zero fallback warnings — but
-precision *fell* (−0.22 to −0.31 temporal), the opposite of the hypothesis, and
-the comparison turns out not to measure the mask: the temporal splits share no
-scenes and `min_positives=150` cut 35 scenes to 8 whose GT area is a third of
-`eval6`'s. On geo, the scenes running on the stale mask are the **easier** ones
-(mean F1 0.731 against 0.475 for the shared hard core).
-
-If anything the mask *flatters* precision by suppressing predictions in ground
-the 2022 LiDAR never saw — which would also cost recall, the pattern actually
-observed. **Not settled.** The decisive test is one model on the same 20 scenes
-with `--no-add_lidar_mask`, and it has not been run.
-
-### ⑬ The label-quality threshold is worth +0.013 to +0.024 F1 — and that is all of it
-
-Generation 4 (`*_clean_th350x200`) drops a scene from **train/val/test** when its
-whole-scene positive-patch count falls below 350 north / 200 south. Predecessors are
-exempt, so no temporal chain shortens. That is the only difference from generation 3.
-
-**It was measured rather than assumed.** Re-averaging the three finished generation-3
-ctx50 runs over *only* the above-threshold scenes moves object F1 by **+0.013 to +0.024**
-at every RTh, for all three models — three to four times the ±0.006 noise floor, and a
-level shift from an easier scene list, not model quality.
-
-The scene sets overlap but are not nested: of 20 scored scenes, **17 are common, 3 are
-added** (they have no 10-previous chain, so the k10 list cannot hold them) and **3 are
-dropped** (northern scenes at 346 / 343 / 339 positives, just under the cut). Both lists
-happen to score 20 scenes. They are not the same 20.
-
-**350 is not a clean separation.** The three dropped scenes are the low-precision cluster
-— 0.628 / 0.612 / 0.631 precision, against 0.82–0.92 for the retained northern scenes —
-but two more of that cluster survive at 356 and 359, including the single worst scene in
-the set at 0.530 precision. The real gap in the data sits between **359 and 496**; the
-threshold was set at 350 and cuts through the middle of the band it was aimed at.
-
-**So the ~0.09 precision gap between §3's generation-4 table and the generation-3 runs is
-not explained by the partition.** The `th350` arms also change the optimiser (adamw), the
-objective (both correctness fixes), the geometry (ctx50) and the ring radius (10 vs 3),
-all at once. Only the scene-list term above has been isolated; the rest is confounded and
-should not be attributed to anything in particular.
-
-`MIN_POS=150` — the old gate that dropped thin scenes at scoring time — is now **inert**:
-the thinnest scene in the generation-4 list is 220, so it never fires.
-
-### ⑭ Temporal attention finally beats recurrence — and it is a recall gain
-
-`th350`, four architectures, same partition, same protocol, same 20 scenes, `pos_w` 4,
-60 epochs, ctx50, ring negatives to 10, `hv` flips, `adamw 3e-4 / wd 1e-2`.
-Object F1 at the strict tolerance (`ith0.7_b5`), each at its best of four RTh:
-
-| Model | obj F1 | P | R | val/dice |
-|---|---|---|---|---|
-| `th350_tattn_ctx50_neg10` | **0.7905** | 0.869 | **0.725** | 0.6970 |
-| `th350_hybrid_ctx50_neg10` | 0.7782 | 0.866 | 0.706 | 0.7065 |
-| `th350_single_ctx50_neg10` | 0.7535 | 0.859 | 0.671 | 0.6859 |
-| `th350_convlstm_ctx50_neg10` | 0.7489 | **0.879** | 0.652 | 0.7035 |
-
-Attention is **+0.042 F1 over recurrence** and +0.037 over the single-frame floor, at
-equal precision — the whole margin is recall, which is the axis recurrence was supposed
-to own. This **reverses `eval6`'s finding ⑨** ("attention never beats recurrence"), on a
-different partition, a different optimiser and a different patch geometry, so it is a new
-measurement rather than a correction of the old one.
-
-`val/dice` ranks this table backwards for the third time: the ConvLSTM is second on dice
-and last on F1; the single-frame floor is last on dice and third on F1. **Finding ②
-holds.**
-
-All four peak at **RTh 0.125**, the bottom of the sweep, so every F1 here is a lower
-bound (the same caveat as finding ⑨'s ④).
-
-### ⑮ The architecture ranking does not survive a change of operating point
-
-`posw8` re-ran the same four arms at `pos_w` 8. The spread collapses from 0.042 to
-**0.013**, and the order changes:
-
-| Model | obj F1 | Δ vs its `pos_w` 4 twin |
-|---|---|---|
-| `posw8_tattn_ctx50_25e` | 0.7699 | −0.021 |
-| `posw8_convlstm_ctx50_25e` | 0.7699 | **+0.021** |
-| `posw8_single_ctx50_20e` | 0.7676 | +0.014 |
-| `posw8_hybrid_ctx50_25e` | 0.7571 | −0.021 |
-
-The weight buys the weaker arms the recall they were missing (ConvLSTM +0.044) and costs
-the leader precision. **So finding ⑭ is a statement about `pos_w` 4, not about the
-architectures**, and any architecture claim from this project needs its operating point
-quoted with it. Under the softer tolerance (`ith0.5_b10`) the ordering differs again, and
-all eight arms sit in 0.873–0.890 — a range narrower than the gap between two runs of an
-identical config (see ⑯).
-
-### ⑯ Spatial context raises patch dice and costs object recall — and the noise floor is twice what we quote
-
-`--context_margin 50 50` feeds the network 300×200 and supervises the centre 200×100.
-Three independent patch-dice measurements, all positive:
-
-| pair | Δ val/dice |
+| original | **0.8081** / **0.8146** | 0.7917 / 0.7974 | 0.7671 / 0.7777 |
+| corrected | **0.8444** / **0.8455** | 0.8292 / 0.8291 | 0.8122 / 0.8140 |
+| corrected, flagged polygons not counted | **0.8863** / **0.8757** | 0.8660 / 0.8557 | 0.8583 / 0.8523 |
+
+**On the 2026 test block** (generation 5-t2026's 10 test scenes, Feb–Apr 2026), re-averaged
+from the 24-scene evaluations: the leader **0.8660** at RTh 0.125, its no-fill twin 0.8499.
+On the 8 of them that were relabelled: 0.8602 original / 0.8739 corrected / 0.8826 flagged
+not counted (twin 0.8450 / 0.8619 / 0.8701). This is the bar a model trained on the t2026
+split has to clear ([`HPO.md`](HPO.md)); with ten scenes, gaps under ~0.03 are scene noise.
+
+---
+
+## What we know
+
+### ① Ring negatives fixed over-prediction
+
+Training only on patches that contain subsidence (~2.5% of the map) and predicting on all
+of it flagged far too much. Adding empty patches from a ring around each sinkhole lifted
+object precision by **+0.10 on geo and +0.28 on temporal** in August, with no recall cost
+on geo; the far ring (1–10 patches) beat the near one (1–3). The largest single gain the
+project has produced, and every model since trains with ring 1–10 at 1:1.
+
+### ② Patch dice ranks models backwards
+
+Ring negatives were flat or down on `val/dice` while lifting object F1 by ~0.1; the worst
+model on dice was the best on scenes. It recurred with recurrence vs. single frame on geo,
+with the generation-4 architecture sweep, with context (finding ⑤) and with `long200`,
+whose rising dice curve (best epoch 200 of 200) came with **−0.027** object F1. Validation
+is positives-only by design, so dice cannot see the background false positives the
+negatives suppress. Putting negatives into validation (`--add_val_negatives`) was tried and
+retired on 2026-08-20: an empty prediction on an empty mask scores dice 1.0, so it only
+compressed the scale. For a negative-aware number from `results.csv` read the pixel-pooled
+`val/F1`; settle anything at scene level.
+
+### ③ The optimiser: AdamW 3e-4, weight decay 1e-2
+
+Once clipping was fixed, the historical RMSprop at momentum 0.999 diverged inside one
+epoch: its momentum is not bias-corrected, so the effective step is `lr/(1−m)` = 1000×
+`lr`. No learning rate recovers it (`lrscan`: three decades of LR at m=0.999 all land at
+0.58–0.63 dice; the same LR at m=0.9 was the best arm). `adamscan` picked
+**AdamW lr 3e-4 / wd 1e-2** — a region, not a point (the top three were within 0.0045) —
+and every run since 2026-09-09 uses it. The training templates still *default* to the
+historical RMSprop so old runs reproduce; never submit with the defaults
+([`PIPELINE.md`](PIPELINE.md#lsf-templates-and-the-current-recipe)).
+
+### ④ Temporal history helps, more with depth; the architecture ranking depends on the operating point
+
+- Generation 3: recurrence (ConvLSTM) beat the single-frame U-Net on both axes (+0.038 geo,
+  +0.047 temporal) and attention never beat recurrence.
+- Generation 4, `pos_w` 4, k5: temporal attention beat recurrence by **+0.042** (0.7905 vs
+  0.7489), all of it recall. At `pos_w` 8 the four architectures collapsed into a 0.013
+  band and reordered — so an architecture claim needs its operating point quoted with it.
+- Depth, on identical scenes: the attention edge over the single frame widens from +0.007
+  at k5 to **+0.032 at k10** (ctx50), and is +0.022 for the plain k10 pair. k10 trains on
+  24% fewer positives; the single frame loses to that cut, attention gains anyway.
+- Corrected labels shrink the no-fill model's advantage over the single frame (+0.025 →
+  +0.017 → +0.008 area-weighted as the labels get cleaner, `RELABELING.md` §6c): much of
+  it sat on the hard, flagged polygons. The filled-chain leader keeps more of its lead
+  (+0.041 → +0.032 → +0.028).
+
+### ⑤ Spatial context (ctx50) raises dice and costs object recall — plain is the default
+
+`--context_margin 50 50` (300×200 in, centre 200×100 supervised) was worth +0.024 to +0.041
+val/dice in three independent pairs. At object level it **lost all five scored pairs**
+(−0.008 to −0.029, both generations, both depths): it buys 0.04–0.08 precision and costs
+0.06–0.10 recall. History shrinks the loss (−0.016 for attention at k10 against −0.026 for
+the single frame), and costs ~3× the host memory. The HPO study re-asks the question at
+tuned settings on the t2026 split.
+
+### ⑥ Filled history chains are worth +0.021 at k10
+
+Generation 5 lets a chain skip a missing acquisition (up to 3k slots back) and tells the
+attention each frame's real age, so scenes the gap-free rule dropped come back: +47 train
+scenes at k10, +30 at k5. Against twins differing only in the partition: **+0.021 at k10**
+(0.8114 vs 0.7906, well past the noise) and +0.006 at k5 (inside it). The two causes — more
+supervised dates and uneven ages — arrive together and are not separated. The leader also
+leads under every labeling (16/20 scenes against the twin with flags not counted), in both
+recall and precision.
+
+### ⑦ The label-quality threshold is a scene-list shift, not a better model
+
+Generation 4 drops a scene from every split when its positive-patch count is below 350
+(North) / 200 (South); predecessors are exempt. Re-averaging finished generation-3 runs
+over only the surviving scenes moved object F1 by +0.013 to +0.024 — easier scenes, not
+model quality. 350 cuts through the low-precision cluster rather than below it (the real
+gap is 359–496).
+
+### ⑧ Relabelling: the old labels missed objects the models found
+
+All 20 official temporal test scenes were relabelled (366 changes, 46 polygons flagged as
+doubtful; [`RELABELING.md`](RELABELING.md)). The gain is **recall**: missed objects roughly
+halve, precision barely moves. Flagged polygons are what the models miss (recall ~0.13 on
+them against ~0.84 elsewhere). Fill leads under every labeling, by a steady +0.015–0.020
+area-weighted F1. The QGIS prediction layer during labelling was the no-fill twin, so any
+bias from it favours the twin, not the leader.
+
+### ⑨ The attention selects — and selectivity is not what makes it good
+
+`tattn_unet` lets each bottleneck cell of the current frame weight the same cell in each
+predecessor. Before 2026-08-19 every checkpoint had collapsed to a uniform average;
+`--tattn_contrast` (queries and keys from each frame's deviation from the temporal mean)
+and `--tattn_qk_norm` (unit-norm q/k with one learned temperature) fixed it and are on by
+default. Every run probed since the AdamW retraining selects (22–34% of uniform). But
+across the August arms selectivity correlated with object F1 at **r = −0.10**: whether
+the attention is real turned out not to be the question that mattered. At k10 the history
+carries recall — masking it costs the ctx50 model 0.044 patch dice, recall 0.834 → 0.666 —
+and both k10 models weight the oldest frame in the window (110 days back) heavily, a hint
+that deeper history may pay.
+
+`sinkholes attention-probe` measures this on a laptop in minutes (plain checkpoints only;
+it refuses a context one). The wrapper used for the September ctx50 probes was deleted
+with `outputs/attention_probe/` on 2026-10-15.
+
+### ⑩ The paper's positives-only protocol cannot rank models
+
+Scoring only tiles whose ground truth is non-empty (~1.2% of tiles; `--positives_only`)
+leaves recall identical and inflates precision up to 10×, worst on exactly the scenes that
+over-predict; it ranked the worst full-scene geo model first. Best positives-only F1 in
+August (generation 2): 0.911 geo, 0.815 temporal. Use it only to compare against the
+paper, never to choose a model.
+
+### ⑪ Settled — do not re-run
+
+| | evidence |
 |---|---|
-| `combo_ctx_p00` vs `combo_p00` (ConvLSTM, 20 ep) | **+0.041** |
-| `longgrid_tattn_ctx50` vs `longgrid_tattn_plain` (30/60 ep) | +0.029 |
-| `longsingle_ctx50` vs `longsingle_plain` (single frame, 60 ep) | +0.024 |
+| bigger ConvLSTM (hidden 512 / 1024) | no gain / worse |
+| more epochs on a plateau schedule | `long200`: dice +0.000, object F1 −0.027 |
+| the 2023–2026 training years (generation 3) | `pre23` ahead of `clean` in 4 of 6 matched pairs |
+| a polygon area filter | 24 RTh × floor combinations; none beats raising RTh (area-weighted metric) |
+| coherence maps to explain false positives | AUC 0.53 / 0.51; polygon area alone 0.83 |
+| Hann-window stitching | one point, negative (0.640 vs 0.662) |
+| 3:1 vs 1:1 negatives | 3:1 behind 1:1 on clean ground at every threshold |
+| RMSprop at momentum 0.999 | diverges once clipping is correct (③) |
+| bottleneck dropout 0.1–0.2, Jaccard region loss | +~0.01 dice in 20-epoch screens, inside 2× the noise, never scored on scenes |
 
-**At the object level every scored pair goes the other way** (2026-09-17; `ith0.7_b5`,
-best of four RTh, each pair on one shared scene list):
+### Known data limits
 
-| pair | plain F1 (P / R) | ctx50 F1 (P / R) | Δ context |
-|---|---|---|---|
-| single, k5, generation 3 (`longsingle_*`, 20 scenes) | 0.7167 (0.751 / 0.685) | 0.7089 (0.832 / 0.618) | −0.008 |
-| ConvLSTM, k5, generation 3 (`longgrid_convlstm_plain` / `longreg_aughv`) | 0.7437 (0.778 / 0.712) | 0.7196 (0.829 / 0.636) | −0.024 |
-| attention, k5, generation 3 (`longgrid_tattn_*`) | 0.7498 (0.793 / 0.711) | 0.7212 (0.847 / 0.628) | −0.029 |
-| single, k10, generation 4 (`posw8_single_k10_*`, 17 scenes) | 0.7685 (0.789 / 0.749) | 0.7427 (0.871 / 0.647) | −0.026 |
-| attention, k10, generation 4 (`posw8_tattn_k10_*`, 17 scenes) | **0.7907** (0.819 / 0.764) | 0.7748 (0.858 / 0.706) | −0.016 |
-
-Five of five, on both generations and both depths: context buys 0.04–0.08 precision and
-costs 0.06–0.10 recall, and the recall loss wins. Finding ② holds for every pair — dice
-ranked all of them backwards. The generation-3 runs are superseded by the label-quality
-threshold and were deleted 2026-09-17; their within-pair direction is what they still
-contribute. History shrinks the loss without removing it: at k10 context costs attention
-0.016 against 0.026 for the single frame, and the attention probe shows the ctx50 model's
-history carrying the recall ([ATTENTION.md](ATTENTION.md#k10-history-carries-the-recall)).
-Plain attention at k10 (0.7907) is the best k10 model.
-
-> **The noise floor.** `combo_ctx_p00` was submitted twice by accident. Two runs of an
-> **identical** configuration differ by **0.0109** val/dice, both peaking at epoch 7 of
-> 20 — nearly twice the ±0.006 this file quotes everywhere. It was measured incidentally
-> and has never been measured on purpose. **Several margins in ⑬–⑯ and most of the
-> `screens/` verdicts are inside it.** Until it is measured deliberately, treat any dice
-> gap under ~0.02 as unresolved.
-
-## 3. The best models we have
-
-> **Reference model (2026-10-07): `posw8_tattn_k10_plain_30e`**, plain attention at k10. Use
-> it for inspection, relabelling and comparisons; **not** a ctx50 model. The two leaders'
-> headline numbers below (0.7905 ctx50 k5, 0.7907 plain k10) look tied only because they come
-> from different scene lists. On the **same 17 scenes** (strict tolerance, best of four RTh):
->
-> | model | mean object F1 | area-weighted F1 |
-> |---|---|---|
-> | `posw8_tattn_k10_plain_30e` | **0.7907** | **0.7881** |
-> | `th350_tattn_ctx50_neg10` | 0.7863 | 0.7725 |
->
-> That matches the context finding: plain beat ctx50 in all 5 pairs scored. The "mean" figure
-> is the per-scene mean of recall/precision that every number in this section uses; the
-> area-weighted one weights scenes by GT area, as the paper does. Newer plain runs exist
-> (`posw8_tattn_plain_40e`, k5 and generation 5, mean F1 0.7876 on 24 scenes; `fill_tattn_*`,
-> 2026-10-06, not yet scored), so re-rank before quoting a winner.
-
-**Generation 4 (current), temporal k5** — all eight scored on the same 20 scenes under the
-RTh protocol, best of four thresholds, strict tolerance `ith0.7_b5`. Directly comparable
-with each other and **with nothing else in this file**.
-
-| Model | obj F1 | P | R | val/dice |
-|---|---|---|---|---|
-| `th350_tattn_ctx50_neg10` | **0.7905** | 0.869 | 0.725 | 0.6970 |
-| `th350_hybrid_ctx50_neg10` | 0.7782 | 0.866 | 0.706 | 0.7065 |
-| `posw8_tattn_ctx50_25e` | 0.7699 | 0.850 | 0.704 | 0.7010 |
-| `posw8_convlstm_ctx50_25e` | 0.7699 | 0.862 | 0.696 | 0.7040 |
-| `posw8_single_ctx50_20e` | 0.7676 | 0.850 | 0.700 | 0.7018 |
-| `posw8_hybrid_ctx50_25e` | 0.7571 | 0.868 | 0.671 | 0.7023 |
-| `th350_single_ctx50_neg10` | 0.7535 | 0.859 | 0.671 | 0.6859 |
-| `th350_convlstm_ctx50_neg10` | 0.7489 | 0.879 | 0.652 | 0.7035 |
-
-At the soft tolerance (`ith0.5_b10`) all eight sit in **0.873–0.890** and the order is
-different; quote the tolerance with the number. Generation-4 **k10** is a separate
-17-scene denominator — `posw8_tattn_k10_plain_30e` **0.7907**, `posw8_tattn_k10_ctx50_30e`
-0.7748, `posw8_single_k10_plain_30e` 0.7685, `posw8_single_k10_ctx50_30e` 0.7427.
-
-The best generation-3 model remains `temporal_k5_pre2023_convlstm_ring3` at **0.7797**
-(20 scenes, same protocol). It is *not* 0.011 behind the leader above — it is measured on
-different ground.
+- **`assets/lidar_intf_mask.txt` ends 2024-06-05**, so every temporal test scene falls
+  back to the 2022 LiDAR coverage for gating. The decisive control — one model, the same
+  scenes, `--no-add_lidar_mask` — has never been run.
+- Six 2025 scenes sat at ~0.45–0.60 recall for every model on the original labels; all are
+  in the relabelled set, where flags mark what the models miss.
 
 ---
 
-**Geo (generation 2) — historical.** All six scored on the same 18 scenes, so these are directly
-comparable, including across k5 and k10. **⚠️ Superseded for geo by finding ⑦:**
-this table was measured on generation-2 partitions whose split put the
-31.25–31.44° band in train *and* in the hold-out. Kept as the historical record;
-do not quote a geo number from it.
+## Open
 
-| Model | dice | Best F1 | at conf. | R / P there |
-|---|---|---|---|---|
-| `geo_k5_convlstm_ring3_3x` | 0.6386 | **0.724** | 0.9 | 0.773 / 0.681 |
-| `geo_k5_convlstm_ring3` | 0.6541 | **0.712** | 0.7 | 0.784 / 0.652 |
-| `geo_k5_convlstm_base` | 0.6558 | 0.667 | 0.9 | 0.657 / 0.677 |
-| `geo_k10_convlstm_ring3` | 0.6596 | 0.666 | 0.7 | 0.785 / 0.578 |
-| `geo_k5_convlstm_posw8` | 0.6539 | 0.647 | 0.9 | 0.696 / 0.605 |
-| `geo_k10_convlstm_posw8` | 0.6583 | 0.456 | 0.5 | 0.893 / 0.306 |
-
-**Temporal** — all scored on the same 20 scenes:
-
-| Model | dice | Best F1 | at conf. | R / P there |
-|---|---|---|---|---|
-| `temporal_k5_convlstm_ring10` | 0.6432 | **0.698** | 0.25 | 0.673 / 0.726 |
-| `temporal_k5_tattn_ring3` | 0.6459 | 0.642 | 0.25 | 0.663 / 0.621 |
-| `temporal_k5_tattn_hybrid_ring3` | 0.6468 | 0.639 | 0.25 | 0.667 / 0.613 |
-| `temporal_k5_convlstm_ring3` | 0.6460 | 0.626 | 0.25 | 0.664 / 0.591 |
-| `temporal_k5_convlstm_base` | 0.6391 | 0.612 | 0.5 | 0.609 / 0.616 |
-| `temporal_k5_single_b64` | 0.5966 | 0.581 | 0.5 | 0.676 / 0.509 |
-
-**The best threshold moved.** Older notes quoted everything at 0.25. With ring
-negatives, geo models now peak at **0.7–0.9** and temporal at **0.25**. Quoting
-a geo model at 0.25 now understates it by ~0.15 F1.
-
-### The four 2026-08-11 `geo_k5` runs — all scored, two unreproducible
-
-Finished 2026-08-11, all four scored under the generation-2 protocol (§2 of
-[PREDICTIONS.md](PREDICTIONS.md)). Three stopped on early-stopping patience and
-one ran the full 60 epochs — none was killed, so none is undertrained.
-
-| Run | dice | obj F1 | directory |
-|---|---|---|---|
-| `geo_k5_tattn_hybrid_ring3` | 0.6487 | — | **deleted** |
-| `geo_k5_single_base` | 0.6434 | 0.629 | present |
-| `geo_k5_tattn_ring3` | 0.6433 | 0.683 | **deleted** |
-| `geo_k5_single_ring3` | 0.6341 | 0.662 | present |
-
-The two attention arms lost their evaluation directories in the 2026-08-20
-prune, so their numbers cannot be re-scored, extended or checked — see the
-warning box at the top of [PREDICTIONS.md](PREDICTIONS.md). This is why the
-`eval6` attention rows (finding ⑨) matter: they are the live replacement for a
-comparison that had become unverifiable.
-
----
-
-## 4. Traps — read before quoting a number
-
-**① The k10split model is invalid.** It once looked like the best model in the
-project (dice 0.6694, object F1 0.743). It was trained with a sample-selection
-bug *and* validated on its own era. Deleted 2026-08-11; post-mortem in
-`outputs/2026-08-03/README.md`. **If you find an old number above 0.66, check
-which run it came from.**
-
-**② One scene destroys geo precision.** `20241127_20241208` scores precision
-**0.06–0.11** for every geo model, against a ~0.5 average — it finds the
-sinkholes (recall 0.96–0.98) but flags roughly ten times too much.
-Dropping that single scene lifts geo mean precision @0.5 from 0.545 → 0.571;
-dropping the worst three lifts it to 0.609. Worth looking at directly before
-concluding geo precision is bad everywhere. It is not; it is bad *there*.
-
-**③ Six scenes fail for every model.** `20250329_20250409`,
-`20250512_20250523`, `20250830_20250910`, `20251002_20251013`,
-`20251024_20251104`, `20250819_20250830` sit at ~0.45–0.60 recall regardless of
-architecture or negatives. **Re-confirmed across all four temporal models.**
-That points at the data, not the model.
-
-**④ The two partitions fail in opposite directions.** Geo over-predicts
-(high recall, low precision). Temporal under-predicts on future scenes.
-"Low recall" is a temporal-partition symptom only.
-
-**⑤ Recall collapses at high confidence — on temporal only.** Temporal models
-lose half their recall by 0.9. Geo models with 3:1 negatives *hold* recall
-(0.773 @0.9), which is exactly why they win there.
-
----
-
-## 5. What to do next
-
-*Rewritten 2026-09-17. The August queue that used to sit here was all geo, and the focus
-has been temporal since 2026-09-03; the geo items that are still open are kept at the
-bottom.*
-
-**The temporal k5 generation-4 partition is the focus.** Generation 4 has no geo family
-at all.
-
-### Do these first — all of them are evaluations, none is a retrain
-
-1. ~~**`submit_all.sh evallonggrid`**~~ **Done 2026-09-17** (LSF 316677–316682). Plain beat
-   ctx50 at object level in all three pairs; finding ⑯ now carries the table.
-2. ~~**`submit_all.sh evalk10 --only=tattn_ctx50`**~~ **Done 2026-09-17** (LSF 303197):
-   0.7748, the best k10 cell. The inversion is not a single-frame property.
-   `evalk10plain` is **done** too (LSF 330515): plain k10 attention scores 0.7907, the best
-   k10 model, and context lost for the fifth time in five pairs.
-3. **Measure the noise floor on purpose.** Three or four repeats of one config at one
-   seed-per-run. `combo_ctx_p00`'s accidental duplicate says it is ~0.011 dice, against the
-   ±0.006 quoted throughout this file — which puts most of `screens/` and several margins
-   in ⑬–⑯ inside it. Cheap, and it decides how much of the last month is real.
-4. ~~**Probe the September attention.**~~ **Done 2026-09-16/17**, with a wrapper that
-   reads context checkpoints ([ATTENTION.md](ATTENTION.md#what-we-know-september-2026)).
-   All six attention-only runs select (22–34% of uniform). How much the prediction depends
-   on the history varies ten-fold: at k10 ctx50, hiding it costs 0.044 patch Dice, almost
-   all recall. Still open: whether that holds on whole scenes, with negatives.
-5. **Prune the launcher.** Twelve batches that have run are still in `submit_all.sh`
-   ([EXPERIMENTS.md](EXPERIMENTS.md)), so `--submit` on one of them would repeat finished
-   GPU-hours — the exact failure the shield exists to prevent.
-6. **Run the LiDAR control** — one model on the same generation-4 temporal scenes with
-   `--no-add_lidar_mask`. Still the only clean test of finding ⑫, still one job, still
-   unrun. Finding ⑬ raises the stakes: if undrawn ground truth was most of the
-   false-positive rate, the mask may be suppressing recall for no precision it still buys.
-
-### Then
-
-- **A generation-4 geo family.** `make-benchmark-partitions --axis geo --nonz_th 350 200`
-  is one command. Every September result is temporal, and deployment needs the geo answer.
-- **Retire or fix the hybrid.** It has now been measured at both operating points and wins
-  neither: second at `pos_w` 4, last at `pos_w` 8, and three of four earlier hybrids
-  collapsed to uniform attention (finding ⑩). Either it gets a term that forces selection,
-  or it stops taking a slot.
-- **Re-read `--seg_loss` now that the region term has a gradient.** The `lossscan` screen is
-  the first measurement of it that means anything ([CORRECTNESS_FIXES.md](CORRECTNESS_FIXES.md),
-  part 2) and it is a 20-epoch screen with a +0.007 margin.
-- **Extend `lidar_intf_mask.txt` past 20240605.** Every generation-3 and generation-4
-  temporal scene runs on the LiDAR2022 fallback.
-- **Housekeeping:** 19 September run directories are still loose at the top level of
-  `outputs/`, and no dated folder has the per-batch `README.md` that
-  [`outputs/README.md`](../outputs/README.md) says it does. `scripts/tidy_outputs.sh`
-  does the filing.
-
-### Still open on geo, from the August queue
-
-- `eval6ref` (4 jobs) — the missing same-protocol generation-3 anchors, without which every
-  `attnpos` row is read against a `pre23` comparator across a training-archive boundary.
-  Its own note flags an unresolved contradiction on `eval6ref_g5_single`: it tops its batch
-  on patch dice while its twin is 0.076 obj F1 behind, and "one of those two readings is
-  wrong."
-- Widen the geo threshold sweep above 0.5 — all nine geo `eval6` runs peak at the top of
-  the sweep, so every geo F1 is a lower bound. `scripts/eval/rescore.sh` is enough.
-- `geo_k5_convlstm_ring10` — the one missing cell in the negatives grid; far-field
-  negatives were the biggest temporal win and have never been tried on geo.
-- 1:1 vs 3:1 negatives on geo. The old "3:1 is a settled negative" verdict came from dice
-  and **is withdrawn**.
-- The object-level backlog: `geo_k10_convlstm_posw4` and `geo_k10_single` have never been
-  scored on scenes.
-
-### Do not bother with
-
-Bigger hidden sizes, cosine LR, `fuse4` skips. All settled negatives on
-evidence that dice *could* legitimately see.
-
-**Added 2026-09-03: the polygon area filter.** Swept on the generation-3 AOI
-benchmark — 24 combinations of RTh and an area floor, on
-`temporal_k5_pre2023_convlstm_ring3` — and **not one beats simply raising RTh**;
-best F1 is at area floor 0, the published number. The object-level metric is
-area-weighted, so a 50 px floor removes 47.5 % of false positives by *count* and
-4.1 % of false-positive *area*. The old "half the false positives for 2.5 % of
-recall" was a count statistic read as a precision claim. Full decomposition in
-[EXPERIMENTS.md](EXPERIMENTS.md), under *Retired, and why* → correlation maps.
-
-**Added 2026-09-08: RMSprop at `--momentum 0.999`.** It was only ever survivable because
-the AMP clipping defect crushed every gradient; with correct clipping it diverges inside
-one epoch, and no learning rate recovers it
-([EXPERIMENTS.md](EXPERIMENTS.md), `lrscan`). Use `adamw lr 3e-4 wd 1e-2`, and do not
-carry an RMSprop `lr` across — RMSprop's uncorrected momentum makes its effective step
-`lr/(1−m)`, so the numbers do not translate.
-
-**Added 2026-09-17: reading a dice gap under ~0.02 as a result.** Two runs of an identical
-config differ by 0.011 (finding ⑯). Until item 3 above is done, a smaller gap is not
-evidence of anything.
-
-**No longer on this list:** 3:1 negatives — now in the geo backlog above. Also removed:
-"score the four 2026-08-11 runs" (all four are scored; two lost their directories) and
-"probe the attention" (all 12 generation-3 arms probed 2026-09-02 — but see item 4, the
-generation-4 arms have not been).
+1. **The HPO study** ([`HPO.md`](HPO.md)): plain vs ctx50 temporal attention at k10 on the
+   t2026 split, tuned and seed-repeated, with 300-epoch runs. The baseline pair has trained
+   (best val/dice plain 0.6189 @ epoch 15, ctx50 0.6356 @ 17 — patch level, ranks nothing)
+   and the engine check passed; next is `hpo step --submit` for their scene evaluations.
+   Its plain baseline is the leader's configuration on the t2026 split, so scoring its
+   chosen checkpoint on the 10 test scenes answers whether training up to 2025 helps (bar:
+   0.8660).
+2. **The LiDAR control** and **extending `lidar_intf_mask.txt` past 2024-06-05** (above).
+3. **Deeper history.** The data layer materialises every sample's full stack, so host
+   memory grows with T (ctx50 k10 already peaked at 206 GB). A deduplicated frame store —
+   each grid loaded once, samples pointing at rows — comes first.
+4. **A context-checkpoint attention probe**, folded into `sinkholes attention-probe`.
+5. **The hybrid** (ConvLSTM + attention) won at neither operating point and 3 of 4 August
+   hybrids collapsed to uniform attention: give it a term that forces selection, or drop it.

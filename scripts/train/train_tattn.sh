@@ -13,8 +13,8 @@
 #  Name the job after what you changed, e.g.
 #    tattn_temporal_k5_d256_fuse0_posw4_60e
 #    tattn_temporal_k5_d256_fuse4_recur-convlstm_60e
-#  so outputs/ and logs/ stay readable. See PRESETS.md for the exact settings
-#  of every run trained so far, and docs/MODEL_RUNS.md for what they scored.
+#  so outputs/ and logs/ stay readable. The current recipe is in docs/PIPELINE.md
+#  ("LSF templates and the current recipe"); docs/RESULTS.md says what runs scored.
 #
 #  WHAT THIS MODEL IS. The ConvLSTM compresses the interferogram sequence into
 #  one hidden state and takes its skip connections from the latest frame alone.
@@ -139,7 +139,7 @@ FUSE_SKIPS="${FUSE_SKIPS:-0}"             # 0..4
 # --- frame selection --------------------------------------------------------
 # Before 2026-08-19 the attention in every run here was DEAD: the weights came
 # out at exactly 1/T, so the model averaged its history instead of choosing from
-# it (docs/ATTENTION.md, 15 of 15 checkpoints). The cause was visible at
+# it (docs/RESULTS.md finding 9; 15 of 15 checkpoints). The cause was visible at
 # initialisation -- the frame-to-frame differences are 0.09% of the token the
 # queries and keys are built from, so the softmax had nothing to separate.
 #
@@ -158,7 +158,7 @@ QK_NORM="${QK_NORM:-yes}"                 # yes | no
 # Positives-only training (--nonz_only, the code default) fits the model on the
 # ~2.5% of the patch grid that contains subsidence, then applies it to 100% of
 # the map at inference. That is what drives the scene-scale false-positive rate
-# (geo_k10 scores P=0.12 at confidence 0.125, docs/MODEL_RUNS.md), and it is a
+# (geo_k10 scored P=0.12 at confidence 0.125 in August), and it is a
 # DATA problem this architecture does not touch. If scene-level precision is
 # what you are trying to move, RING_NEGS=yes is the more direct lever.
 #

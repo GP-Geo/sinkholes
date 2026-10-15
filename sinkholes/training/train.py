@@ -415,7 +415,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                         "attention selects on how frames DIFFER. Without it the shared "
                         "component swamps the frame-to-frame signal (0.09%% of the token "
                         "magnitude at init) and the softmax is uniform before training "
-                        "even starts -- see docs/ATTENTION.md")
+                        "even starts -- see docs/RESULTS.md, finding 9")
     p.add_argument("--tattn_qk_norm", action=argparse.BooleanOptionalAction, default=True,
                    help="unit-norm queries and keys and scale the logits by one learned "
                         "temperature, so selectivity stops depending on projection "

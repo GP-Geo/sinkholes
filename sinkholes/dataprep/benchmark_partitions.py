@@ -1,4 +1,4 @@
-"""Generate the benchmark partitions described in docs/PLAN_CLEAN_BENCHMARK.md.
+"""Generate the benchmark partitions described in assets/PARTITIONS.md.
 
 Writes eight files -- ``partition_{geo,temporal}_k{5,10}_clean.json`` and a
 ``_testeval`` variant of each -- carrying, besides the interferogram lists:

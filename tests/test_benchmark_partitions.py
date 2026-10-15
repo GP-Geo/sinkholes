@@ -230,9 +230,9 @@ def test_missing_nonz_indices_is_a_clear_error(tmp_path):
 
 # ---------------------------------------------------------------- year filter
 #
-# The 2019-2022 family (assets/partition_*_pre2023.json) exists because the
+# The 2019-2022 family (partition_*_pre2023.json, retired 2026-10-15) existed because the
 # post-2022 interferograms drive scene-level false positives -- see
-# docs/PLAN_CLEAN_BENCHMARK.md section 1. It is produced by --years alone, so
+# PLAN_CLEAN_BENCHMARK.md section 1 (tag notebook-2026-10-15). It is produced by --years alone, so
 # these check the two ways that flag can silently lie: a scene outside the range
 # surviving into a split, and a restricted file still claiming to be the
 # all-years generation.

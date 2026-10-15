@@ -399,7 +399,7 @@ def main(args) -> None:
         tot = float(ws.sum())
         return {
             # Unweighted: the historical aggregation, kept so the numbers in
-            # docs/PREDICTIONS.md remain reproducible from a re-score.
+            # the notebooks (tag notebook-2026-10-15) remain reproducible from a re-score.
             "mean_recall": float(rs.mean()),
             "mean_precision": float(ps.mean()),
             # GT-area weighted: the paper's aggregation. A scene holding three

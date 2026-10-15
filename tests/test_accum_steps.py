@@ -4,7 +4,7 @@ Why it exists: a 300x200 context run cannot hold BATCH=128 in the VRAM its
 200x100 twin used, and `batch_size` is a STRICT resume key with every preset at
 128. Accumulating lets the large-context arm keep the *effective* batch of the
 run it is compared against, so a difference in the result is the context and not
-the optimiser -- the confound PLAN_LARGE_CONTEXT.md 6 warns about.
+the optimiser.
 
 Note what is NOT claimed. `segmentation_loss` adds a Dice term that
 `dice_coeff` pools over the WHOLE batch (`reduce_batch_first=True` sums over

@@ -13,8 +13,8 @@
 #  Name the job after what you changed, e.g.
 #    convlstm_geo_k5_h256_b128_lr1e6_60e
 #    convlstm_temporal_k10_h256_b128_lr1e6_posw4_60e
-#  so outputs/ and logs/ stay readable. See PRESETS.md for the exact settings
-#  of every run trained so far, and docs/MODEL_RUNS.md for what they scored.
+#  so outputs/ and logs/ stay readable. The current recipe is in docs/PIPELINE.md
+#  ("LSF templates and the current recipe"); docs/RESULTS.md says what runs scored.
 # ============================================================================
 #BSUB -J convlstm_geo_k10_h256_b128_lr1e6_60e
 #BSUB -o /home/labs/rudich/pinkas/sinkholes/logs/%J.out
@@ -35,7 +35,7 @@ set -euo pipefail
 # trains on the 2019-2026 noisy lists, so set it explicitly every time.
 PARTITION="${PARTITION:?set PARTITION=assets/partition_<axis>_k<k>[_clean].json -- see assets/PARTITIONS.md}"
 K_PREVS="${K_PREVS:-10}"                  # temporal depth; MUST match the partition's k
-HIDDEN="${HIDDEN:-256}"                   # ConvLSTM hidden channels (256 is enough; see PRESETS)
+HIDDEN="${HIDDEN:-256}"                   # ConvLSTM hidden channels (256 is enough; docs/RESULTS.md 11)
 POS_W="${POS_W:-8}"                       # BCE positive weight (code default is 1)
 SEED="${SEED:-42}"
 LR="${LR:-1e-6}"
@@ -111,7 +111,7 @@ fi
 # before 2026-08-10 used) fits the model on the ~2.5% of the patch grid that
 # contains subsidence, then applies it to 100% of the map at inference. That is
 # what drives the scene-scale false-positive rate: geo_k10 scores P=0.12 at
-# confidence 0.125 (docs/MODEL_RUNS.md). POS_W=8 pushes the same direction on
+# confidence 0.125 (MODEL_RUNS.md, tag notebook-2026-10-15). POS_W=8 pushes the same direction on
 # top of it, which is why POS_W 8->4 bought +0.023 object-level F1.
 #
 # RING_NEGS=yes adds all-zero patches drawn from an annulus around the

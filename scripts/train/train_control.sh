@@ -53,7 +53,7 @@ BETA2="${BETA2:-0.999}"              # adam/adamw only
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-8}"      # 1e-8 is historical and is barely regularisation
                                           # at all; 1e-4..1e-2 is the usual range
 AUGMENT="${AUGMENT:-none}"                # none | h | v | hv -- random flips, TRAIN split only
-                                          # on corrected clipping -- see docs/EXPERIMENTS.md lrscan
+                                          # on corrected clipping -- see docs/RESULTS.md finding 3
 LR_PATIENCE="${LR_PATIENCE:-5}"           # was never exposed here; 5 is the code default,
                                           # so every earlier control run is unchanged
 EPOCHS="${EPOCHS:-60}"
