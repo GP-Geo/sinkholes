@@ -12,26 +12,26 @@
 #                     computes object-level precision/recall into a JSON.
 #
 #  EDIT TWO PLACES: the "#BSUB -J" line (names the job and the log files) and
-#  the CONFIG block. See PRESETS.md for the evaluations run so far.
+#  the CONFIG block. The defaults score the current leader the current way
+#  (generation 5, stride 4, the paper's RTh protocol).
 #
 #  ARCH, K_PREVS and the patch geometry must match how the checkpoint was
 #  TRAINED, not what you wish it were -- a mismatch either fails to load or
 #  silently feeds the network the wrong stack. scripts/train/PRESETS.md records
 #  what each run was trained with.
 # ============================================================================
-#BSUB -J eval_geo_k10_test
+#BSUB -J eval_temporal_k10_fill
 #BSUB -o /home/labs/rudich/pinkas/sinkholes/logs/%J.out
 #BSUB -e /home/labs/rudich/pinkas/sinkholes/logs/%J.err
 # short-gpu rejects these: "RUNLIMIT: Cannot exceed queue's hard limit(s)".
-# Its hard walltime cap is under 8:00, and a stride-2 eval measures ~3.0 h.
-# These directives are the ONE-OFF defaults; submit_all.sh overrides all four on
-# the bsub command line per job, which is where the stride-4 rungs live. A
-# stride-4 eval is ~4x the tiles AND ~4x the host memory of a stride-2 one -- do
-# not submit one against these numbers.
+# These directives are the ONE-OFF defaults, sized for a plain temporal model at
+# stride 4 (k5 48 GB, k10 75 GB measured, LSF 330515); submit_all.sh overrides
+# all four on the bsub command line per job. A single-frame model needs far less
+# (27.8 GiB), and the legacy ctx50 k10 engine measured 224 GB.
 #BSUB -q long-gpu
-#BSUB -gpu num=1:j_exclusive=yes:gmem=48G
-#BSUB -R rusage[mem=80GB]
-#BSUB -W 8:00
+#BSUB -gpu num=1:j_exclusive=yes:gmem=36G
+#BSUB -R rusage[mem=160GB]
+#BSUB -W 16:00
 
 set -o pipefail
 
@@ -39,46 +39,20 @@ set -o pipefail
 # Edit the defaults here for a one-off run. Each also honours an environment
 # variable of the same name, which is how scripts/submit_all.sh drives batches
 # without editing the file: GROUP=temporal_k10 K_PREVS=5 bsub -J <name> < this
-RUN="${RUN:-outputs/2026-08-06/geo_k10_convlstm_posw8}"
+RUN="${RUN:-outputs/2026-10-06/temporal_k10_th350_fill_tattn_posw8_30e}"
 CKPT="${CKPT:-best.pt}"     # best.pt | last.pt (last.pt was pruned from most runs)
-GROUP="${GROUP:-geo_k10}"   # geo_k5 | geo_k10 | temporal_k5 | temporal_k10
+GROUP="${GROUP:-temporal_k10}"  # temporal_k5 | temporal_k10
 SPLIT="${SPLIT:-test}"      # val = the split the model was selected on
                             # test = the held-out split (never seen)
-GEN="${GEN:-2}"             # PARTITION GENERATION -- assets/PARTITIONS.md.
-                            # 2 = partition_<group>.json, the frozen 2019-2026
-                            #     family every number in docs/PREDICTIONS.md is on.
-                            #     No aoi_window: the whole canvas is scored.
-                            # 3 = partition_<group>_clean.json, the AOI benchmark
-                            #     (lat 31.25-31.75 / lon 35.38-35.46, geo cut at
-                            #     31.4). Carries a per-split aoi_window, which is
-                            #     passed to BOTH stages below -- see AOI_FLAGS.
-                            # p23 = partition_<group>_pre2023.json, the 2019-2022
-                            #     archive. Same generator, cut, AOI and seed as
-                            #     generation 3 with the archive stopped at
-                            #     2022-12-31, so it carries an aoi_window too and
-                            #     is scored on the same ground. THE REASON TO USE
-                            #     IT: its test split is entirely inside
-                            #     assets/lidar_intf_mask.txt (which ends
-                            #     20240605), so every scene is gated on its own
-                            #     LiDAR epoch. The generation-3 temporal test
-                            #     split is 0 of 22 -- every scene falls back to
-                            #     LiDAR2022 and carries that false-positive load.
+GEN="${GEN:-fill}"          # PARTITION GENERATION -- assets/PARTITIONS.md. Every
+                            # one carries a per-split aoi_window, passed to BOTH
+                            # stages below (see AOI_FLAGS).
+                            # 3 = partition_<group>_clean.json, the AOI benchmark;
+                            #     the relabelled test set (docs/RELABELING.md).
                             # th350 = partition_<group>_clean_th350x200.json,
                             #     generation 3 with the 350N/200S label-quality
-                            #     threshold applied to EVERY split, test
-                            #     included -- so the scored scenes are the ones
-                            #     that cleared the same bar the training targets
-                            #     did. Same generator, cut, AOI and seed as
-                            #     generation 3, so it carries an aoi_window too.
-                            #     ONLY temporal_k5 exists in this family.
-                            #     ITS SCENE LIST IS NOT GENERATION 3's: 17 of the
-                            #     20 overlap, it adds 3 that k10 has no chain
-                            #     depth for, and it drops 3 that sit below the
-                            #     threshold. A th350 number and a generation-3
-                            #     number are means over different scenes and are
-                            #     NOT comparable -- see the evalth350 block in
-                            #     submit_all.sh for what that is worth (+0.046
-                            #     F1 on measured data, none of it model quality).
+                            #     threshold on every split (generation 4): 20 test
+                            #     scenes at k5, 17 at k10.
                             # fill = partition_<group>_clean_fill_th350x200.json,
                             #     th350 with chains that skip missing
                             #     acquisitions (generation 5): 24 test scenes at
@@ -94,30 +68,16 @@ GEN="${GEN:-2}"             # PARTITION GENERATION -- assets/PARTITIONS.md.
                             #     these 10 -- same chains, same window.
                             # Generations are NOT comparable: different scene
                             # lists AND different scored ground.
-DATA_STRIDE="${DATA_STRIDE:-2}"  # strides per patch of the reconstruction grid.
-                            # 2 = half-patch step, 4 tiles per interior pixel.
-                            #     THE DEFAULT ON PURPOSE: every number in
-                            #     docs/PREDICTIONS.md was produced at stride 2,
-                            #     and the eval/eval2/eval3/eval4 kinds in
-                            #     submit_all.sh pass no DATA_STRIDE at all. A
-                            #     stride-4 default would silently re-score all
-                            #     of them on different ground.
+DATA_STRIDE="${DATA_STRIDE:-4}"  # strides per patch of the reconstruction grid.
                             # 4 = QUARTER-patch step, 16 tiles per pixel -- the
-                            #     paper's reconstruction geometry. Set explicitly
-                            #     by the clean-benchmark kind (eval5). Reads a
-                            #     different patch tree (*_strpp4_*), which is ~4x
-                            #     the tiles and ~4x the bytes per scene: 5.47 GB
-                            #     per timestep against 1.37 GB. Size host memory
-                            #     and walltime off that -- see PRESETS.md.
-                            # NOT the paper's RTh: confidence here is still the
-                            # MEAN predicted probability, where the paper counts
-                            # the fraction of tiles voting 1. That is
-                            # PLAN_CLEAN_BENCHMARK.md section 7(b) item 1 and is
-                            # not implemented, so "RTh 0.25" and "--recon_th
-                            # 0.25" remain different numbers.
-ARCH="${ARCH:-convlstm}"    # convlstm | tattn | stack | single -- must match training
+                            #     paper's reconstruction geometry, and what every
+                            #     RTh number uses. Reads the *_strpp4_* tree:
+                            #     5.47 GB per timestep.
+                            # 2 = half-patch step, 4 tiles per pixel (1.37 GB per
+                            #     timestep); only for PROTOCOL=prob.
+ARCH="${ARCH:-tattn}"       # tattn | convlstm | stack | single -- must match training
 K_PREVS="${K_PREVS:-10}"    # must match the CHECKPOINT, not the partition
-PROTOCOL="${PROTOCOL:-prob}"  # prob | rth -- WHAT THE CONFIDENCE MAP MEANS.
+PROTOCOL="${PROTOCOL:-rth}"   # rth | prob -- WHAT THE CONFIDENCE MAP MEANS.
                             # prob = mean predicted probability over the tiles
                             #     covering each pixel, cut at probability
                             #     thresholds. Every number before 2026-08-19.
@@ -147,10 +107,7 @@ MIN_POS="${MIN_POS:-150}"   # SCENE GATE: skip interferograms with this many
                             # weight, so one miss on a 4-positive scene moves its
                             # recall by 0.25. The count is nonz_num, which is
                             # WHOLE-SCENE and is NOT restricted to the AOI window.
-                            # 0 disables. CHANGES THE SCENE LIST, so a number
-                            # produced with it is a mean over fewer scenes than
-                            # any eval run before 2026-08-20: on geo_k10 it drops
-                            # val 23->17 and test 35->26.
+                            # 0 disables. CHANGES THE SCENE LIST.
 
 OL_TH="${OL_TH:-0.7}"       # object-level overlap threshold (eval-outputs)
 BUFFER="${BUFFER:-5}"       # object-matching buffer, pixels
@@ -164,11 +121,10 @@ BLEND="${BLEND:-none}"      # none | hann -- how overlapping tile predictions ar
                             # Every number in docs/RESULTS.md is BLEND=none.
 GAMMA="${GAMMA:-1.0}"       # window sharpening exponent; BLEND=hann only. >1
                             # concentrates weight further toward tile centres.
-# Names the OUTPUT DIRECTORY, independently of the LSF job name. outputs/README.md
-# fixes the eval-dir convention at `scenes_geo` / `scenes_temporal` (18 / 20
-# scenes), plus a suffix for a non-default protocol -- `scenes_geo_hann`. LSF job
-# names have to stay unique and greppable in bjobs, so the two cannot be the same
-# string; without this override the directory inherits whatever -J was.
+# Names the OUTPUT DIRECTORY, independently of the LSF job name, e.g.
+# `scenes_temporal_k10_fill_rth` (outputs/README.md). LSF job names have to stay
+# unique and greppable in bjobs, so the two cannot be the same string; without
+# this override the directory inherits whatever -J was.
 JOB_NAME="${JOB_NAME:-}"
 # ----------------------------------------------------------------------------
 
@@ -183,13 +139,13 @@ cd "$REPO" || { echo "cannot cd to $REPO" >&2; exit 1; }
 # (sinkholes/inference/scenes.py). To evaluate a TEST split we therefore point
 # it at the _testeval variant, whose "val" is exactly the parent's "test" list.
 case "$GEN" in
-  2)     GEN_SUFFIX="" ;;
   3)     GEN_SUFFIX="_clean" ;;
-  p23)   GEN_SUFFIX="_pre2023" ;;
   th350) GEN_SUFFIX="_clean_th350x200" ;;
   fill)  GEN_SUFFIX="_clean_fill_th350x200" ;;
   t2026) GEN_SUFFIX="_test2026_fill_th350x200" ;;
-  *)     echo "GEN must be 2, 3, p23, th350, fill or t2026, got '$GEN'" >&2; exit 1 ;;
+  2|p23) echo "GEN=$GEN was retired 2026-10-15 (with every geo partition); recover its files" >&2
+         echo "with: git show notebook-2026-10-15:assets/<partition file>" >&2; exit 1 ;;
+  *)     echo "GEN must be 3, th350, fill or t2026, got '$GEN'" >&2; exit 1 ;;
 esac
 case "$SPLIT" in
   val)  PARTITION="assets/partition_${GROUP}${GEN_SUFFIX}.json" ;;
@@ -213,17 +169,10 @@ esac
 # SPLIT modes. Passing 'test' against a _testeval file exits with a message
 # rather than mis-scoring, which is the intended failure (partition.py:161).
 #
-# Generation 2 carries no window; load_partition_window returns None and the
-# whole canvas is scored, which is how those numbers were produced. p23 is
-# generation 3's generator with a truncated archive, and th350 is the same
-# generator with a positive-count threshold, so both carry the same per-split
-# window and take the same flags. fill is th350 rebuilt with chains that reach
-# past missing acquisitions (generation 5), same window; t2026 is fill re-split
-# by date blocks, same window again.
-AOI_FLAGS=()
-if [ "$GEN" = 3 ] || [ "$GEN" = p23 ] || [ "$GEN" = th350 ] || [ "$GEN" = fill ] || [ "$GEN" = t2026 ]; then
-  AOI_FLAGS=(--aoi_from_partition "$PARTITION" --aoi_split val)
-fi
+# Every generation still in assets/ is generation 3's generator (th350 adds a
+# positive-count threshold, fill longer chains, t2026 a block re-split), so all
+# carry the same per-split window and take the same flags.
+AOI_FLAGS=(--aoi_from_partition "$PARTITION" --aoi_split val)
 
 # -- architecture flags -------------------------------------------------------
 # The factory DETECTS the architecture from the checkpoint's own tensors

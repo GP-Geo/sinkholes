@@ -14,8 +14,7 @@
 #  and `qk_norm` are the fix, and the ONLY way to confirm the fix took on a
 #  given run is to measure the trained weights on real data. A freshly built
 #  model passes every content-sensitivity test and still dies in training, so
-#  an architecture flag in the log is not evidence -- see the header of
-#  submit_all.sh's `attnfix` block.
+#  an architecture flag in the log is not evidence (docs/RESULTS.md, attention).
 #
 #  WHAT IT WRITES, into $OUT_DIR:
 #    summary.json          effective_frames vs effective_frames_if_uniform for
@@ -25,18 +24,13 @@
 #    dice_vs_depth.csv      only when SCORE_DEPTHS is set
 #
 #  HOW TO READ IT. effective_frames / effective_frames_if_uniform is the number
-#  to look at. 1.0 is exactly uniform, i.e. dead attention. The measured
-#  reference points, from the 2026-08-19 valneg runs:
-#
-#    geo_k5  tattn fixed    0.757   selecting
-#    geo_k10 tattn fixed    0.788   selecting
-#    geo_k10 tattn hybrid   0.893   marginal
-#    temporal_k5 fixed      0.928   effectively uniform
-#    geo_k10 prefix (old)   1.000   dead -- the pre-fix control, as designed
+#  to look at. 1.0 is exactly uniform, i.e. dead attention. Every run probed
+#  since the September AdamW retraining sits at 0.22-0.34 (selecting); the
+#  pre-fix control read 1.000.
 #
 #  REQUIRE_SELECTIVITY makes the job FAIL rather than report quietly, which is
 #  what makes this usable in a batch: a non-zero exit is greppable in bhist.
-#  0.9 is the collapse alarm the attnfix block specifies.
+#  0.9 is the collapse alarm.
 # ============================================================================
 #BSUB -J probe_manual
 #BSUB -o /home/labs/rudich/pinkas/sinkholes/logs/%J.out
@@ -51,16 +45,14 @@ set -o pipefail
 # ------------------------------ CONFIG --------------------------------------
 # Each honours an environment variable of the same name, which is how
 # scripts/submit_all.sh drives batches without editing this file.
-RUN="${RUN:-outputs/2026-08-19/geo_k10_tattn_fixed_ring3_valneg}"
+RUN="${RUN:-outputs/2026-10-06/temporal_k10_th350_fill_tattn_posw8_30e}"
 CKPT="${CKPT:-best.pt}"
-GROUP="${GROUP:-geo_k10}"     # geo_k5 | geo_k10 | temporal_k5 | temporal_k10
+GROUP="${GROUP:-temporal_k10}"  # temporal_k5 | temporal_k10
 SPLIT="${SPLIT:-val}"         # the probe reads where attention LANDS, so val is
                               # the right split: it is the data the checkpoint
                               # was selected on, and no metric is being claimed.
-GEN="${GEN:-3}"               # PARTITION FAMILY -- assets/PARTITIONS.md.
-                              # 2   = partition_<group>.json          (generation 2)
-                              # 3   = partition_<group>_clean.json    (the benchmark)
-                              # p23 = partition_<group>_pre2023.json  (2019-2022)
+GEN="${GEN:-fill}"            # PARTITION FAMILY -- assets/PARTITIONS.md.
+                              # 3 | th350 | fill | t2026, as in run_eval.sh
                               # A run must be probed on the partition it was
                               # TRAINED on: this measures the model's behaviour
                               # on its own data, not transfer.
@@ -101,10 +93,11 @@ PATCHES=/home/labs/rudich/Rudich_Collaboration/deadsea_sinkholes_data/patches
 cd "$REPO" || { echo "cannot cd to $REPO" >&2; exit 1; }
 
 case "$GEN" in
-  2)   GEN_SUFFIX="" ;;
-  3)   GEN_SUFFIX="_clean" ;;
-  p23) GEN_SUFFIX="_pre2023" ;;
-  *)   echo "GEN must be 2, 3 or p23, got '$GEN'" >&2; exit 1 ;;
+  3)     GEN_SUFFIX="_clean" ;;
+  th350) GEN_SUFFIX="_clean_th350x200" ;;
+  fill)  GEN_SUFFIX="_clean_fill_th350x200" ;;
+  t2026) GEN_SUFFIX="_test2026_fill_th350x200" ;;
+  *)     echo "GEN must be 3, th350, fill or t2026, got '$GEN'" >&2; exit 1 ;;
 esac
 PARTITION="assets/partition_${GROUP}${GEN_SUFFIX}.json"
 
