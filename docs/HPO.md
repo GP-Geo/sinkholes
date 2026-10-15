@@ -197,16 +197,17 @@ The controller refuses to submit a ctx50 evaluation until the tree is complete; 
 
 | | plain | ctx50 | source |
 |---|---|---|---|
-| min/epoch, 32×4 | ~13.6 (+5 % fit probe) | ~19.2 | measured 12m40s on fill's 82,010 samples (LSF 261016) and 11m53s for ctx50 on 54,328 (LSF 254183), scaled to t2026's ~87,888 |
-| dataset build | ~44 min | ~78 min | measured on fill / gen 4, scaled by target scenes (142) |
-| host memory, training | ~112 GB | **~295 GB (est.)** | 104.8 GB measured on fill; ctx50 206 GB measured at 54k samples; the dataset holds every sample's 11-frame stack |
+| min/epoch, 32×4 | **14.1** (A40) | **42.5** (A40), **26.9** (L40S) | measured on the baseline pair, LSF 790942 / 790941 (87,834 samples); the earlier ~19.2 extrapolation for ctx50 was wrong |
+| dataset build | **1 h 43 m** | **2 h 30 m – 6 h 42 m** | measured (hgn40; hgn48 / lgn06), paid again on every LSF requeue |
+| host memory, training | **114 GB** peak | ~295 GB (est.) | plain measured (LSF 790942); ctx50 206 GB measured at 54k samples |
 | VRAM | 11.5 GiB | 33.5 GiB | measured |
 | eval host memory | ~45 GB | ~125 GB | estimate (gated AOI tiles only; legacy ctx50 k10 measured 224 GB) |
 
 Requested: training plain 160 GB / 24 GB GPU, ctx50 340 GB / 40 GB GPU, both 24 h wall with a
 22.5 h budget (continuations are automatic chunks); evaluation plain 80 GB, ctx50 192 GB.
-Totals (estimates): HPO through seed repeats ≈ 340 GPU-h (training 270, evaluation 70); the six
-300-epoch runs ≈ 640 GPU-h more. The first jobs replace the extrapolations.
+Totals: the pre-launch estimate (HPO through seed repeats ≈ 340 GPU-h, six 300-epoch runs ≈ 640
+GPU-h more) assumed ctx50 at ~1.4× plain per epoch; on A40 it is 3.0×, so the ctx50 half is
+roughly double that estimate. To be redone once ctx50/s0 completes.
 
 ## 10. Commands
 
@@ -243,11 +244,15 @@ Later phases are the same two lines: `approve --phase shared|tpe|promote|seeds`,
   approvals, duplicate guards, stalls and retries, TPE asks and tells, promotion, seed repeats,
   the locked threshold, retention, long-run creation, the report. Every generated command line
   is parsed by the real `train` / `eval-snapshots` parsers.
-* Real-data engine check: **pending** -- `bsub < scripts/hpo/engine_check.sh` (one GPU job,
-  ~1-2 h). Legacy `eval-scenes` + `eval-outputs` vs `eval-snapshots` at tile batch 32 and 1, on
-  the two gappiest of the study's 2022-23 validation scenes, whole AOI, the fill k10 `best.pt`. Pass = identical
-  confidence and metrics at tile batch 1; at 32, at most a handful of flipped votes. A run from
-  the Mac over SMB was abandoned (the share read at ~6 MB/s on 2026-10-13).
+* Real-data engine check: **passed** (LSF 797689, 2026-10-14, L40S, 32 min; output
+  `/home/labs/rudich/pinkas/sinkholes_studies/engine_check_20261014_0942/report.json`). Legacy
+  `eval-scenes` + `eval-outputs` vs `eval-snapshots`, the fill k10 `best.pt`, whole AOI, t2026 val
+  scenes 20230116_20230127 (offsets 13..4) and 20230322_20230402 (offsets 12..3).
+  - tile batch 1: confidence **bit-identical** on both scenes (51.0 M and 16.0 M pixels scored),
+    every recall and precision difference exactly 0 at all four RTh.
+  - tile batch 32 (the study's plain setting): 75 and 33 pixels differ (batch-size floating point
+    on CUDA); recall identical, largest precision difference 4.2e-5.
+  - wall time per checkpoint for the two scenes: legacy 911 s, new 514 s (tb 32) / 427 s (tb 1).
 
 ## 12. Open risks
 
@@ -261,5 +266,9 @@ Later phases are the same two lines: `approve --phase shared|tpe|promote|seeds`,
    batch is recorded with the results).
 4. **Batched inference on CUDA** may differ from the one-tile path in the last bits; a vote
    flips only if a tile probability lands within that of 0.5. The same engine scores every trial,
-   so the comparison is unaffected; the first evaluation job can include `--tile_batch 1` on one
-   checkpoint to measure it.
+   so the comparison is unaffected. Measured by the engine check (§11): ≤ 75 flipped pixels per
+   scene, precision ≤ 4.2e-5 off, recall unchanged.
+5. **Preemption on `long-gpu`.** LSF 790941 (ctx50/s0) was preempted twice in its first 8 h and
+   requeued by LSF under the same job id; each restart resumes from the last completed epoch but
+   rebuilds the dataset first (up to 6.7 h on lgn06). A ctx50 trial can lose more time to
+   rebuilding than to training; the de-duplicated store in (1) would also shorten the build.
