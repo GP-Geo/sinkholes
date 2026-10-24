@@ -180,19 +180,6 @@ def _dataset_signature(args) -> str:
         f"ring={bool(args.add_ring_negatives)}:"
         f"{args.neg_ring_inner}-{args.neg_ring_outer}x{args.neg_per_pos}",
     ]
-    # Appended only when set, so a run without validation negatives keeps the
-    # exact signature it had before this option existed and every checkpoint
-    # written earlier still resumes. `dataset` is a STRICT key: adding a term
-    # unconditionally would refuse them all.
-    if getattr(args, "add_val_negatives", False):
-        from ..dataprep.dataset import (
-            VAL_NEGATIVE_INNER,
-            VAL_NEGATIVE_OUTER,
-            VAL_NEGATIVE_PER_POS,
-        )
-
-        parts.append(f"valneg={VAL_NEGATIVE_INNER}-{VAL_NEGATIVE_OUTER}"
-                     f"x{VAL_NEGATIVE_PER_POS}")
     return " ".join(parts)
 
 

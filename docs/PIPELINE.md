@@ -250,23 +250,14 @@ deliberate, permanent property of this pipeline as of 2026-08-20, and it has a k
 cost: `val/dice` cannot see the false positives ring negatives exist to suppress — the
 2026-08-10 batch moved object F1 by +0.096 while dice sat inside the noise floor. Read
 `val/F1` instead when you want a negative-aware number out of `results.csv` (it is
-pooled over raw pixel counts, `evaluate.py:300-306`), and settle precision claims at
-scene scale with `scripts/eval/run_eval.sh`.
+pooled over raw pixel counts: `metrics_out["f1"]` in `training/evaluate.py`), and settle
+precision claims at scene scale with `scripts/eval/run_eval.sh`.
 
-**`--add_val_negatives` — DEPRECATED, do not use.** It put a fixed 1:1 negative set
-(ring 1..3, drawn once from the validation interferograms with `--seed`) into the
-**validation** split. It was used by the `valneg` reruns and all 14 `clean22` runs, and
-it was a mistake: an empty prediction on an empty mask scores dice 1.0
-(`losses.py:21`), so at 1:1 the mean becomes roughly `(1 + dice_on_positives)/2` — a
-number that ranks nothing and cannot be read against a positives-only run. The pixel-
-pooled `val/F1` was already negative-aware, so it bought nothing real.
-
-The flag still parses, and the trainer warns when it is passed. It exists for one
-reason: it is part of the strict `dataset` resume fingerprint
-(`sinkholes/training/resume.py`), so removing it would make every run trained with it
-unresumable — the five `attnfix` runs of 2026-08-19 included. Nothing under `scripts/`
-sets it. Delete it, `validation_negatives()`, the `VAL_NEGATIVE_*` constants and
-`SubsiDataset(val_negatives=…)` once those runs have landed.
+Negatives in validation were tried and removed: `--add_val_negatives` (the `valneg`,
+`clean22` and `attnfix` runs of August) put a fixed 1:1 negative set into the val split.
+An empty prediction on an empty mask scores dice 1.0 (`dice_coeff` in
+`training/losses.py`), so the mean became roughly `(1 + dice_on_positives)/2` and ranked
+nothing. Retired 2026-08-20, deleted 2026-10-24; runs trained with it no longer resume.
 
 **Loss.** Default: `BCEWithLogits(pos_weight=--pos_w) + soft Dice`. `--seg_loss jaccard`
 swaps the region term for soft IoU — the same quantity reparametrised (`J = D/(2−D)`) but
@@ -334,8 +325,7 @@ BATCH=32 ACCUM=4 AUGMENT=hv FUSE_SKIPS=0 RECURRENCE=none        # train_tattn.sh
 
 `BATCH × ACCUM` is the effective batch (128 here); the micro-batch sets the VRAM. A
 context run sets `CTX_MY=50 CTX_MX=50` (both or neither) and needs ~3× the host memory.
-`VAL_NEGS` survives only so old runs resume; no template may default it on. A run's exact
-flags are in its log header and, since 2026-10-13, its `run_manifest.json`.
+A run's exact flags are in its log header and, since 2026-10-13, its `run_manifest.json`.
 
 The HPO study's jobs are not templates: `sinkholes hpo` writes each one with the
 long-run flags below ([`HPO.md`](HPO.md)).

@@ -11,7 +11,6 @@ from sinkholes.dataprep.dataset import (
     RingNegatives,
     SubsiDataset,
     temporal_target_mask,
-    validation_negatives,
 )
 from sinkholes.dataprep.patchify import patch_file_name
 from sinkholes.meta import find_11day_sequences
@@ -265,92 +264,6 @@ def test_training_ring_negatives_never_reach_validation(tmp_path):
 
     assert len(val) == 1, "only (4, 4), the current frame's single positive"
     assert val[0]["mask"].sum() > 0
-
-
-# -- validation negatives: the fixed measurement set ------------------------------------
-
-def build_val(root, *, temporal, seed=42, ring_negatives=None):
-    """A validation dataset with the fixed 1:1 negatives, single-frame or temporal."""
-    root.mkdir(parents=True, exist_ok=True)
-    img_dir, msk_dir = write_patch_tree(root, RING_POSITIVES, ny=RING_GRID, nx=RING_GRID)
-    return SubsiDataset(
-        img_dir, msk_dir, [CURRENT], mode="val", patch_size=PATCH, stride=STRIDE,
-        seq_dict=CHAINS, temporal=temporal, ring_negatives=ring_negatives,
-        val_negatives=validation_negatives(seed),
-    )
-
-
-def test_validation_negatives_are_added_to_the_val_split(tmp_path):
-    val = build_val(tmp_path, temporal=True)
-
-    assert len(val) == 2, "the one positive plus one negative at the fixed 1:1 ratio"
-    assert val.n_negative == 1
-    assert val[0]["mask"].sum() > 0
-    assert val[1]["mask"].sum() == 0
-
-
-def test_validation_negatives_do_not_reach_the_train_split(tmp_path):
-    """The measurement set is the val split's alone — it must not become training data."""
-    img_dir, msk_dir = write_patch_tree(tmp_path, RING_POSITIVES, ny=RING_GRID, nx=RING_GRID)
-    train = SubsiDataset(img_dir, msk_dir, [CURRENT], mode="train", patch_size=PATCH,
-                         stride=STRIDE, seq_dict=CHAINS, temporal=True,
-                         val_negatives=validation_negatives(42))
-
-    assert len(train) == 1 and train.n_negative == 0
-
-
-def test_a_validation_negative_is_empty_at_every_timestep(tmp_path):
-    """The same temporal validity a training negative must satisfy.
-
-    (1, 1) is positive in the oldest frame only, so it is empty in the current
-    one — it would pass a current-frame-only test and must still be excluded.
-    """
-    val = build_val(tmp_path, temporal=True)
-    coords = sampled_coords(val, frame_index=len(CHAIN) - 1)
-
-    assert (1, 1) not in coords, "empty now, but positive in the chain — not background"
-    assert [val[n]["mask"].sum().item() for n in range(len(val))] == [1, 0]
-
-
-def test_validation_negatives_are_the_same_across_architectures(tmp_path):
-    """A single-frame run and a temporal one must be SCORED on identical patches."""
-    single = build_val(tmp_path / "s", temporal=False)
-    temporal = build_val(tmp_path / "t", temporal=True)
-
-    assert len(single) == len(temporal)
-    assert sampled_coords(single) == sampled_coords(temporal, frame_index=len(CHAIN) - 1)
-
-
-@pytest.mark.parametrize("ring", [None, RingNegatives(inner=1, outer=10, per_pos=3.0, seed=7)])
-def test_validation_negatives_ignore_the_training_negative_config(tmp_path, ring):
-    """Sweeping --neg_ring_outer / --neg_per_pos must not move the ruler."""
-    val = build_val(tmp_path / str(ring is None), temporal=True, ring_negatives=ring)
-
-    assert sampled_coords(val, frame_index=len(CHAIN) - 1) == \
-        sampled_coords(build_val(tmp_path / "ref", temporal=True), len(CHAIN) - 1)
-
-
-def test_validation_negatives_are_deterministic_given_the_seed(tmp_path):
-    """Drawn from default_rng(seed), so the global RNG cannot perturb them."""
-    np.random.seed(1)
-    first = sampled_coords(build_val(tmp_path / "a", temporal=True), len(CHAIN) - 1)
-    np.random.seed(999)
-    second = sampled_coords(build_val(tmp_path / "b", temporal=True), len(CHAIN) - 1)
-
-    assert first == second
-
-
-def test_validation_negatives_need_a_seed():
-    """A run without --seed would draw a different val set every time."""
-    with pytest.raises(ValueError, match="seed"):
-        validation_negatives(None)
-
-
-def test_the_validation_negative_configuration_is_fixed():
-    """Pinned constants, not defaults someone can pass past — see train.py."""
-    ring = validation_negatives(42)
-    assert (ring.inner, ring.outer, ring.per_pos) == (1, 3, 1.0)
-    assert ring.seed == 42
 
 
 # -- chain order is chronological, oldest -> newest -------------------------------------

@@ -122,24 +122,6 @@ NEG_RING_INNER="${NEG_RING_INNER:-1}"     # annulus radii, in patch-grid units
 NEG_RING_OUTER="${NEG_RING_OUTER:-3}"     # 3 = hard near-field only; raise to reach far-field
 NEG_PER_POS="${NEG_PER_POS:-1.0}"         # negatives per positive, capped by availability
 
-# --- validation negatives (DEPRECATED 2026-08-20, DO NOT USE) ---------------
-# VAL_NEGS=yes put negatives in the VALIDATION set as well, so val/dice could
-# see a false positive on background. It is deprecated: dice_coeff maps an
-# empty prediction on an empty mask to 1.0, so at 1:1 roughly half the val
-# samples score ~1.0 and the mean becomes about (1 + dice_on_positives)/2 --
-# a number that ranks nothing and cannot be read against any run trained
-# without it. val/F1, val/P and val/R are pooled from raw pixel counts
-# (evaluate.py:300-306) and were already negative-aware, so nothing was gained.
-# Precision claims belong to scripts/eval/run_eval.sh at object level.
-#
-# IT STILL WORKS, for exactly one reason: the five attnfix runs of 2026-08-19
-# were trained with it, and `dataset` is a STRICT resume key carrying
-# `valneg=1-3x1.0` (resume.py). A resume of one of those runs -- including the
-# manual `RESUME=<run dir> bsub -J <same name> < this script` path -- must pass
-# VAL_NEGS=yes or it will be refused as an incompatible resume. No new run
-# should set it, and nothing in scripts/submit_all.sh does any more.
-VAL_NEGS="${VAL_NEGS:-no}"                # yes | no   DEPRECATED: resume only
-
 # 'auto' finds this LSF job's own directory again after a WEXAC preemption, and
 # only works because a requeued job keeps its id. A job KILLED by TERM_RUNLIMIT
 # is not requeued and gets a new id, so 'auto' would start it from scratch --
@@ -171,15 +153,6 @@ case "$RING_NEGS" in
                   --neg_per_pos "$NEG_PER_POS") ;;
   no)  ;;
   *)   echo "RING_NEGS must be 'yes' or 'no', got '$RING_NEGS'" >&2; exit 1 ;;
-esac
-
-case "$VAL_NEGS" in
-  yes) echo "WARNING: VAL_NEGS=yes is DEPRECATED and inflates val/dice to roughly" >&2
-       echo "         (1 + dice_on_positives)/2. It is kept only so the attnfix runs of" >&2
-       echo "         2026-08-19 can be resumed. Do not start a NEW run with it." >&2
-       NEG_FLAGS+=(--add_val_negatives) ;;
-  no)  ;;
-  *)   echo "VAL_NEGS must be 'yes' or 'no', got '$VAL_NEGS'" >&2; exit 1 ;;
 esac
 
 JOB="${LSB_JOBNAME:-convlstm_manual}"

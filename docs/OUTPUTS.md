@@ -61,8 +61,8 @@ dead weight — except under `studies/`, where promotions continue from it.
 
 `scripts/tidy_outputs.sh` moves finished runs from the top level of `outputs/` into
 `outputs/<date>/` (or `outputs/screens/<date>/` for the screen batches) under their
-conventional name. Dry run by default, `--apply` to move. It reads `_valpos`/`_valneg` from
-each run's own `reporter.log` and refuses a run with no completion line. Check no evaluation
+conventional name. Dry run by default, `--apply` to move. It refuses a run whose
+`reporter.log` has no completion line. Check no evaluation
 is queued first: an LSF job carries its `RUN=` path from submit time, so a pending job whose
 run directory moves dies on its preflight.
 

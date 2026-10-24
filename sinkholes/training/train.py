@@ -34,13 +34,9 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
 from ..dataprep.dataset import (
-    VAL_NEGATIVE_INNER,
-    VAL_NEGATIVE_OUTER,
-    VAL_NEGATIVE_PER_POS,
     RingNegatives,
     SubsiDataset,
     save_test_dataset,
-    validation_negatives,
 )
 from ..dataprep.partition import (
     discover_intf_ids,
@@ -352,18 +348,6 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--neg_ring_inner", type=int, default=1)
     p.add_argument("--neg_ring_outer", type=int, default=3)
     p.add_argument("--neg_per_pos", type=float, default=1.0)
-    p.add_argument("--add_val_negatives", action="store_true",
-                   help="DEPRECATED (2026-08-20), do not use on a new run. Puts negative "
-                        f"patches in the VALIDATION set (ring {VAL_NEGATIVE_INNER}.."
-                        f"{VAL_NEGATIVE_OUTER}, {VAL_NEGATIVE_PER_POS:g}:1, drawn once "
-                        f"from the validation interferograms with --seed). It inflates "
-                        f"val/dice to roughly (1 + dice_on_positives)/2 — an empty "
-                        f"prediction on an empty mask scores 1.0 — so the curve ranks "
-                        f"nothing and cannot be read against a positives-only run. "
-                        f"val/F1, val/P and val/R are pooled over pixels and were "
-                        f"already negative-aware. Kept ONLY so runs trained with it "
-                        f"stay resumable: it is part of the strict `dataset` resume "
-                        f"fingerprint. Judge precision with eval-scenes instead.")
 
     p.add_argument("--attn_unet", action="store_true", help="AttentionUNet")
     p.add_argument("--add_attn", action="store_true", help="UNet + bottleneck attention")
@@ -585,46 +569,10 @@ def build_model(args, device):
     return model, num_c
 
 
-def warn_if_val_negatives_deprecated(args, log) -> None:
-    """Say so, at the top of the run log, when --add_val_negatives is passed.
-
-    Deprecated 2026-08-20. The flag is kept only because ``dataset`` is a strict
-    resume key and runs already trained with it carry ``valneg=`` in theirs, so
-    a run that passes it deliberately is doing the one legitimate thing left:
-    continuing an existing run. Anything else wants this warning.
-    """
-    if not getattr(args, "add_val_negatives", False):
-        return
-    log.warning(
-        "--add_val_negatives is DEPRECATED and should not be used on a new run. It "
-        "inflates val/dice to roughly (1 + dice_on_positives)/2, because an empty "
-        "prediction on an empty mask scores dice 1.0, so the curve cannot be compared "
-        "with any positives-only run — and it selects best.pt. val/F1 is pooled over "
-        "pixels and is negative-aware without it. The flag is kept ONLY so runs "
-        "already trained with it stay resumable."
-    )
-
-
-def _log_val_composition(val_set, val_ring) -> None:
-    """Record what val/dice is measured over — positives, negatives, ratio.
-
-    Worth a line of its own: with negatives in the set, val/dice from this run
-    is not on the same scale as one from a positives-only run, and the log is
-    where that gets established after the fact.
-    """
+def _log_val_composition(val_set) -> None:
+    """Record what val/dice is measured over: positive patches only."""
     n_neg = int(getattr(val_set, "n_negative", 0))
-    n_pos = len(val_set) - n_neg
-    if val_ring is None:
-        logging.info(f"validation set: {n_pos} positive patches (no validation negatives)")
-        return
-    # The requested ratio is capped by how many empty patches the annulus holds,
-    # so the achieved one is the number that has to be reported.
-    achieved = n_neg / n_pos if n_pos else float("nan")
-    logging.info(
-        f"validation set: {n_pos} positive + {n_neg} negative patches "
-        f"({achieved:.2f}:1 achieved against {VAL_NEGATIVE_PER_POS:g}:1 requested; "
-        f"the request is capped by annulus availability)"
-    )
+    logging.info(f"validation set: {len(val_set) - n_neg} positive patches")
 
 
 def build_datasets(args, rep):
@@ -657,7 +605,7 @@ def build_datasets(args, rep):
     # what lets a single-frame control draw exactly the negatives its temporal
     # twin drew. Restricting to interferograms with chains costs coverage,
     # but an unmatched control is not a control.
-    if args.add_temporal or args.add_ring_negatives or args.add_val_negatives:
+    if args.add_temporal or args.add_ring_negatives:
         seq_dict, intf_list = find_11day_sequences(coord_dict, k_prev=args.k_prevs,
                                                    restrict_to=intf_list)
         n_gappy = sum(1 for i in intf_list if seq_dict[i]["offsets"][0] != args.k_prevs)
@@ -721,51 +669,6 @@ def build_datasets(args, rep):
 
     ring = RingNegatives(args.neg_ring_inner, args.neg_ring_outer,
                          args.neg_per_pos, args.seed) if args.add_ring_negatives else None
-
-    # --add_val_negatives changes what val/dice MEANS, so the ways it could be
-    # accepted while quietly not applying are all rejected here instead.
-    #
-    # DEPRECATED 2026-08-20. Nothing under scripts/ turns this on any more and
-    # no new run should. It survives only because it is part of the strict
-    # `dataset` resume fingerprint (resume.py), so deleting it would make every
-    # run trained with it unresumable — the five attnfix runs of 2026-08-19
-    # among them. Delete this branch, the flag, validation_negatives(), the
-    # VAL_NEGATIVE_* constants and SubsiDataset's val_negatives= parameter once
-    # those runs have landed.
-    val_ring = None
-    if args.add_val_negatives:
-        if args.seed is None:
-            raise SystemExit(
-                "--add_val_negatives needs --seed. The validation negatives are drawn "
-                "once, and the whole point of them is that two runs on one partition "
-                "draw the SAME ones — without a seed they would differ per run and the "
-                "val/dice numbers could not be compared."
-            )
-        # The remaining partition modes either build no val dataset of their own
-        # (random_by_patch splits one train-mode dataset after the fact) or hand
-        # the val split to a loader with no coordinate list to draw an annulus
-        # from (single-frame spatial). Both would leave a run whose name and
-        # config claim validation negatives it never sampled.
-        if args.partition_mode == "random_by_patch" or args.nonoverlap_tr_tst:
-            raise SystemExit(
-                "--add_val_negatives is not supported under --partition_mode "
-                "random_by_patch: that mode splits one dataset into train/val/test "
-                "after it is built, so there is no validation set to sample negatives "
-                "for. Use --partition_mode preset_by_intf or random_by_intf."
-            )
-        if spatial and not args.add_temporal:
-            raise SystemExit(
-                "--add_val_negatives is not supported for a single-frame run under "
-                "--partition_mode spatial: that loader slices the grid by latitude and "
-                "never builds the coordinate list an annulus needs. Use a preset "
-                "partition (--partition_mode preset_by_intf), or add --add_temporal."
-            )
-        val_ring = validation_negatives(args.seed)
-        logging.info(
-            f"validation negatives: ring {VAL_NEGATIVE_INNER}..{VAL_NEGATIVE_OUTER}, "
-            f"{VAL_NEGATIVE_PER_POS:g} per positive, seed {args.seed} — fixed "
-            f"configuration, drawn once from the validation interferograms"
-        )
 
     explicit = [args.train_intfs, args.val_intfs, args.test_intfs]
     if any(explicit):
@@ -849,7 +752,6 @@ def build_datasets(args, rep):
                                  aoi_window=windows.get("train"),
                                  coord_dict=coord_dict, **dataset_kwargs)
         val_set = SubsiDataset(image_dir, mask_dir, val_list, mode="val",
-                               val_negatives=val_ring,
                                aoi_window=windows.get("val"),
                                coord_dict=coord_dict, **dataset_kwargs)
         # The test split stays positives-only: it is scored by
@@ -861,7 +763,7 @@ def build_datasets(args, rep):
                                              if args.partition_file else None),
                                  coord_dict=coord_dict, **dataset_kwargs)
                     if test_list else None)
-        _log_val_composition(val_set, val_ring)
+        _log_val_composition(val_set)
         return train_set, val_set, test_set, mode
 
     if spatial:
@@ -869,9 +771,8 @@ def build_datasets(args, rep):
                               coord_dict=coord_dict)
         train_set = SubsiDataset(image_dir, mask_dir, intf_list, mode="train",
                                  ring_negatives=ring, **spatial_kwargs)
-        southern = SubsiDataset(image_dir, mask_dir, intf_list, mode="val",
-                                val_negatives=val_ring, **spatial_kwargs)
-        _log_val_composition(southern, val_ring)
+        southern = SubsiDataset(image_dir, mask_dir, intf_list, mode="val", **spatial_kwargs)
+        _log_val_composition(southern)
         n_val = len(southern) // 2
         val_set, test_set = random_split(southern, [n_val, len(southern) - n_val])
         return train_set, val_set, test_set, "spatial"
@@ -1154,7 +1055,6 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
                 f"{model.n_channels} in / {model.n_classes} out "
                 f"(k_prevs={args.k_prevs}, temporal={args.add_temporal})"
             )
-        n_val_neg = int(getattr(val_set, "n_negative", 0))
         banner(
             rep, f"Sinkholes {arch} — {args.job_name}",
             device=device.type,
@@ -1179,13 +1079,7 @@ def train_model(args, model, device, train_set, val_set, test_set, outpath,
             partition=args.partition_mode,
             train_val_test=f"{n_train} / {n_val} / "
                            f"{len(test_set) if test_set is not None else 'n/a'} patches",
-            # Stated in the header because it changes what val/dice means: with
-            # negatives in the set, this run's curve is not on the same scale as
-            # a positives-only run's.
-            val_scored_on=(f"{n_val - n_val_neg} positive + {n_val_neg} negative "
-                           f"(fixed {VAL_NEGATIVE_PER_POS:g}:1 set, ring "
-                           f"{VAL_NEGATIVE_INNER}..{VAL_NEGATIVE_OUTER}, seed {args.seed})"
-                           if args.add_val_negatives else "positives only"),
+            val_scored_on="positives only",
             pos_weight=args.pos_w,
             objective=f"BCE + {args.seg_loss}",
             seed=args.seed,
@@ -1631,7 +1525,6 @@ def main(args) -> None:
     log = rep or logging.getLogger()
     for note in location.notes:
         log.info(note)
-    warn_if_val_negatives_deprecated(args, log)
 
     # -- vet the checkpoint before anything expensive happens
     if checkpoint is not None:

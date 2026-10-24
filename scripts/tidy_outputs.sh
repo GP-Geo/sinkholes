@@ -3,8 +3,8 @@
 #  Move finished training runs out of the top level of outputs/ and into the
 #  dated folder they belong to, under the name outputs/README.md specifies.
 #
-#      outputs/clean_geo_k10_tattn_fixed_ring3_2026-08-19_16h20_lsf_768296
-#   -> outputs/2026-08-19/geo_k10_tattn_fixed_ring3_valneg
+#      outputs/temporal_k10_th350_fill_tattn_posw8_30e_2026-10-06_<HHhMM>_lsf_<jobid>
+#   -> outputs/2026-10-06/temporal_k10_th350_fill_tattn_posw8_30e
 #
 #  SCREENS GO SOMEWHERE ELSE. A short probe batch (lrscan, dropscan, lossscan,
 #  adamscan, momscan, combo) is filed under outputs/screens/<date>/ instead:
@@ -15,14 +15,6 @@
 #  Those are 8- or 20-epoch runs made to decide whether an axis deserves a real
 #  training slot, not models -- they have no object-level score and mostly never
 #  will. See the case statement below for why they are kept but separated.
-#
-#  THE _valneg SUFFIX IS READ OUT OF THE RUN, NOT GUESSED. reporter.log records
-#  the validation protocol as either "Val scored on positives only" or
-#  "Val scored on N positive + N negative", and a run validated against
-#  negatives selected best.pt on a curve where an empty prediction on an empty
-#  mask scores dice 1.0. That is not comparable to a positives-only curve and
-#  must not be read as if it were, so it goes in the name. A run whose name
-#  already ends _valpos or _valneg is left alone.
 #
 #  A run is BORN with the `_<date>_<time>_lsf_<jobid>` suffix and cannot be
 #  born without it: --resume auto finds a requeued execution by globbing
@@ -123,21 +115,6 @@ for d in "${runs[@]}"; do
       skipped=$((skipped+1)); continue
     fi
   fi
-
-  # Protocol marker, straight out of the log the run wrote about itself.
-  case "$clean" in
-    *_valpos|*_valneg) ;;                       # already carries one
-    *)
-      # `|| true` for the same reason: a run predating the protocol line has no
-      # match, and that is a legitimate case, not a failure.
-      proto=$([ -f "$log" ] && grep -h "Val scored on" "$log" 2>/dev/null | tail -1 | sed 's/.*Val scored on *//' || true)
-      case "$proto" in
-        "positives only")      ;;               # the default; not in the name
-        *positive*negative*)   clean="${clean}_valneg" ;;
-        "")  echo "NOTE  $n -- no 'Val scored on' line; leaving the protocol out of the name" ;;
-        *)   echo "NOTE  $n -- unrecognised protocol '$proto'; leaving it out of the name" ;;
-      esac ;;
-  esac
 
   # SCREENS GO IN THEIR OWN TREE, NOT THE DATED MODEL FOLDERS.
   #

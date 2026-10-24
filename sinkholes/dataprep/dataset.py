@@ -13,11 +13,9 @@ the target's own definition moves that set — ``--union_temporal_mask`` targets
 the union over the stack and samples the union's coordinates to match.
 
 Negatives — all-zero patches from an annulus around the positives — are added
-on top of that set by :class:`RingNegatives`, and the two kinds are kept apart
-by which split they reach. ``ring_negatives`` is the experiment's *training*
-negatives (train split only, radii and ratio swept from the CLI);
-``val_negatives`` is the fixed measurement set (val split only, configuration
-pinned by :func:`validation_negatives`).
+on top of that set by :class:`RingNegatives`, for the train split only
+(``ring_negatives``; radii and ratio from the CLI). Validation and test stay
+positives-only.
 
 Pickle compatibility: trained runs pickle their held-out test split, and those
 pickles restore instances by attribute (``image_data``, ``mask_data``,
@@ -86,8 +84,8 @@ class RingNegatives:
 
     The draw depends only on ``seed`` and on the candidate set, never on the
     global RNG: :func:`numpy.random.default_rng` is built fresh per call. Two
-    runs over one partition therefore draw identical negatives whatever else
-    differs between them, which is what :func:`validation_negatives` relies on.
+    runs over one partition and seed therefore draw identical negatives whatever
+    else differs between them.
     """
 
     inner: int = 1
@@ -121,34 +119,6 @@ class RingNegatives:
         return [tuple(c) for c in rng.choice(candidates, size=k, replace=False).tolist()]
 
 
-#: The validation-negative configuration, fixed on purpose (--add_val_negatives).
-#:
-#: Training negatives are an experimental variable — ``--neg_ring_outer`` and
-#: ``--neg_per_pos`` are swept, and that is the point of them. Validation
-#: negatives are the opposite: they are part of the *ruler*, so they are pinned
-#: here rather than exposed as flags. Two runs on one partition and one seed are
-#: then scored on byte-identical validation samples however their training
-#: negatives were configured and whatever architecture they use, which is what
-#: makes their val/dice directly comparable.
-VAL_NEGATIVE_INNER = 1
-VAL_NEGATIVE_OUTER = 3
-VAL_NEGATIVE_PER_POS = 1.0
-
-
-def validation_negatives(seed: int) -> RingNegatives:
-    """The fixed 1:1 validation-negative sampler for a run seed.
-
-    ``seed`` is the run seed, and it is the only thing that moves: the radii
-    and the ratio are constants. The sampler is applied once, when the
-    validation dataset is built, so the negatives are drawn from the validation
-    interferograms alone and stay fixed for every epoch of the run.
-    """
-    if seed is None:
-        raise ValueError("validation negatives need a seed to be reproducible")
-    return RingNegatives(inner=VAL_NEGATIVE_INNER, outer=VAL_NEGATIVE_OUTER,
-                         per_pos=VAL_NEGATIVE_PER_POS, seed=int(seed))
-
-
 class SubsiDataset(Dataset):
     """Patches of one or more interferograms, ready for a DataLoader."""
 
@@ -171,7 +141,6 @@ class SubsiDataset(Dataset):
         add_nulls_to_train: bool = False,
         use_cleaned_patches: bool = False,
         ring_negatives: Optional[RingNegatives] = None,
-        val_negatives: Optional[RingNegatives] = None,
         spatial: bool = False,
         thresh_lat: float = 31.4,
         coord_dict: Optional[Dict[str, Any]] = None,
@@ -238,14 +207,9 @@ class SubsiDataset(Dataset):
         # can never disagree.
         self.n_value_channels: Optional[int] = None
 
-        # Which negatives, if any, this split gets. ``ring_negatives`` are the
-        # experiment's training negatives and reach the train split only;
-        # ``val_negatives`` are the fixed measurement set and reach the val
-        # split only. Resolving both to one object here means the loaders never
-        # have to know which split they are serving, and neither kind can leak
-        # into the other's set.
-        negatives = (val_negatives if self.mode == "val"
-                     else ring_negatives if self.mode == "train" else None)
+        # Negatives reach the train split only. Resolving that here means the
+        # loaders never have to know which split they are serving.
+        negatives = ring_negatives if self.mode == "train" else None
 
         H, W = patch_size
         # The nonz (positive-only) files can serve directly only when nothing
@@ -291,10 +255,9 @@ class SubsiDataset(Dataset):
                     treat_nodata_regions, union_temporal_mask, row_offsets=None,
                 )
             elif negatives is not None and nonz_only:
-                # Single-frame + negatives: training negatives on the train
-                # split, validation negatives on the val split. Both use the
-                # same coordinate maths, so a single-frame val set and a
-                # temporal one hold exactly the same patches.
+                # Single-frame + training negatives: the same coordinate maths
+                # as the temporal loader, so a single-frame control and its
+                # temporal twin draw exactly the same patches.
                 image_data, mask_data = self._load_single_ring(
                     intf_id, path_of, patch_size, nonz_indices, negatives,
                 )
@@ -336,9 +299,8 @@ class SubsiDataset(Dataset):
         uniques = np.unique(np.concatenate([m.reshape(-1) for m in self.mask_data]))
         self.mask_values = [int(v) if float(v).is_integer() else float(v) for v in sorted(uniques.tolist())]
 
-        # Samples whose target is empty. Zero on a positives-only set; on a val
-        # set built with --add_val_negatives it is the negative count, which is
-        # what a run has to report to be readable against another.
+        # Samples whose target is empty: zero on a positives-only set, the
+        # negative count on a train set with ring negatives.
         self.n_negative = int(sum(int((~(m[0] > 0).any(axis=(-2, -1))).sum())
                                   for m in self.mask_data))
 
@@ -440,9 +402,7 @@ class SubsiDataset(Dataset):
         if negatives is not None:
             # Negatives are checked against the union over time on purpose: a
             # negative patch must be empty at every timestep, which also makes
-            # its target — the current frame — empty. Validation negatives go
-            # through this same test, so they satisfy exactly the temporal
-            # validity a training negative does.
+            # its target — the current frame — empty.
             union_grid = np.zeros((ny, nx), dtype=bool)
             for m in msk_pa:
                 union_grid |= (m > 0).any(axis=(-2, -1))
@@ -472,10 +432,7 @@ class SubsiDataset(Dataset):
 
         This exists so a single-frame U-Net can be trained on the *same* data a
         temporal run sees, minus the history — the control that separates "what
-        the negatives bought" from "what the recurrence bought". The validation
-        split reaches it too, under ``--add_val_negatives``, for the same
-        reason: a single-frame run and a temporal one must be *scored* on the
-        same patches, not merely trained on matching ones.
+        the negatives bought" from "what the recurrence bought".
 
         The coordinate maths deliberately mirrors ``_load_temporal``: same
         positive set, same clipping to the chain's common extent, same

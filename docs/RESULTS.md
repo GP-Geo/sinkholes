@@ -104,7 +104,7 @@ with the generation-4 architecture sweep, with context (finding ⑤) and with `l
 whose rising dice curve (best epoch 200 of 200) came with **−0.027** object F1. Validation
 is positives-only by design, so dice cannot see the background false positives the
 negatives suppress. Putting negatives into validation (`--add_val_negatives`) was tried and
-retired on 2026-08-20: an empty prediction on an empty mask scores dice 1.0, so it only
+retired on 2026-08-20 (deleted from the code 2026-10-24): an empty prediction on an empty mask scores dice 1.0, so it only
 compressed the scale. For a negative-aware number from `results.csv` read the pixel-pooled
 `val/F1`; settle anything at scene level.
 

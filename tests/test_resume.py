@@ -280,18 +280,6 @@ def test_more_epochs_is_allowed_and_merely_reported():
     assert any(line.startswith("epochs:") for line in advisory)
 
 
-def test_validation_negatives_are_part_of_the_dataset_fingerprint():
-    """Resuming across them would splice two differently-scored halves together."""
-    saved = R.run_config(make_args(add_val_negatives=True))
-    with pytest.raises(SystemExit):
-        R.check_config_compatible(saved, R.run_config(make_args()), "resume.pt")
-
-
-def test_a_run_without_validation_negatives_keeps_its_old_fingerprint():
-    """The term is appended only when set, so pre-existing checkpoints still resume."""
-    assert "valneg" not in R.run_config(make_args())["dataset"]
-
-
 def test_a_checkpoint_without_a_recorded_setting_is_not_a_mismatch():
     now = R.run_config(make_args())
     assert R.check_config_compatible({}, now, "resume.pt") == []
