@@ -95,7 +95,7 @@ PROTOCOL="${PROTOCOL:-rth}"   # rth | prob -- WHAT THE CONFIDENCE MAP MEANS.
                             #     stop meaning what the paper says they mean.
                             # An RTh number and a recon_th number are NOT
                             # comparable: one counts tiles, one cuts a mean.
-RECON_TH="${RECON_TH:-0.25}"  # threshold eval-scenes writes _pred_th/polygons at.
+RECON_TH="${RECON_TH:-0.25}"  # threshold eval-scenes writes polygons at.
                             # Under PROTOCOL=rth this is an RTh, not a
                             # probability. It does NOT affect the metrics --
                             # eval-outputs re-thresholds the saved confidence

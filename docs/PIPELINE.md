@@ -439,7 +439,7 @@ comparable with a full-scene number ([`RESULTS.md`](RESULTS.md) ⑩).
 Outputs under `<output_dir>/<model>/<job>_<ts>/` (default root `outputs/predictions`):
 `polygs/<intf>_predicted_polygs.shp` (EPSG:4326), `<intf>_image.npy` (`(C, H, W)`,
 channel 0 = current then previous frames newest-first), `_pred.npy` (confidence),
-`_pred_th.npy`, `_gt.npy`. Budget ≈ 2 GB per interferogram; prefer `test_dataset` /
+`_gt.npy`. Budget ≈ 2 GB per interferogram; prefer `test_dataset` /
 `intf_list` over `all` on a laptop. With `--merge_polygs` a combined shapefile with
 `intf_key/start_date/end_date/track` columns is added.
 

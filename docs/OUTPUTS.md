@@ -40,7 +40,7 @@ On the Mac a directory rename also fails with `Permission denied` while Finder, 
 | `<intf>_pred.npy` | ~12% | `eval-outputs`, `scripts/eval/rescore.sh`, `sinkholes relabel eval` | **yes** — every re-score reads it |
 | `<intf>_gt.npy` | link | `eval-outputs` | **yes** |
 | `<intf>_image.npy` | ~75% | only `eval-outputs --save_figures` | no |
-| `<intf>_pred_th.npy` | ~12% | nothing | no |
+| `<intf>_pred_th.npy` | ~12% | nothing; no longer written (2026-10-24) | no |
 | `olm_results_*.json` | ~0% | you | **yes — this is the result** |
 | `*_overview.png`, shapefiles | ~0% | you | yes |
 

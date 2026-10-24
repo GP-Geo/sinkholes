@@ -6,7 +6,7 @@ patch grids (current + k previous), reconstructs the scene through the shared
 engine, thresholds, polygonises and georeferences against the aligned frame
 origin. Outputs land under ``<output_dir>/<model>/<job>_<ts>/``:
 ``<intf>_image.npy`` (C, H, W; channel 0 = current, then previous frames
-newest-first), ``_pred.npy`` (confidence), ``_pred_th.npy``, ``_gt.npy``, and
+newest-first), ``_pred.npy`` (confidence), ``_gt.npy``, and
 ``polygs/<intf>_predicted_polygs.shp`` (EPSG:4326).
 """
 
@@ -525,7 +525,6 @@ def main(args) -> None:
             np.save(prefix + "_pred", result.confidence)
         if args.intf_source != "all":
             np.save(prefix + "_image", image_to_save)
-            np.save(prefix + "_pred_th", result.thresholded)
             if result.gt is not None:
                 np.save(prefix + "_gt", result.gt)
 
