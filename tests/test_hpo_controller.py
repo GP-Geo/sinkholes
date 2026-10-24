@@ -39,10 +39,22 @@ state = os.environ["FAKE_LSF_STATE"]
 d = json.load(open(state)) if os.path.exists(state) else {{"next": 1000, "jobs": {{}}}}
 argv = sys.argv[1:]
 name = argv[argv.index("-J") + 1]
-jid = str(d["next"]); d["next"] += 1
-d["jobs"][jid] = {{"name": name, "stat": "PEND", "argv": argv, "script": sys.stdin.read()}}
+script = sys.stdin.read()
+# FAKE_BSUB_TWIN: queue the job twice and report only the second id, as WEXAC did
+for _ in range(2 if os.environ.get("FAKE_BSUB_TWIN") else 1):
+    jid = str(d["next"]); d["next"] += 1
+    d["jobs"][jid] = {{"name": name, "stat": "PEND", "argv": argv, "script": script}}
 json.dump(d, open(state, "w"))
 print(f"Job <{{jid}}> is submitted to queue <q>.")
+'''
+
+FAKE_BKILL = r'''#!{py}
+import os, sys, json
+state = os.environ["FAKE_LSF_STATE"]
+d = json.load(open(state))
+for jid in sys.argv[1:]:
+    d["jobs"][jid]["stat"] = "EXIT"
+json.dump(d, open(state, "w"))
 '''
 
 FAKE_BJOBS = r'''#!{py}
@@ -62,7 +74,7 @@ for jid, j in d["jobs"].items():
 def lsf(tmp_path, monkeypatch):
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    for name, body in (("bsub", FAKE_BSUB), ("bjobs", FAKE_BJOBS)):
+    for name, body in (("bsub", FAKE_BSUB), ("bjobs", FAKE_BJOBS), ("bkill", FAKE_BKILL)):
         p = bindir / name
         p.write_text(body.format(py=sys.executable))
         p.chmod(p.stat().st_mode | stat.S_IEXEC)
@@ -70,6 +82,7 @@ def lsf(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_LSF_STATE", str(state))
     monkeypatch.setenv("BSUB", str(bindir / "bsub"))
     monkeypatch.setenv("BJOBS", str(bindir / "bjobs"))
+    monkeypatch.setenv("BKILL", str(bindir / "bkill"))
 
     class LSF:
         def jobs(self):
@@ -601,6 +614,62 @@ def test_a_submission_lost_in_a_crash_is_adopted_not_repeated(spec, lsf):
     assert len(lsf.jobs()) == 1                # adopted, not resubmitted
     job = ledger_of(spec).trial("plain/s0")["jobs"][0]
     assert job["job_id"] and "adopted" in job["state"]
+
+
+def test_a_job_queued_twice_by_one_bsub_loses_its_twin(spec, lsf, monkeypatch):
+    """The recorded job is kept, the unrecorded copy killed: it would share the run dir."""
+    C.init(spec, spec.path)
+    C.approve(spec, ["baseline"])
+    monkeypatch.setenv("FAKE_BSUB_TWIN", "1")
+    lines = step(spec, submit=True, only=["plain/s0"])
+    job = ledger_of(spec).trial("plain/s0")["jobs"][0]
+    jobs = lsf.jobs()
+    assert len(jobs) == 2
+    twin = next(i for i in jobs if i != job["job_id"])
+    assert jobs[job["job_id"]]["stat"] == "PEND" and jobs[twin]["stat"] == "EXIT"
+    assert job["killed_twins"] == [twin]
+    assert any(l.startswith("DUPLICATE") and twin in l for l in lines)
+
+
+def test_a_single_submission_kills_nothing(spec, lsf):
+    C.init(spec, spec.path)
+    C.approve(spec, ["baseline"])
+    lines = step(spec, submit=True)
+    assert not any("DUPLICATE" in l for l in lines)
+    assert all(j["stat"] == "PEND" for j in lsf.jobs().values())
+    assert not any("killed_twins" in j for t in ledger_of(spec).trials.values() for j in t["jobs"])
+
+
+def test_a_crash_with_two_jobs_queued_adopts_the_newest_and_kills_the_other(spec, lsf):
+    C.init(spec, spec.path)
+    C.approve(spec, ["baseline"])
+    led = ledger_of(spec)
+    name = "k10t2026_hpo_v1-plain-s0-train-c1"
+    led.trial("plain/s0")["jobs"].append({"kind": "train", "name": name, "state": "submitting",
+                                          "chunk": 1, "start_epoch": 0, "target_epochs": 30})
+    led.save()
+    lsf.submit_external(name)
+    lsf.submit_external(name)
+    first, second = sorted(lsf.jobs(), key=int)
+    step(spec, submit=True, only=["plain/s0"])
+    job = ledger_of(spec).trial("plain/s0")["jobs"][0]
+    assert job["job_id"] == second and job["killed_twins"] == [first]
+    assert lsf.jobs()[first]["stat"] == "EXIT"
+
+
+def test_a_dry_run_writes_nothing_to_the_event_log(spec, lsf):
+    """`step` without --submit reads finished evaluations but records none of it."""
+    C.init(spec, spec.path)
+    C.approve(spec, ["baseline"])
+    step(spec, submit=True)
+    run_jobs(spec, lsf)
+    step(spec, submit=True)                    # training collected, evaluations submitted
+    run_jobs(spec, lsf)                        # ... and finished, not yet collected
+    events = Path(spec.root) / "events.jsonl"
+    before = events.read_text()
+    lines = step(spec, submit=False)
+    assert any(l.startswith("(dry run)") and "collected" in l for l in lines)
+    assert events.read_text() == before
 
 
 def test_a_failed_bsub_is_not_a_stall(spec, lsf, monkeypatch):

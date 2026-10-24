@@ -1,4 +1,4 @@
-"""The thin layer over IBM LSF: submit, query, nothing else.
+"""The thin layer over IBM LSF: submit, query, and kill a duplicate submission.
 
 The controller never relies on LSF to requeue, rerun or chain anything: every
 continuation is a new job it submits itself, and the truth about a job's
@@ -7,8 +7,8 @@ results), with ``bjobs`` consulted only to know what is still pending or
 running. ``bjobs`` forgets finished jobs after a while, so its silence is never
 read as success.
 
-``BSUB``/``BJOBS`` environment variables override the executables, which is
-how the tests drive this against fakes.
+``BSUB``/``BJOBS``/``BKILL`` environment variables override the executables,
+which is how the tests drive this against fakes.
 """
 
 from __future__ import annotations
@@ -56,6 +56,10 @@ class SubmitError(RuntimeError):
     pass
 
 
+class KillError(RuntimeError):
+    pass
+
+
 def submit(argv: List[str], script: str) -> str:
     """Run bsub with the script on stdin; return the LSF job id."""
     with open(script) as fh:
@@ -65,6 +69,18 @@ def submit(argv: List[str], script: str) -> str:
     if out.returncode != 0 or not m:
         raise SubmitError(f"bsub failed (exit {out.returncode}): {text.strip()[:500]}")
     return m.group(1)
+
+
+def kill(job_ids: Iterable[str]) -> None:
+    """bkill these jobs."""
+    argv = [os.environ.get("BKILL", "bkill"), *[str(j) for j in job_ids]]
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise KillError(f"bkill could not run: {exc}")
+    if out.returncode != 0:
+        text = (out.stdout or "") + (out.stderr or "")
+        raise KillError(f"bkill failed (exit {out.returncode}): {text.strip()[:500]}")
 
 
 def query(job_ids: Iterable[str] = (), names: Iterable[str] = ()) -> Dict[str, Dict[str, str]]:

@@ -29,7 +29,8 @@ Duplicate submissions are prevented three ways: the ledger lock (one
 controller at a time), deterministic job names per action checked against both
 the ledger and ``bjobs`` before every bsub, and a refusal to resubmit a
 training chunk that made no progress (or an evaluation that wrote nothing)
-unless ``--retry KEY`` says so.
+unless ``--retry KEY`` says so. One bsub can still queue a job twice, so after
+it every other live job under the name is killed (:func:`kill_twins`).
 """
 
 from __future__ import annotations
@@ -169,10 +170,11 @@ def eval_dir(spec: Spec, trial: dict, epochs) -> str:
     return f"{spec.root}/evals/{trial['geometry']}/{trial['key'].split('/')[1]}/{name}"
 
 
-def collect(spec: Spec, ledger: Ledger, tell: bool = True) -> List[str]:
+def collect(spec: Spec, ledger: Ledger, tell: bool = True, record: bool = True) -> List[str]:
     """Read finished evaluation batches into the ledger; compute objectives.
 
-    Idempotent. With ``tell`` the objectives are also recorded in Optuna.
+    Idempotent. With ``tell`` the objectives are also recorded in Optuna; with
+    ``record`` false (a dry run) nothing is written to the event log either.
     Returns a list of human-readable notes.
     """
     notes = []
@@ -194,7 +196,8 @@ def collect(spec: Spec, ledger: Ledger, tell: bool = True) -> List[str]:
                 t.setdefault("checkpoint_sha256", {})[str(e)] = data["checkpoint"]["sha256"]
             batch["collected"] = now()
             notes.append(f"{t['key']}: collected epochs {batch['epochs']}")
-            ledger.event("collect", trial=t["key"], epochs=batch["epochs"])
+            if record:
+                ledger.event("collect", trial=t["key"], epochs=batch["epochs"])
         for budget, epochs in t["budgets"].items():
             if budget in t["objectives"]:
                 continue
@@ -202,7 +205,8 @@ def collect(spec: Spec, ledger: Ledger, tell: bool = True) -> List[str]:
             if obj is not None:
                 t["objectives"][budget] = obj
                 notes.append(f"{t['key']}: {budget} objective {obj['value']:.4f} at RTh {obj['rth']}")
-                ledger.event("objective", trial=t["key"], budget=budget, objective=obj)
+                if record:
+                    ledger.event("objective", trial=t["key"], budget=budget, objective=obj)
     if tell:
         notes += tell_optuna(spec, ledger)
     return notes
@@ -573,7 +577,40 @@ def execute(spec: Spec, ledger: Ledger, actions: List[dict], submit: bool,
         ledger.save()
         ledger.event("submit", trial=t["key"], name=name, job_id=job["job_id"], job_kind=a["kind"])
         lines.append(f"SUBMITTED  {what}: LSF job {job['job_id']} ({name})")
+        twins = kill_twins(ledger, job)
+        if twins:
+            ledger.save()
+            lines += twins
     return lines
+
+
+def kill_twins(ledger: Ledger, job: dict) -> List[str]:
+    """Kill every other live LSF job under this job's name; keep the recorded one.
+
+    Job names are unique per action, and ``execute`` has just seen none live
+    under this one, so a second job carrying it is a duplicate submission. That
+    has happened: both v1 baseline evaluations ran twice (LSF 870777 and 870780,
+    870783 and 870786, each pair submitted in the same second), the ledger
+    holding only the second id. Two copies of a training chunk would both write
+    its ``resume.pt``.
+    """
+    live = lsf.query(names=[job["name"]])
+    twins = sorted((i for i, v in live.items()
+                    if i != str(job["job_id"]) and v["stat"] in lsf.ACTIVE_STATES), key=int)
+    if not twins:
+        return []
+    try:
+        lsf.kill(twins)
+    except lsf.KillError as exc:
+        job["unkilled_twins"] = twins
+        ledger.event("duplicate", name=job["name"], kept=job["job_id"], unkilled=twins,
+                     error=str(exc))
+        return [f"DUPLICATE  {job['name']}: LSF also has {' '.join(twins)} and bkill failed "
+                f"({exc}) -- run `bkill {' '.join(twins)}` now"]
+    job["killed_twins"] = twins
+    ledger.event("duplicate", name=job["name"], kept=job["job_id"], killed=twins)
+    return [f"DUPLICATE  {job['name']}: LSF also had {' '.join(twins)}; killed, kept "
+            f"{job['job_id']}"]
 
 
 # -- adoption --------------------------------------------------------------------------------
@@ -782,12 +819,14 @@ def reconcile_submitting(ledger: Ledger) -> List[str]:
         if j.get("state") == "submitting" and not j.get("job_id"):
             found = lsf.query(names=[j["name"]])
             if found:
-                j["job_id"] = sorted(found)[-1]
+                j["job_id"] = max(found, key=int)
                 j["state"] = "submitted (adopted from LSF after a controller crash)"
             else:
                 j["state"] = "lost (never reached LSF)"
             notes.append(f"reconciled {j['name']}: {j['state']}")
             ledger.event("reconcile", name=j["name"], state=j["state"], job_id=j.get("job_id"))
+            if found:
+                notes += kill_twins(ledger, j)
     return notes
 
 
@@ -814,7 +853,7 @@ def step(spec: Spec, *, submit: bool, only=(), retry=(), break_lock=False,
         if sup:
             lines.append(f"SUPERSEDED by {sup['study']} on {sup['time']}: this study is closed "
                          f"and `--submit` is refused; the lines below are hypothetical")
-        lines += [f"(dry run) {n}" for n in collect(spec, ledger, tell=False)]
+        lines += [f"(dry run) {n}" for n in collect(spec, ledger, tell=False, record=False)]
         lines += [f"(dry run) {n}" for n in transitions(spec, ledger, apply=False)]
         state = lsf_snapshot(ledger)
         acts = plan(spec, ledger, state, retry=set(retry))

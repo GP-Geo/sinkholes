@@ -254,14 +254,14 @@ baseline pair instead (§13):
 
 ```bash
 python -m sinkholes hpo init                 # v2 is the default --spec now
-python -m sinkholes hpo adopt                # CPU, ~10-15 min: re-score v1's pair, close v1
+python -m sinkholes hpo adopt                # CPU, ~40 min: re-score v1's pair, close v1
 python -m sinkholes hpo step --submit        # collects the pair and tells Optuna; submits nothing
 python -m sinkholes hpo status
 ```
 
 Later phases are the same two lines: `approve --phase shared|tpe|promote|seeds`, then
-`step --submit`. **After every `step --submit` that submits, run `bjobs -w`** and check that
-no job name is listed twice (§12, risk 5). Long runs: `hpo long --geometry plain --geometry ctx50 --seeds 42`,
+`step --submit`. A `DUPLICATE` line means one bsub queued a job twice and the controller
+killed the copy (§12, risk 5); if it says bkill failed, run the `bkill` it prints. Long runs: `hpo long --geometry plain --geometry ctx50 --seeds 42`,
 `approve --phase long`, `step --submit`. v1 is still readable with
 `--spec assets/hpo/k10t2026_plain_vs_ctx50.json` (`status`, dry-run `step`); everything that
 would change it is refused.
@@ -293,6 +293,13 @@ would change it is refused.
   geometries, epochs 10/20/30, 11 scenes each). Every per-scene field reproduced at v1's four
   thresholds, and the objectives at v2's eight are §13's (plain 0.7568 @ 0.875, ctx50 0.7401 @
   0.9375). It took ~12 min on one Mac core; most of that is polygonising at the low thresholds.
+* v2 started 2026-10-24: `init` at 99a1812 (clean tree), `adopt` on the WEXAC login node in ~40
+  min (v1's four thresholds reproduced), then collected and told to Optuna: plain/s0 **0.7568** @
+  0.875, ctx50/s0 **0.7401** @ 0.9375, as §13 predicted. The new 1/16 steps did not move either
+  best (plain 0.7420 @ 0.5625, 0.7560 @ 0.6875).
+* Duplicate-submission guard, 2026-10-24: `test_hpo_controller.py` drives a bsub that queues a
+  job twice (the twin is killed, the recorded job kept), a crash with two jobs queued, and a
+  dry-run `step` that must leave `events.jsonl` untouched; full suite 625 passed, 6 skipped.
 
 ## 12. Open risks
 
@@ -315,9 +322,10 @@ would change it is refused.
    second id of each pair and the controller calls `bsub` once per action; the cause is not
    established (one candidate: `bsub` retrying internally while LSF was slow). Two identical
    evaluations wrote the same files, so the scores are unaffected, at a cost of ~4 GPU-h. Two
-   copies of a *training* chunk would both write the run's `resume.pt`. Until the controller
-   checks for it, run `bjobs -w` after every submitting `step` and `bkill` the twin whose id
-   `step` did not print as `SUBMITTED`.
+   copies of a *training* chunk would both write the run's `resume.pt`. Since 2026-10-24 the
+   controller asks LSF for the job name right after each bsub (and after adopting a job lost
+   in a crash) and kills every other live job under it, keeping the recorded id
+   (`controller.kill_twins`; ledger `killed_twins`, event `duplicate`, a `DUPLICATE` line).
 
 ## 13. v1 → v2: the threshold ceiling (2026-10-17/18)
 
