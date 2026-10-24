@@ -19,7 +19,7 @@ which is how the previous 716-entry version drifted out of sync unnoticed.
 | labelled (GT `sub_20260701.shp`) | 273, holding 30,729 objects |
 | unlabelled | 164 (undigitised; empty masks, 0 positive patches) |
 | positive patches | 78,935 |
-| `lidar_mask: no_mask` | 112 (2024+; `lidar_intf_mask.txt` stops at 2023) |
+| `lidar_mask: no_mask` | 112 (from 20240615_20240626; `lidar_intf_mask.txt` stops at 20240605_20240616) |
 
 Matching patch tree:
 `deadsea_sinkholes_data/patches/{data,mask}_patches_H200_W100_strpp2_11days_Aligned`

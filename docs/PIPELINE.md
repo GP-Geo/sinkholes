@@ -120,7 +120,7 @@ sinkholes prepare-metadata --intf_dir <dir with .ers headers> --out_path intf_co
 
 Parses origin, pixel size, raster dimensions and byte order per interferogram, attaches
 the LiDAR source id (from `assets/lidar_intf_mask.txt`) and the frame. Run once per data
-drop; the committed copy is `assets/intf_coord.json` (716 interferograms, 2019–2023).
+drop; the committed copy is `assets/intf_coord.json` (437 11-day interferograms, 2019–2026).
 `nonz_num` is filled later by `count-positives`. The per-year LiDAR shapefiles merge
 into the committed coverage mask with `sinkholes merge-lidar`.
 
@@ -129,7 +129,7 @@ into the committed coverage mask with `sinkholes merge-lidar`.
 ```bash
 sinkholes prepare-patches \
   --input_dir <dir with .unw> --output_dir <patches root> \
-  --gt_polygon_file_path sub_20231001.shp \
+  --gt_polygon_file_path sub_20260701.shp \
   --patch_size 200 100 --strides_per_patch 2 --days_diff 11
 ```
 
@@ -289,7 +289,7 @@ effective batch is `batch_size × accum_steps`). Device selection is automatic
   is `lr/(1−momentum)` — at the historical `--momentum 0.999` that is a 1000× step
   amplification, survivable only while the AMP clipping defect was crushing every
   gradient. With correct clipping it diverges inside one epoch
-  (`outputs/failed_2026-09-07_ampfix_divergence/`).
+  (`outputs/archive/failed_2026-09-07_ampfix_divergence/`).
 - `adam`/`adamw` bias-correct, so the step is ~`lr` whatever `--beta1` is. **An `lr`
   carried over from an RMSprop run is not the same step size** — retune it. `adamw`
   decouples weight decay, which is the only form in which `--weight_decay` means what the
@@ -545,7 +545,8 @@ One run takes ~3 min on MPS and writes ~1.3 GB — delete the output directory a
 - [ ] `--x_pxls_offset` (predict) matches how the scenes were cropped.
 - [ ] Partition mode is leakage-free for the claim you're making: `random_by_patch`
       leaks overlapping patches; `random_by_intf` still shares locations across dates;
-      the strongest hold-outs are `spatial` and `--preset_test_val_21`.
+      the strongest hold-out is a block partition with full chain separation
+      (`make-benchmark-partitions --temporal_blocks`, generation 5-t2026).
 - [ ] Pass `--seed` when a split must be reproducible, and record the split lists the
       run logs print.
 - [ ] `--context_margin` is *not* passed at evaluation: it is read off the checkpoint's
