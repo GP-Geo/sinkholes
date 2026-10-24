@@ -163,7 +163,7 @@ esac
 #   * the interferogram list read above is always the "val" key, because
 #     --intf_source preset reads only that key (scenes.py:114);
 #   * the _testeval files hold the parent's TEST list under "val", and have no
-#     "test" key at all -- their aoi_window is {train, val, crossview}.
+#     "test" key at all -- their aoi_window is {train, val}.
 # So 'val' is the window belonging to the scenes actually being scored, in both
 # SPLIT modes. Passing 'test' against a _testeval file exits with a message
 # rather than mis-scoring, which is the intended failure (partition.py:161).

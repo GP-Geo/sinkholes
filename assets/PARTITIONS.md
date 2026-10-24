@@ -47,7 +47,7 @@ spaced, and `train` warns when it does.
 sinkholes make-benchmark-partitions \
   --intf_dict assets/intf_coord.json \
   --patches_dir $D/patches --seed 0 \
-  --aoi 31.25 31.75 35.38 35.46 --axis temporal \
+  --aoi 31.25 31.75 35.38 35.46 \
   --temporal_bounds 20240101 20250101 \
   --nonz_th 350 200 --suffix clean_fill_th350x200 --out_dir assets/
 ```
@@ -98,7 +98,7 @@ Three things to know before reading a number off it:
 sinkholes make-benchmark-partitions \
   --intf_dict assets/intf_coord.json \
   --patches_dir $D/patches --seed 0 \
-  --aoi 31.25 31.75 35.38 35.46 --axis temporal \
+  --aoi 31.25 31.75 35.38 35.46 \
   --temporal_blocks val:20220101:20231231 test:20260101:20261231 \
   --nonz_th 350 200 --suffix test2026_fill_th350x200 --out_dir assets/
 ```
@@ -153,14 +153,11 @@ two more of that cluster survive at 356 and 359, including the worst scene in th
 0.530 precision. The real gap in the data sits between **359 and 496**. A future threshold
 has somewhere better to go.
 
-The `--axis` flag writes one family or both; generation 4 is temporal-only because that is
-the axis the September batches ran on.
-
 ```bash
 sinkholes make-benchmark-partitions \
   --intf_dict assets/intf_coord.json \
   --patches_dir $D/patches --seed 0 \
-  --aoi 31.25 31.75 35.38 35.46 --axis temporal \
+  --aoi 31.25 31.75 35.38 35.46 \
   --temporal_bounds 20240101 20250101 \
   --nonz_th 350 200 --suffix clean_th350x200 --out_dir assets/
 ```
@@ -198,7 +195,7 @@ Removed from `assets/` with every model trained on them archived. Recover any fi
 
 | Generation | Files | Why it went |
 |---|---|---|
-| 3, geo | `partition_geo_k{5,10}[_testeval]_clean.json` | the geo axis was dropped for temporal on 2026-09-03 |
+| 3, geo | `partition_geo_k{5,10}[_testeval]_clean.json` | the geo axis was dropped for temporal on 2026-09-03 (its generator code on 2026-10-24) |
 | 3b | `partition_{geo,temporal}_k{5,10}[_testeval]_pre2023.json` | the 2019–2022 archive; it answered its question (the 2023–2026 training years buy nothing measurable, `docs/RESULTS.md` ⑪) |
 | 2 | `partition_{geo,temporal}_k{5,10}[_testeval].json` | no AOI, and the geo split put the frame-overlap band in train *and* hold-out |
 | 1 | `partition_20_05_*.json` | 2019–2021, train/val only |

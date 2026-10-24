@@ -1,15 +1,12 @@
 """Generate the benchmark partitions described in assets/PARTITIONS.md.
 
-Writes eight files -- ``partition_{geo,temporal}_k{5,10}_clean.json`` and a
+Writes four files -- ``partition_temporal_k{5,10}_<suffix>.json`` and a
 ``_testeval`` variant of each -- carrying, besides the interferogram lists:
 
 ``aoi_window``
     The lat/lon box each split owns. Read by ``dataprep/dataset.py``,
     ``inference/scenes.py`` and ``inference/outputs.py``; see
     :func:`sinkholes.geo.grid_window` for why one source matters.
-``crossview`` (geo only)
-    The North band below the cut -- section 5b's memorisation probe. It shares
-    interferograms with ``train`` on purpose and is evaluation-only.
 ``provenance``
     Everything needed to explain the file without this script.
 
@@ -77,12 +74,8 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                    help="root holding the data_patches_* tree (for nonz_indices.json)")
     p.add_argument("--patch_size", nargs=2, type=int, default=[200, 100], metavar=("H", "W"))
     p.add_argument("--strides_per_patch", type=int, default=2)
-    p.add_argument("--cut_lat", type=float, default=31.4,
-                   help="geo split line; train = North above it, hold-out = South below")
     p.add_argument("--aoi", nargs=4, type=float, default=[31.25, 31.75, 35.38, 35.46],
                    metavar=("LAT_MIN", "LAT_MAX", "LON_MIN", "LON_MAX"))
-    p.add_argument("--geo_val_share", type=float, default=0.4,
-                   help="fraction of the geo hold-out used for val (rest is test)")
     p.add_argument("--temporal_bounds", nargs=2, type=str, default=["20240101", "20250101"],
                    metavar=("TRAIN_END", "VAL_END"),
                    help="train < first, val < second, test >= second "
@@ -93,22 +86,19 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                         "(inclusive, on the interferogram's start date). Everything outside "
                         "them is train, and every target's 11-day chain must lie in its own "
                         "set: train scenes next to a block are dropped. Replaces "
-                        "--temporal_bounds for the temporal axis")
+                        "--temporal_bounds")
     p.add_argument("--k_prevs", nargs="+", type=int, default=[5, 10])
-    p.add_argument("--axis", nargs="+", default=["geo", "temporal"], choices=["geo", "temporal"],
-                   help="which families to write (default: both). The axes are independent -- "
-                        "asking for one does not change the other's lists")
     p.add_argument("--years", nargs=2, type=int, default=None, metavar=("Y0", "Y1"),
                    help="optional year filter; default is every year in the dictionary")
     p.add_argument("--nonz_th", nargs=2, type=int, default=None, metavar=("NORTH", "SOUTH"),
                    help="per-region whole-scene positive-patch threshold for TARGETS: a scene "
                         "enters train/val/test only when nonz_num > this (north when the frame "
                         "origin is above lat 31.5, else south). Predecessors are exempt. "
-                        "Default: no threshold, as every committed partition was built")
+                        "Default: no threshold (generations 4 and 5 used 350 200)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out_dir", type=str, default="assets")
     p.add_argument("--suffix", type=str, default="clean_fill",
-                   help="file name suffix: partition_<axis>_k<k>_<suffix>.json")
+                   help="file name suffix: partition_temporal_k<k>_<suffix>.json")
     p.add_argument("--dry_run", action="store_true",
                    help="print the tables without writing anything")
 
@@ -173,42 +163,6 @@ def start_date(intf):
     return date(int(intf[:4]), int(intf[4:6]), int(intf[6:8]))
 
 
-def geo_split(valid, counter, cut_lat, aoi, val_share, seed):
-    """Train = North above the cut, hold-out = South below it, split val/test.
-
-    The hold-out is divided by *positive mass* rather than by scene count, so
-    the val share means what it says whatever the per-scene spread is.
-    """
-    la, lb, lc, ld = aoi
-    train_box = (cut_lat, lb, lc, ld)
-    hold_box = (la, cut_lat, lc, ld)
-
-    north = [i for i in valid if counter.frame(i) == "North"]
-    south = [i for i in valid if counter.frame(i) == "South"]
-
-    train = sorted(i for i in north if counter.count(i, train_box) > 0)
-    crossview = sorted(i for i in north if counter.count(i, hold_box) > 0)
-    hold = sorted(i for i in south if counter.count(i, hold_box) > 0)
-
-    # Greedy fill of the val side up to the requested share of positives, over a
-    # seeded shuffle so the choice is reproducible but not date-ordered (taking
-    # the earliest scenes would make val a different season from test).
-    rng = np.random.default_rng(seed)
-    order = list(hold)
-    rng.shuffle(order)
-    target = val_share * counter.total(hold, hold_box)
-    val, running = [], 0
-    for intf in order:
-        if running >= target:
-            break
-        val.append(intf)
-        running += counter.count(intf, hold_box)
-    val = sorted(val)
-    test = sorted(set(hold) - set(val))
-    return {"train": train, "val": val, "test": test, "crossview": crossview}, \
-           {"train": train_box, "val": hold_box, "test": hold_box, "crossview": hold_box}
-
-
 def temporal_split(valid, chains, counter, bounds, aoi, k):
     """Train before the first bound, val before the second, test after.
 
@@ -237,7 +191,7 @@ def temporal_split(valid, chains, counter, bounds, aoi, k):
 # ---------------------------------------------------------------- writing
 
 
-def drop_leaky_chains(splits, chains, bounds, axis, k):
+def drop_leaky_chains(splits, chains, bounds, k):
     """Remove held-out scenes whose chain at this depth reaches into train."""
     b1 = date(int(bounds[0][:4]), int(bounds[0][4:6]), int(bounds[0][6:8]))
     out = dict(splits)
@@ -248,7 +202,7 @@ def drop_leaky_chains(splits, chains, bounds, axis, k):
             earliest = min([start_date(p) for p in prevs] + [start_date(intf)])
             (kept if earliest >= b1 else dropped).append(intf)
         if dropped:
-            logging.info(f"{axis}_k{k} {split}: dropped {len(dropped)} scene(s) whose "
+            logging.info(f"temporal_k{k} {split}: dropped {len(dropped)} scene(s) whose "
                          f"k={k} chain reaches before {bounds[0]}: {sorted(dropped)}")
         out[split] = sorted(kept)
     return out
@@ -322,14 +276,14 @@ def block_split(valid, chains, blocks, aoi, label=""):
     return separate_fully(splits, chains, label), {"train": box, "val": box, "test": box}
 
 
-def check_full_separation(axis, k, splits, chains):
+def check_full_separation(label, splits, chains):
     """Fail loudly if any target takes an input that is another split's target."""
-    owner = {i: s for s, v in splits.items() if s != "crossview" for i in v}
+    owner = {i: s for s, v in splits.items() for i in v}
     for intf, s in owner.items():
         foreign = sorted(p for p in chains.get(intf, {}).get("prevs", [])
                          if owner.get(p, s) != s)
         if foreign:
-            raise SystemExit(f"{axis}_k{k}: {s} scene {intf} takes inputs that are "
+            raise SystemExit(f"{label}: {s} scene {intf} takes inputs that are "
                              f"{owner[foreign[0]]} targets: {foreign}")
 
 
@@ -337,9 +291,6 @@ def testeval_variant(splits, windows):
     """The parent's test list carried under 'val', as the convention requires."""
     out = {"train": list(splits["train"]) + list(splits["val"]), "val": list(splits["test"])}
     win = {"train": windows["train"], "val": windows["test"]}
-    if "crossview" in splits:
-        out["crossview"] = list(splits["crossview"])
-        win["crossview"] = windows["crossview"]
     return out, win
 
 
@@ -354,24 +305,16 @@ def write_partition(path, splits, windows, provenance, dry_run=False):
         fh.write("\n")
 
 
-def check_invariants(axis, k, splits, counter, windows):
+def check_invariants(label, splits):
     """Fail loudly rather than ship a partition that leaks."""
-    lists = {s: set(v) for s, v in splits.items() if s != "crossview"}
+    lists = {s: set(v) for s, v in splits.items()}
     for a in lists:
         for b in lists:
             if a < b and lists[a] & lists[b]:
                 raise SystemExit(
-                    f"{axis}_k{k}: {a} and {b} share interferograms: "
+                    f"{label}: {a} and {b} share interferograms: "
                     f"{sorted(lists[a] & lists[b])}"
                 )
-    if axis == "geo":
-        # No train patch may sit inside the hold-out band.
-        for intf in splits["train"]:
-            if counter.count(intf, windows["test"]) and counter.frame(intf) == "South":
-                raise SystemExit(f"{axis}_k{k}: train scene {intf} has positives in the hold-out band")
-        for intf in splits["test"]:
-            if counter.frame(intf) != "South":
-                raise SystemExit(f"{axis}_k{k}: test scene {intf} is not on the South frame")
 
 
 def main(args) -> None:
@@ -410,97 +353,88 @@ def main(args) -> None:
     # so the two depths differ in chain length and in nothing else.
     k_base = min(ks)
     written = []
-    for axis in args.axis:
-        base_splits = base_windows = None
-        for k in sorted(ks):
-            valid = valid_by_k[k]
-            if axis == "geo":
-                splits, windows = geo_split(valid, counter, args.cut_lat, aoi,
-                                            args.geo_val_share, args.seed)
-            elif blocks:
-                # Assigned once, at the shallowest depth: the deeper ones are
-                # intersected with it below and re-separated on their own chains.
-                if k == k_base:
-                    splits, windows = block_split(valid, chains_by_k[k], blocks, aoi,
-                                                  f"{axis}_k{k}")
-            else:
-                splits, windows = temporal_split(valid, chains_by_k[k], counter,
-                                                 args.temporal_bounds, aoi, k)
+    base_splits = base_windows = None
+    for k in sorted(ks):
+        label = f"temporal_k{k}"
+        valid = valid_by_k[k]
+        if blocks:
+            # Assigned once, at the shallowest depth: the deeper ones are
+            # intersected with it below and re-separated on their own chains.
             if k == k_base:
-                base_splits, base_windows = splits, windows
+                splits, windows = block_split(valid, chains_by_k[k], blocks, aoi, label)
+        else:
+            splits, windows = temporal_split(valid, chains_by_k[k], counter,
+                                             args.temporal_bounds, aoi, k)
+        if k == k_base:
+            base_splits, base_windows = splits, windows
+        else:
+            # k10 subset of k5, per split: assign once, then intersect.
+            valid_set = set(valid)
+            splits = {s: sorted(set(v) & valid_set) for s, v in base_splits.items()}
+            windows = base_windows
+            if blocks:
+                # Full separation re-checked on the deeper chains: a k10
+                # chain reaches further than a k5 one, so the gaps around
+                # each block widen. Only train shrinks unless two held-out
+                # blocks sit within one chain of each other.
+                splits = separate_fully(splits, chains_by_k[k], label)
             else:
-                # k10 subset of k5, per split: assign once, then intersect.
-                valid_set = set(valid)
-                splits = {s: sorted(set(v) & valid_set) for s, v in base_splits.items()}
-                windows = base_windows
-                if axis == "temporal" and blocks:
-                    # Full separation re-checked on the deeper chains: a k10
-                    # chain reaches further than a k5 one, so the gaps around
-                    # each block widen. Only train shrinks unless two held-out
-                    # blocks sit within one chain of each other.
-                    splits = separate_fully(splits, chains_by_k[k], f"{axis}_k{k}")
-                elif axis == "temporal":
-                    # Chain containment must be re-checked at the deeper k, and
-                    # it OUTRANKS the subset rule. A scene whose 5-step chain
-                    # starts after the val boundary can still have a 10-step
-                    # chain reaching back into train -- three do, at these
-                    # bounds -- and keeping it would put a training target into
-                    # a held-out sample's input. Dropping is safe for the subset
-                    # rule because it only ever removes.
-                    splits = drop_leaky_chains(splits, chains_by_k[k],
-                                               args.temporal_bounds, axis, k)
+                # Chain containment must be re-checked at the deeper k, and
+                # it OUTRANKS the subset rule. A scene whose 5-step chain
+                # starts after the val boundary can still have a 10-step
+                # chain reaching back into train -- three do, at these
+                # bounds -- and keeping it would put a training target into
+                # a held-out sample's input. Dropping is safe for the subset
+                # rule because it only ever removes.
+                splits = drop_leaky_chains(splits, chains_by_k[k], args.temporal_bounds, k)
 
-            check_invariants(axis, k, splits, counter, windows)
-            if axis == "temporal" and blocks:
-                check_full_separation(axis, k, splits, chains_by_k[k])
+        check_invariants(label, splits)
+        if blocks:
+            check_full_separation(label, splits, chains_by_k[k])
 
-            prov = {
-                "generation": generation_label(args.years, args.nonz_th),
-                "axis": axis,
-                "k_prevs": k,
-                "max_lookback": FILL_LOOKBACK_FACTOR * k,
-                # ``years`` is what the splits actually contain; ``years_filter``
-                # is what was asked for. They differ when the archive is thinner
-                # than the request, so both are recorded.
-                "years": sorted({int(i[:4]) for v in splits.values() for i in v}) or None,
-                "years_filter": list(args.years) if args.years else None,
-                # Target-side only; predecessors were never filtered by it.
-                "nonz_th": list(args.nonz_th) if args.nonz_th else None,
-                "cut_lat": args.cut_lat if axis == "geo" else None,
-                "aoi": list(aoi),
-                "temporal_bounds": (list(args.temporal_bounds)
-                                    if axis == "temporal" and not blocks else None),
-                "temporal_blocks": ([f"{sp}:{a:%Y%m%d}:{b:%Y%m%d}" for sp, a, b in blocks]
-                                    if axis == "temporal" and blocks else None),
-                # "full": no target takes an input that is another split's
-                # target. "held_out_chains": held-out chains never reach into
-                # train, but a test chain may reach into val.
-                "separation": (("full" if blocks else "held_out_chains")
-                               if axis == "temporal" else None),
-                "geo_val_share": args.geo_val_share if axis == "geo" else None,
-                "seed": args.seed,
-                "positives_in_window": {s: counter.total(v, windows[s])
-                                        for s, v in splits.items()},
-                "intfs": {s: len(v) for s, v in splits.items()},
-                "generated_by": "sinkholes make-benchmark-partitions",
-            }
-            if prov["years"]:
-                prov["years"] = [prov["years"][0], prov["years"][-1]]
+        prov = {
+            "generation": generation_label(args.years, args.nonz_th),
+            "axis": "temporal",
+            "k_prevs": k,
+            "max_lookback": FILL_LOOKBACK_FACTOR * k,
+            # ``years`` is what the splits actually contain; ``years_filter``
+            # is what was asked for. They differ when the archive is thinner
+            # than the request, so both are recorded.
+            "years": sorted({int(i[:4]) for v in splits.values() for i in v}) or None,
+            "years_filter": list(args.years) if args.years else None,
+            # Target-side only; predecessors were never filtered by it.
+            "nonz_th": list(args.nonz_th) if args.nonz_th else None,
+            "aoi": list(aoi),
+            "temporal_bounds": list(args.temporal_bounds) if not blocks else None,
+            "temporal_blocks": ([f"{sp}:{a:%Y%m%d}:{b:%Y%m%d}" for sp, a, b in blocks]
+                                if blocks else None),
+            # "full": no target takes an input that is another split's
+            # target. "held_out_chains": held-out chains never reach into
+            # train, but a test chain may reach into val.
+            "separation": "full" if blocks else "held_out_chains",
+            "seed": args.seed,
+            "positives_in_window": {s: counter.total(v, windows[s])
+                                    for s, v in splits.items()},
+            "intfs": {s: len(v) for s, v in splits.items()},
+            "generated_by": "sinkholes make-benchmark-partitions",
+        }
+        if prov["years"]:
+            prov["years"] = [prov["years"][0], prov["years"][-1]]
 
-            name = f"partition_{axis}_k{k}_{args.suffix}.json"
-            write_partition(os.path.join(args.out_dir, name), splits, windows, prov, args.dry_run)
-            written.append((name, splits, windows, prov))
+        name = f"partition_temporal_k{k}_{args.suffix}.json"
+        write_partition(os.path.join(args.out_dir, name), splits, windows, prov, args.dry_run)
+        written.append((name, splits, windows, prov))
 
-            te_splits, te_windows = testeval_variant(splits, windows)
-            te_prov = dict(prov, derived_from=name,
-                           note="parent's test list carried under 'val'",
-                           intfs={s: len(v) for s, v in te_splits.items()},
-                           positives_in_window={s: counter.total(v, te_windows[s])
-                                                for s, v in te_splits.items()})
-            te_name = f"partition_{axis}_k{k}_testeval_{args.suffix}.json"
-            write_partition(os.path.join(args.out_dir, te_name), te_splits, te_windows,
-                            te_prov, args.dry_run)
-            written.append((te_name, te_splits, te_windows, te_prov))
+        te_splits, te_windows = testeval_variant(splits, windows)
+        te_prov = dict(prov, derived_from=name,
+                       note="parent's test list carried under 'val'",
+                       intfs={s: len(v) for s, v in te_splits.items()},
+                       positives_in_window={s: counter.total(v, te_windows[s])
+                                            for s, v in te_splits.items()})
+        te_name = f"partition_temporal_k{k}_testeval_{args.suffix}.json"
+        write_partition(os.path.join(args.out_dir, te_name), te_splits, te_windows,
+                        te_prov, args.dry_run)
+        written.append((te_name, te_splits, te_windows, te_prov))
 
     logging.info("")
     logging.info(f"{'file':>46} | {'split':>10} {'intfs':>6} {'positives in window':>20}")

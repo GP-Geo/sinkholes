@@ -25,7 +25,8 @@ _COMMANDS = {
                       "drop no-data / edge-sliver mask polygons (-> cleaned/)"),
     "make-benchmark-partitions": ("sinkholes.dataprep.benchmark_partitions", "add_arguments",
                                   "main",
-                                  "write the geo/temporal benchmark partitions (AOI + cut)"),
+                                  "write the temporal benchmark partitions (AOI window, "
+                                  "chain separation)"),
     "prepare-local-subset": ("sinkholes.dataprep.local_subset", "add_arguments", "main",
                              "derive nonz files + corrected metadata for a partial download"),
     # training

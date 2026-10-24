@@ -80,13 +80,12 @@ def run_generator(tmp_path, **overrides):
     return files, coord
 
 
-def test_writes_eight_files(tmp_path):
+def test_writes_four_files(tmp_path):
     files, _ = run_generator(tmp_path)
-    assert len(files) == 8
-    for axis in ("geo", "temporal"):
-        for k in (5, 10):
-            assert f"partition_{axis}_k{k}_clean_fill.json" in files
-            assert f"partition_{axis}_k{k}_testeval_clean_fill.json" in files
+    assert len(files) == 4
+    for k in (5, 10):
+        assert f"partition_temporal_k{k}_clean_fill.json" in files
+        assert f"partition_temporal_k{k}_testeval_clean_fill.json" in files
 
 
 def test_splits_are_disjoint(tmp_path):
@@ -103,11 +102,10 @@ def test_splits_are_disjoint(tmp_path):
 
 def test_k10_is_a_subset_of_k5_per_split(tmp_path):
     files, _ = run_generator(tmp_path)
-    for axis in ("geo", "temporal"):
-        k5 = files[f"partition_{axis}_k5_clean_fill.json"]
-        k10 = files[f"partition_{axis}_k10_clean_fill.json"]
-        for split in ("train", "val", "test"):
-            assert set(k10[split]) <= set(k5[split]), f"{axis} {split}: k10 not inside k5"
+    k5 = files["partition_temporal_k5_clean_fill.json"]
+    k10 = files["partition_temporal_k10_clean_fill.json"]
+    for split in ("train", "val", "test"):
+        assert set(k10[split]) <= set(k5[split]), f"{split}: k10 not inside k5"
 
 
 def test_held_out_chains_never_reach_into_train(tmp_path):
@@ -128,30 +126,6 @@ def test_held_out_chains_never_reach_into_train(tmp_path):
                 )
 
 
-def test_geo_train_and_holdout_are_on_different_frames(tmp_path):
-    files, coord = run_generator(tmp_path)
-    for k in (5, 10):
-        d = files[f"partition_geo_k{k}_clean_fill.json"]
-        assert all(coord[i]["frame"] == "North" for i in d["train"])
-        assert all(coord[i]["frame"] == "South" for i in d["val"] + d["test"])
-
-
-def test_geo_carries_crossview_and_temporal_does_not(tmp_path):
-    files, _ = run_generator(tmp_path)
-    for k in (5, 10):
-        assert files[f"partition_geo_k{k}_clean_fill.json"]["crossview"]
-        assert "crossview" not in files[f"partition_temporal_k{k}_clean_fill.json"]
-
-
-def test_crossview_is_north_and_overlaps_train_on_purpose(tmp_path):
-    files, coord = run_generator(tmp_path)
-    d = files["partition_geo_k5_clean_fill.json"]
-    assert all(coord[i]["frame"] == "North" for i in d["crossview"])
-    assert set(d["crossview"]) & set(d["train"]), (
-        "crossview is meant to share scenes with train -- see plan 5b"
-    )
-
-
 def test_every_split_has_a_window(tmp_path):
     files, _ = run_generator(tmp_path)
     for name, d in files.items():
@@ -163,35 +137,28 @@ def test_every_split_has_a_window(tmp_path):
             assert len(win[split]) == 4
 
 
-def test_geo_train_window_is_above_the_cut_and_holdout_below(tmp_path):
-    files, _ = run_generator(tmp_path)
-    d = files["partition_geo_k5_clean_fill.json"]
-    assert d["aoi_window"]["train"][0] == CUT
-    assert d["aoi_window"]["test"][1] == CUT
-
-
 def test_positives_are_counted_inside_the_window_not_whole_scene(tmp_path):
     """nonz_num would overstate every split; provenance must not use it."""
     files, coord = run_generator(tmp_path)
-    d = files["partition_geo_k5_clean_fill.json"]
+    d = files["partition_temporal_k5_clean_fill.json"]
     pos = d["provenance"]["positives_in_window"]
-    # each synthetic North scene has 2 positives above the cut and 1 below,
-    # while nonz_num says 4 -- so a whole-scene count would be 4x the scenes.
-    assert pos["train"] == 2 * len(d["train"])
-    assert pos["crossview"] == 1 * len(d["crossview"])
-    assert pos["train"] != 4 * len(d["train"]), "counted from nonz_num, not the window"
+    # each synthetic North scene has 3 positives inside the AOI and South 2,
+    # while nonz_num says 4 and 3.
+    in_window = {"North": 3, "South": 2}
+    assert pos["train"] == sum(in_window[coord[i]["frame"]] for i in d["train"])
+    assert pos["train"] != sum(coord[i]["nonz_num"] for i in d["train"]), \
+        "counted from nonz_num, not the window"
 
 
 def test_testeval_carries_the_parent_test_list_as_val(tmp_path):
     files, _ = run_generator(tmp_path)
-    for axis in ("geo", "temporal"):
-        for k in (5, 10):
-            parent = files[f"partition_{axis}_k{k}_clean_fill.json"]
-            te = files[f"partition_{axis}_k{k}_testeval_clean_fill.json"]
-            assert te["val"] == parent["test"]
-            assert "test" not in te
-            assert set(te["train"]) == set(parent["train"]) | set(parent["val"])
-            assert te["aoi_window"]["val"] == parent["aoi_window"]["test"]
+    for k in (5, 10):
+        parent = files[f"partition_temporal_k{k}_clean_fill.json"]
+        te = files[f"partition_temporal_k{k}_testeval_clean_fill.json"]
+        assert te["val"] == parent["test"]
+        assert "test" not in te
+        assert set(te["train"]) == set(parent["train"]) | set(parent["val"])
+        assert te["aoi_window"]["val"] == parent["aoi_window"]["test"]
 
 
 def test_provenance_identifies_the_generation(tmp_path):
@@ -201,7 +168,7 @@ def test_provenance_identifies_the_generation(tmp_path):
         assert pr["generation"] == bp.GENERATION
         assert pr["aoi"] == list(AOI)
         assert pr["seed"] == 0
-        assert pr["axis"] in ("geo", "temporal")
+        assert pr["axis"] == "temporal"
         assert pr["k_prevs"] in (5, 10)
 
 
@@ -327,7 +294,7 @@ def test_nonz_th_drops_thin_targets_from_every_split(tmp_path):
     dict_path, patches, coord = _archive_with_mixed_counts(tmp_path)
     files = _run(tmp_path, dict_path, patches, nonz_th=[100, 100])
     for name, d in files.items():
-        for split in ("train", "val", "test", "crossview"):
+        for split in ("train", "val", "test"):
             for intf in d.get(split, []):
                 assert coord[intf]["nonz_num"] > 100, f"{name}:{split} kept thin {intf}"
 
@@ -353,26 +320,13 @@ def test_nonz_th_is_recorded_and_restamps_the_generation(tmp_path):
         assert d["provenance"]["generation"] == f"{bp.GENERATION}_nonz350-200"
 
 
-def test_no_nonz_th_reproduces_the_committed_generation(tmp_path):
-    """Default off: every committed partition was built without the gate."""
+def test_no_nonz_th_keeps_the_bare_generation(tmp_path):
+    """Default off: the generation stamp says so."""
     dict_path, patches, _ = _archive_with_mixed_counts(tmp_path)
     files = _run(tmp_path, dict_path, patches)
     for d in files.values():
         assert d["provenance"]["nonz_th"] is None
         assert d["provenance"]["generation"] == bp.GENERATION
-
-
-def test_axis_selects_which_families_are_written(tmp_path):
-    """--axis temporal writes only the temporal family; geo lists are untouched by it."""
-    dict_path, patches, _ = _archive_with_mixed_counts(tmp_path)
-    only = _run(tmp_path, dict_path, patches, axis=["temporal"], nonz_th=[100, 100])
-    assert only and all("temporal" in n for n in only), sorted(only)
-
-    both_root = tmp_path / "both_run"
-    both_root.mkdir()
-    both = _run(both_root, dict_path, patches, nonz_th=[100, 100])
-    for name, d in only.items():
-        assert d["train"] == both[name]["train"], f"{name}: axis choice changed the lists"
 
 
 # -- --temporal_blocks: held-out date blocks with train on both sides ----------------------
@@ -386,8 +340,7 @@ VAL_BLOCK, TEST_BLOCK = "val:20230901:20230930", "test:20240601:20241231"
 
 def _run_blocks(tmp_path, blocks, **overrides):
     dict_path, patches, coord = build_archive(tmp_path, n_north=60, n_south=60)
-    files = _run(tmp_path, dict_path, patches, axis=["temporal"], temporal_blocks=blocks,
-                 **overrides)
+    files = _run(tmp_path, dict_path, patches, temporal_blocks=blocks, **overrides)
     return files, coord
 
 
@@ -454,10 +407,9 @@ def test_blocks_are_recorded_in_provenance(tmp_path):
 
 def test_bounds_run_records_its_weaker_separation(tmp_path):
     files, _ = run_generator(tmp_path)
-    for name, d in files.items():
-        if "temporal" in name:
-            assert d["provenance"]["separation"] == "held_out_chains"
-            assert d["provenance"]["temporal_blocks"] is None
+    for d in files.values():
+        assert d["provenance"]["separation"] == "held_out_chains"
+        assert d["provenance"]["temporal_blocks"] is None
 
 
 @pytest.mark.parametrize("specs", [

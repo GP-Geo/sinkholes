@@ -20,7 +20,7 @@ pip install -e . && sinkholes <command>
 | `count-positives` | fill per-interferogram positive-patch counts into the dictionary |
 | `clean-patches` | optional QC: drop no-data / edge-sliver mask polygons |
 | `merge-lidar` | merge the per-year LiDAR coverage shapefiles into one |
-| `make-benchmark-partitions` | write the geo/temporal benchmark partitions (AOI + cut) |
+| `make-benchmark-partitions` | write the temporal benchmark partitions (AOI window, chain separation) |
 | `prepare-local-subset` | make a partial patch download training-ready |
 | `train` | train UNet / UNet+attention / AttentionUNet / ConvLSTM / temporal-attention U-Net |
 | `test-patches` | patch-level metrics on a pickled split **or** a partition JSON |
