@@ -143,9 +143,8 @@ case "$GEN" in
   th350) GEN_SUFFIX="_clean_th350x200" ;;
   fill)  GEN_SUFFIX="_clean_fill_th350x200" ;;
   t2026) GEN_SUFFIX="_test2026_fill_th350x200" ;;
-  2|p23) echo "GEN=$GEN was retired 2026-10-15 (with every geo partition); recover its files" >&2
-         echo "with: git show notebook-2026-10-15:assets/<partition file>" >&2; exit 1 ;;
-  *)     echo "GEN must be 3, th350, fill or t2026, got '$GEN'" >&2; exit 1 ;;
+  *)     echo "GEN must be 3, th350, fill or t2026, got '$GEN' (retired generations:" >&2
+         echo "git show notebook-2026-10-15:assets/<partition file>)" >&2; exit 1 ;;
 esac
 case "$SPLIT" in
   val)  PARTITION="assets/partition_${GROUP}${GEN_SUFFIX}.json" ;;

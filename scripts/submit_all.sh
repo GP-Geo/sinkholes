@@ -80,22 +80,15 @@ WANT=all; SUBMIT=no; ONLY=()
 while [ $# -gt 0 ]; do
   case "$1" in
     all)   WANT="$1" ;;
-    # Retired by name rather than left to select zero jobs, so the mistake is
-    # visible instead of looking like an empty batch.
-    eval6ref|ampfix|lrscan|evalampfix|evalctx|reg|dropscan|lossscan|momscan|adamscan|combo|\
-    th350|evalth350|posw8|evalposw8|k10|k10plain|evalk10|evalk10plain|k10plain45|k5plain|\
-    evalk5plain|fill|evalfill|t2026|dd300|long200|long500|ctx50|evallong200|longreg|longgrid|\
-    evallonggrid|train|tattn|control|clean22|valpos|valneg|attnfix|attnpos|pre23|training|\
-    blend|rescore|eval|eval2|eval3|eval4|eval5|eval6|eval7|probe|posonly)
-      echo "'$1' has run or was superseded -- docs/RESULTS.md says what it settled." >&2
-      echo "Its rows: git show notebook-2026-10-15:scripts/submit_all.sh (older: d708fba)." >&2
-      exit 1 ;;
     --submit)       SUBMIT=yes ;;
     --only)         shift; [ $# -gt 0 ] || { echo "--only needs a value" >&2; exit 1; }
                     ONLY+=("$1") ;;
     --only=*)       ONLY+=("${1#--only=}") ;;
     -h|--help)      sed -n '2,/measured from\./p' "$0"; exit 0 ;;
-    *)              echo "unknown argument '$1'" >&2; exit 1 ;;
+    *)              echo "unknown argument '$1'" >&2
+                    echo "A batch that has run: docs/RESULTS.md says what it settled; its rows are at" >&2
+                    echo "git show notebook-2026-10-15:scripts/submit_all.sh (older: d708fba)." >&2
+                    exit 1 ;;
   esac
   shift
 done
