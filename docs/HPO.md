@@ -1,8 +1,11 @@
 # HPO and long training: plain vs ctx50 temporal attention (k10, generation 5-t2026)
 
-Study `k10t2026_hpo_v1`, specified in [`assets/hpo/k10t2026_plain_vs_ctx50.json`](../assets/hpo/k10t2026_plain_vs_ctx50.json)
-and run by `sinkholes hpo`. This page is the protocol; the code is the source of truth for
-every definition quoted here.
+Study `k10t2026_hpo_v2`, specified in [`assets/hpo/k10t2026_plain_vs_ctx50_v2.json`](../assets/hpo/k10t2026_plain_vs_ctx50_v2.json)
+and run by `sinkholes hpo`. It is `k10t2026_hpo_v1`
+([`assets/hpo/k10t2026_plain_vs_ctx50.json`](../assets/hpo/k10t2026_plain_vs_ctx50.json)) with
+the RTh list extended above 0.5 in steps of 1/16 up to 0.9375, because both v1 baseline trials
+peaked at v1's 0.5 ceiling; v1's finished baseline pair is adopted, not retrained, and v1 is closed (§13). This
+page is the protocol; the code is the source of truth for every definition quoted here.
 
 **Nothing is submitted without an explicit approval per phase, and `step` is a dry run unless
 given `--submit`.**
@@ -32,9 +35,9 @@ augmentation, optimiser, schedule, micro-batch × accumulation, evaluation proto
 | batch | micro 32 × accumulation 4 = 128, **both geometries** |
 | HPO schedule | plateau on val/dice, patience 8, factor 0.5, min LR 1e-8; no early stopping, no pruning |
 
-**Micro-batch.** ctx50 k10 tattn at 32×4 has already been measured on this architecture and
-optimiser: 33.5 GiB VRAM reserved (LSF 254183). 32×4 therefore holds for both geometries on a
-≥40 GB GPU; the `prep` profile job re-measures it on the current torch before the study.
+**Micro-batch.** 32×4 holds for both geometries: the baseline pair trained at it (VRAM, §9:
+ctx50 33.5 GiB reserved, first measured in LSF 254183; plain 11.5 GiB). The optional `prep`
+profile job was not run in v1.
 
 ## 2. The search
 
@@ -57,9 +60,9 @@ Six shared configurations, run on **both** geometries (12 trials), seed 42, 30 e
 
 s1–s5 are a maximin Latin hypercube over (log lr, log wd) anchored on the baseline (numpy seed
 20261013, 200k candidates, minimum distance 0.415 in the unit square), rounded to two
-significant figures; pos_w 2/4/4/12/12 is assigned so it is not confounded with lr. **This is
-a proposal**: it can be changed before the `shared` phase is approved (a changed spec is a new
-study, so change it before `init`).
+significant figures; pos_w 2/4/4/12/12 is assigned so it is not confounded with lr. **The
+design is fixed**: `hpo adopt` requires v2's shared configurations to equal v1's, so a different
+design is a new study that retrains the baseline pair.
 
 Then, per geometry: **two TPE trials** (Optuna `TPESampler`, `n_startup_trials=6` so the six
 shared trials are the startup set, multivariate, constant liar, seed 20261013) → **the best two
@@ -69,10 +72,14 @@ repeated at seeds 7 and 123** for 60 epochs.
 ## 3. The objective (never patch Dice)
 
 Whole **validation** scenes (the partition's 11 `val` scenes, 2022-2023; AOI and LiDAR gate as always),
-stride-4 grid, unweighted tile votes at 0.5, every RTh ∈ {0.125, 0.25, 0.375, 0.5}, strict
+stride-4 grid, unweighted tile votes at 0.5, every RTh ∈ {0.125, 0.25, 0.375, 0.5} and every
+1/16 step above, {0.5625, 0.625, …, 0.9375} (v1 stopped at 0.5; §13), strict
 object metric ITh 0.7 / buffer 5 px. Object F1 is this project's: the harmonic mean of the
 per-scene **mean** recall and **mean** precision (`F1 = 2·P̄·R̄/(P̄+R̄)`; 0.8114 for the fill
-k10 model on its 24-scene test list reproduces this way).
+k10 model on its 24-scene test list reproduces this way). A scene without ground truth has no
+recall or precision and is left out of the means: 3 of the 11 val scenes (20231029_20231109,
+20231222_20240102, 20231223_20240103), so the objective averages 8. The objects predicted on
+those three (110–262 per scene for the baseline pair) never reach the objective.
 
 ```
 F(t)      = mean over e in {20, 30} of F1(e, t)        (budget e30)
@@ -103,7 +110,8 @@ before any test scoring. Test evaluation uses that RTh.
 * **missing history is an error** — and `eval-scenes` now refuses too (`--allow_missing_history`
   restores the old padding explicitly);
 * **one confidence map, every threshold**: votes/counts kept as uint8 (lossless), scored at all
-  RTh, saved compressed; GT once per scene in the study cache, no input stacks, no shapefiles;
+  RTh, saved compressed; GT once per scene in the study cache, no input stacks, no shapefiles.
+  Any other threshold can be scored later from these files on CPU (`rescore_saved`, §13);
 * **per-scene results written as they finish**: a killed job resumes.
 
 Equivalence: `tests/test_snapshot_eval.py` runs both pipelines on synthetic scenes (partial
@@ -160,9 +168,10 @@ interpolated precision at a common recall — the number that separates "cleaner
 
 ## 7. Storage, retention, protection
 
-The study root is **`/home/labs/rudich/pinkas/sinkholes/studies/k10t2026_hpo_v1`** (moved from
-`pinkas/sinkholes_studies/` on 2026-10-15; job scripts and run manifests written before that keep
-the old path). `studies/` is gitignored and outside `outputs/`, so `scripts/tidy_outputs.sh`
+The study root is **`/home/labs/rudich/pinkas/sinkholes/studies/k10t2026_hpo_v2`**. The closed
+v1 root beside it, `studies/k10t2026_hpo_v1` (moved from `pinkas/sinkholes_studies/` on
+2026-10-15; job scripts and run manifests written before that keep the old path), still holds
+the two adopted baseline runs, which v2's ledger points at: keep it. `studies/` is gitignored and outside `outputs/`, so `scripts/tidy_outputs.sh`
 and any other `outputs/` clean-up cannot reach it; a `PROTECTED_STUDY_STATE` file says so in
 the root. Per run: `best.pt` (patch Dice), `last.pt`
 (final), `resume.pt` + `resume_prev.pt`, snapshots only at scheduled epochs, and
@@ -175,24 +184,25 @@ metrics, the ledger, Optuna, `best.pt`, `last.pt`, or `resume.pt` before promoti
 (`--drop_unpromoted_resume` after). Estimated: ~25 GB of checkpoints for the 16 initial trials,
 ~14 GB after retention, ~3.6 GB per 300-epoch run, ~3 GB of HPO confidence maps.
 
-## 8. Data coverage (checked 2026-10-13 with `sinkholes hpo coverage`)
+## 8. Data coverage (`sinkholes hpo coverage`)
 
 | geometry | use | trees | state |
 |---|---|---|---|
 | plain | training | stride 2, 341 ids | complete, headers intact |
 | plain | val / test scenes | stride 4, 80 / 32 ids | complete |
 | ctx50 | training | stride 2, 341 ids | complete |
-| ctx50 | **val scenes (2022-23 chains)** | stride 4, 80 ids | **all 80 missing (~1.24 TB)** |
+| ctx50 | val scenes (2022-23 chains) | stride 4, 80 ids | complete (built 2026-10-13, LSF 790948, 27 min) |
 | ctx50 | test scenes (2026 chains) | stride 4, 32 ids | complete |
 
+The ctx50 val tree was the one gap; it is rebuilt, should it ever be needed, with
+
 ```bash
-# resumable, checks df, verifies itself; ~1.24 TB may need two submissions of the same line
+# resumable, checks df, verifies itself
 PARTITION=assets/partition_temporal_k10_test2026_fill_th350x200.json K_PREVS=10 MIN_POS=150 \
   bsub < scripts/data/make_context_stride4_patches.sh
 ```
 
-The controller refuses to submit a ctx50 evaluation until the tree is complete; ctx50
-*training* is not blocked (its stride-2 tree is complete).
+The controller refuses to submit a ctx50 evaluation until the tree is complete.
 
 ## 9. Resources (`sinkholes hpo resources`)
 
@@ -200,15 +210,21 @@ The controller refuses to submit a ctx50 evaluation until the tree is complete; 
 |---|---|---|---|
 | min/epoch, 32×4 | **14.1** (A40) | **42.5** (A40), **26.9** (L40S) | measured on the baseline pair, LSF 790942 / 790941 (87,834 samples); the earlier ~19.2 extrapolation for ctx50 was wrong |
 | dataset build | **1 h 43 m** | **2 h 30 m – 6 h 42 m** | measured (hgn40; hgn48 / lgn06), paid again on every LSF requeue |
-| host memory, training | **114 GB** peak | ~295 GB (est.) | plain measured (LSF 790942); ctx50 206 GB measured at 54k samples |
+| host memory, training | **114 GB** peak | **297.8 GB** peak | measured (LSF 790942 / 790941) |
 | VRAM | 11.5 GiB | 33.5 GiB | measured |
-| eval host memory | ~45 GB | ~125 GB | estimate (gated AOI tiles only; legacy ctx50 k10 measured 224 GB) |
+| evaluation, 3 checkpoints × 11 val scenes | **1 h 09 m**, 23.9 GB peak | **3 h 04 m**, 68.7 GB peak | measured (LSF 870786 / 870780) |
 
 Requested: training plain 160 GB / 24 GB GPU, ctx50 340 GB / 40 GB GPU, both 24 h wall with a
-22.5 h budget (continuations are automatic chunks); evaluation plain 80 GB, ctx50 192 GB.
-Totals: the pre-launch estimate (HPO through seed repeats ≈ 340 GPU-h, six 300-epoch runs ≈ 640
-GPU-h more) assumed ctx50 at ~1.4× plain per epoch; on A40 it is 3.0×, so the ctx50 half is
-roughly double that estimate. To be redone once ctx50/s0 completes.
+22.5 h budget (continuations are automatic chunks); evaluation plain 80 GB, ctx50 192 GB. The
+evaluation requests are about 3× what was used, but `resources` is part of the adopted protocol
+and stays v1's.
+
+Per trial, from those numbers: a plain 30-epoch trial is one chunk, ≈ 8.8 h + 1.2 h evaluation. A
+ctx50 30-epoch trial does not fit one 22.5 h budget on an A40 (30 × 42.5 min + the build), so it
+runs as two chunks and builds twice, ≈ 26–35 h; on an L40S ≈ 16–20 h; evaluation ≈ 3.1 h.
+Totals (estimates, A40 to L40S): the 10 shared trials ≈ 145–240 GPU-h; HPO through the seed
+repeats ≈ 400–550 GPU-h; the six 300-epoch runs ≈ 700–1,050 GPU-h more (pre-launch estimates:
+340 and 640, which assumed ctx50 at ~1.4× plain per epoch instead of the measured 3.0× on A40).
 
 ## 10. Commands
 
@@ -233,9 +249,22 @@ python -m sinkholes hpo status               # any time, also from the Mac
 python -m sinkholes hpo step --submit        # periodically: evaluations, collection, continuations
 ```
 
+That block is how v1 started (without `prep`, which is optional). v2 starts from v1's finished
+baseline pair instead (§13):
+
+```bash
+python -m sinkholes hpo init                 # v2 is the default --spec now
+python -m sinkholes hpo adopt                # CPU, ~10-15 min: re-score v1's pair, close v1
+python -m sinkholes hpo step --submit        # collects the pair and tells Optuna; submits nothing
+python -m sinkholes hpo status
+```
+
 Later phases are the same two lines: `approve --phase shared|tpe|promote|seeds`, then
-`step --submit`. Long runs: `hpo long --geometry plain --geometry ctx50 --seeds 42`,
-`approve --phase long`, `step --submit`.
+`step --submit`. **After every `step --submit` that submits, run `bjobs -w`** and check that
+no job name is listed twice (§12, risk 5). Long runs: `hpo long --geometry plain --geometry ctx50 --seeds 42`,
+`approve --phase long`, `step --submit`. v1 is still readable with
+`--spec assets/hpo/k10t2026_plain_vs_ctx50.json` (`status`, dry-run `step`); everything that
+would change it is refused.
 
 ## 11. Verification record
 
@@ -254,22 +283,116 @@ Later phases are the same two lines: `approve --phase shared|tpe|promote|seeds`,
   - tile batch 32 (the study's plain setting): 75 and 33 pixels differ (batch-size floating point
     on CUDA); recall identical, largest precision difference 4.2e-5.
   - wall time per checkpoint for the two scenes: legacy 911 s, new 514 s (tb 32) / 427 s (tb 1).
+* v1 → v2 (§13), 2026-10-18: test suite 645 passed, 6 skipped. Six tests are new:
+  `test_snapshot_eval.py` checks that re-scored maps equal a fresh evaluation at the wider
+  list, and that a changed map is refused with nothing written; `test_hpo_controller.py`
+  covers adoption end to end against the fake LSF (shared run, closed source, collect and tell,
+  ten shared trials under v2's names, a promotion resuming with v1's fingerprint), refusal of a
+  changed protocol, refusal of an unfinished run, and refusal of a changed snapshot.
+* Real data, 2026-10-18: `rescore_saved` on local copies of v1's baseline evaluations (both
+  geometries, epochs 10/20/30, 11 scenes each). Every per-scene field reproduced at v1's four
+  thresholds, and the objectives at v2's eight are §13's (plain 0.7568 @ 0.875, ctx50 0.7401 @
+  0.9375). It took ~12 min on one Mac core; most of that is polygonising at the low thresholds.
 
 ## 12. Open risks
 
-1. **ctx50 host memory (~295 GB est.).** If 340 GB cannot be scheduled on `long-gpu`, the
-   remedy is an exact de-duplicated patch store (a predecessor frame shared by several targets
+1. **ctx50 host memory (297.8 GB measured, 340 GB requested).** The baseline was scheduled on
+   `long-gpu` at that request. The remedy, if it stops being scheduled, is an exact de-duplicated patch store (a predecessor frame shared by several targets
    held once; same samples, same order): measured 4.4× on positives, ~1.9× overall because ring
    negatives rarely coincide, i.e. ~190 GB. Not built yet.
-2. **Optuna on WEXAC** must be 5.0.0 to share the journal with any other machine.
-3. **Evaluation timings** are estimates until the first evaluation job logs its seconds per
-   scene and checkpoint; `tile_batch` can be lowered if a GPU runs short of memory (the effective
-   batch is recorded with the results).
-4. **Batched inference on CUDA** may differ from the one-tile path in the last bits; a vote
+2. **Optuna on WEXAC** must be 5.0.0 to share the journal with any other machine (the Mac has
+   4.9.0: run every `hpo` command that touches Optuna on WEXAC).
+3. **Batched inference on CUDA** may differ from the one-tile path in the last bits; a vote
    flips only if a tile probability lands within that of 0.5. The same engine scores every trial,
    so the comparison is unaffected. Measured by the engine check (§11): ≤ 75 flipped pixels per
    scene, precision ≤ 4.2e-5 off, recall unchanged.
-5. **Preemption on `long-gpu`.** LSF 790941 (ctx50/s0) was preempted twice in its first 8 h and
+4. **Preemption on `long-gpu`.** LSF 790941 (ctx50/s0) was preempted twice in its first 8 h and
    requeued by LSF under the same job id; each restart resumes from the last completed epoch but
    rebuilds the dataset first (up to 6.7 h on lgn06). A ctx50 trial can lose more time to
    rebuilding than to training; the de-duplicated store in (1) would also shorten the build.
+5. **Duplicate LSF submissions.** Both v1 baseline evaluations ran twice: ctx50 as 870777 and
+   870780 (submitted in the same second), plain as 870783 and 870786. The ledger holds only the
+   second id of each pair and the controller calls `bsub` once per action; the cause is not
+   established (one candidate: `bsub` retrying internally while LSF was slow). Two identical
+   evaluations wrote the same files, so the scores are unaffected, at a cost of ~4 GPU-h. Two
+   copies of a *training* chunk would both write the run's `resume.pt`. Until the controller
+   checks for it, run `bjobs -w` after every submitting `step` and `bkill` the twin whose id
+   `step` did not print as `SUBMITTED`.
+
+## 13. v1 → v2: the threshold ceiling (2026-10-17/18)
+
+**What v1 showed.** v1 scored the paper's RTh grid, {0.125, 0.25, 0.375, 0.5}. Both baseline
+trials (s0, pos_w 8) scored best at 0.5, the highest value allowed, and the objective rose at
+every step: plain 0.632 → 0.688 → 0.714 → 0.733, ctx50 0.674 → 0.685 → 0.693 → 0.704.
+Precision was the weak side (~0.59 against recall 0.93–0.98): the models over-predict, and a
+stricter vote removes false objects.
+
+**The check.** The saved maps keep each pixel's raw votes and counts, so the pair was
+re-scored on CPU at higher thresholds with the study's own scoring code; at the four v1
+thresholds every per-scene field reproduced exactly. A pixel's confidence is votes ÷ tiles,
+and ~87 % of pixels are covered by 16 tiles at stride 4, so only steps of 1/16 matter (0.55
+scores like 0.5, 0.65 like 0.625). The top level, 0.9375, means all 16 tiles agree.
+
+| RTh | votes needed (of 16) | plain F | P / R | ctx50 F | P / R |
+|---|---|---|---|---|---|
+| 0.5 (v1's top) | ≥ 9 | 0.7329 | 0.587 / 0.976 | 0.7040 | 0.568 / 0.927 |
+| 0.6 | ≥ 10 | 0.7423 | 0.600 / 0.974 | 0.7070 | 0.573 / 0.924 |
+| 0.625 | ≥ 11 | 0.7486 | 0.611 / 0.967 | 0.7139 | 0.582 / 0.923 |
+| 0.7 | ≥ 12 | 0.7560 | 0.622 / 0.963 | 0.7178 | 0.588 / 0.922 |
+| 0.75 | ≥ 13 | 0.7516 | 0.633 / 0.926 | 0.7244 | 0.598 / 0.920 |
+| 0.8125 | ≥ 14 | 0.7542 | 0.646 / 0.905 | 0.7288 | 0.604 / 0.919 |
+| 0.875 | ≥ 15 | **0.7568** | 0.658 / 0.891 | 0.7329 | 0.612 / 0.915 |
+| 0.9375 | 16 | 0.7542 | 0.674 / 0.856 | **0.7401** | 0.625 / 0.909 |
+
+F is the objective (mean F1 over epochs 20 and 30); P and R are the per-scene means averaged
+over the same two epochs; "votes needed" holds where 16 tiles cover the pixel. Plain levels
+off from 0.7 up (0.752–0.757); ctx50 is still rising when every tile must agree, even though
+its precision there is only 0.625. Plain still leads, by 0.017 at each geometry's best
+instead of 0.029 at 0.5.
+
+**Why it matters for the search.** pos_weight is searched ({2, 4, 8, 12}), and a larger
+pos_weight makes a model say "sinkhole" more readily, which a stricter vote compensates. With
+the grid capped at 0.5, the configurations that need a stricter vote (pos_w 8 and 12: s0, s2,
+s4) would be under-scored relative to pos_w 2 and 4, and TPE and promotion would learn "low
+pos_weight is better" partly from the cap. This is reasoning, not a measurement: both finished
+trials use pos_w 8.
+
+**Why a new study.** A study's spec is hashed into its ledger and cannot change, and the s0
+objectives had already been told to Optuna, which refuses a second value for a finished trial.
+So v2 is v1 with `evaluation.rth` = {0.125, 0.25, 0.375, 0.5, 0.5625, 0.625, 0.6875, 0.75,
+0.8125, 0.875, 0.9375}: v1's four (so v1's numbers stay comparable and the re-scored maps can be
+checked against them), then every 1/16 step to the unanimous level. Because the vote test is
+strict (`confidence > RTh`), k/16 asks for k+1 of 16 votes: 0.5 needs ≥ 9 and the seven steps
+above it need ≥ 10 … 16. Nothing else changed: data, partitions,
+training, search space, shared configurations, budgets and resources are v1's, and `hpo adopt`
+refuses otherwise. A longer threshold list makes the max over thresholds very slightly more
+optimistic, by the same amount for every trial. Decided by the user on 2026-10-18 (eighths and
+0.9375); completed to every 1/16 step on 2026-10-24, before `init`, because the eighths left the
+≥ 10, ≥ 12 and ≥ 14 levels unscored. In the table above those rows were scored at 0.6, 0.7 and
+0.8125; v2 scores them at 0.5625, 0.6875 and 0.8125, which give the same pixels where 16 tiles
+cover and differ only where fewer do, so `adopt` reports the exact values.
+
+**`sinkholes hpo adopt`** (`controller.adopt`, driven by the spec's `adopt` section). In order:
+
+1. It refuses unless the two specs differ only in `study`, `root`, `description`, `adopt` and
+   a grown `evaluation.rth`, and the two studies' frozen partitions are byte-identical.
+2. For each named trial it refuses unless the v1 trial is complete and collected, its
+   configuration matches v2's namesake field for field (`ADOPT_SAME`), the v2 trial has no jobs
+   or scores yet, and every scored snapshot still has the SHA-256 it was scored with.
+3. It re-scores each evaluation batch from its saved maps at v2's thresholds
+   (`snapshot_eval.rescore_saved`). Every v1 threshold must reproduce field for field for every
+   scene and epoch, or nothing is written. The results and copies of the maps go to v2's
+   `evals/`; each JSON carries a `rescored` record (the source file and its SHA-256, the
+   verified thresholds).
+4. It shares the run directory rather than copying it (2.7 GB stays in v1's `runs/`). A
+   promotion resumes it in place, with the run name and the partition path its strict resume
+   fingerprint holds (the trial's `slug` and `partition_file` stay v1's).
+5. It copies v1's min/max and GT caches (86 MB) into v2's `cache/`.
+6. It marks v1 `superseded_by` v2. From then on, every v1 command that takes the ledger lock
+   (`approve`, `step --submit`, `collect`, `long`, `prep --submit`, `retain --apply`) is
+   refused, so nothing in v1 can touch the runs v2 now owns. `status` and dry-run `step` still
+   work and say the study is closed.
+
+It is idempotent (an adopted trial is skipped) and submits nothing. The next `step --submit`
+in v2 collects the adopted evaluations and tells Optuna, like any finished evaluation; the
+other ten initial trials then wait for `approve --phase shared` as before.

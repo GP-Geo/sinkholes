@@ -104,7 +104,8 @@ class Ledger:
 
     # -- the lock ------------------------------------------------------------------------------
     @contextmanager
-    def locked(self, break_lock: bool = False) -> Iterator["Ledger"]:
+    def locked(self, break_lock: bool = False,
+               allow_superseded: bool = False) -> Iterator["Ledger"]:
         self.root.mkdir(parents=True, exist_ok=True)
         lock = self.root / LOCK
         if break_lock and lock.exists():
@@ -126,6 +127,13 @@ class Ledger:
         try:
             if self.path.exists():
                 self.load()
+            # A superseded study is closed: its runs may belong to its successor.
+            sup = self.data.get("superseded_by")
+            if sup and not allow_superseded:
+                raise LedgerError(
+                    f"study {self.data.get('study')} was superseded by {sup['study']} on "
+                    f"{sup['time']} ({sup['root']}); it is closed and nothing in it may change "
+                    f"-- use that study's spec")
             yield self
         finally:
             try:

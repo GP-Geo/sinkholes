@@ -236,6 +236,42 @@ def test_a_killed_job_continues_from_its_finished_scenes(tmp_path, world, monkey
     assert again["summary"] == first["summary"]
 
 
+def test_saved_maps_rescore_to_what_a_fresh_run_scores(tmp_path, world):
+    """A wider RTh list from the saved maps equals a full evaluation at that list."""
+    world.context = TARGET
+    partition = build_world(tmp_path, TARGET)
+    run_new(tmp_path, partition, 4, out="narrow", extra=("--rth", "0.25", "0.5"))
+    wide = ["0.125", "0.25", "0.5", "0.75", "0.9375"]
+    fresh = run_new(tmp_path, partition, 4, out="wide", extra=("--rth", *wide))
+    assert SE.rescore_saved(tmp_path / "narrow", tmp_path / "re", ["a"], [float(t) for t in wide],
+                            tmp_path / "cache" / "gt") == ["a"]
+    re = json.loads((tmp_path / "re" / "a.json").read_text())
+    assert re["per_scene"] == fresh["per_scene"] and re["summary"] == fresh["summary"]
+    assert re["protocol"]["rth"] == [float(t) for t in wide] and re["best_rth"] == fresh["best_rth"]
+    assert re["checkpoint"] == fresh["checkpoint"]
+    assert re["rescored"]["verified_rth"] == [0.25, 0.5]
+    for intf in SCORED:
+        assert (tmp_path / "re" / "maps" / "a" / f"{intf}.npz").read_bytes() == \
+            (tmp_path / "narrow" / "maps" / "a" / f"{intf}.npz").read_bytes()
+
+
+def test_a_changed_map_is_refused_and_nothing_is_written(tmp_path, world):
+    world.context = TARGET
+    partition = build_world(tmp_path, TARGET)
+    run_new(tmp_path, partition, 4, out="src")
+    gt = tmp_path / "cache" / "gt"
+    with pytest.raises(SystemExit, match="must include"):
+        SE.rescore_saved(tmp_path / "src", tmp_path / "re", ["a"], [0.25, 0.75], gt)
+    f = tmp_path / "src" / "maps" / "a" / f"{SCORED[-1]}.npz"
+    z = dict(np.load(f))
+    z["votes"] = np.zeros_like(z["votes"])
+    np.savez_compressed(f, **z)
+    with pytest.raises(SE.RescoreMismatch, match=SCORED[-1]):
+        SE.rescore_saved(tmp_path / "src", tmp_path / "re", ["a"],
+                         [0.125, 0.25, 0.375, 0.5, 0.75], gt)
+    assert not (tmp_path / "re").exists()
+
+
 def test_cell_minmax_matches_nanmin_and_is_cached(tmp_path):
     grid = np.random.default_rng(1).normal(size=(5, 6, 4, 3)).astype(np.float32)
     grid[2, 3] = np.nan                     # an all-NaN cell

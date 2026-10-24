@@ -85,9 +85,12 @@ def train_argv(spec: Spec, trial: Dict, *, time_budget_hours: float) -> List[str
         argv += ["--lr_patience", sched["lr_patience"], "--lr_factor", sched["lr_factor"]]
     if sched.get("lr_horizon"):
         argv += ["--lr_horizon", sched["lr_horizon"]]
+    # An adopted run keeps the partition path its resume fingerprint holds (the
+    # source study's frozen copy, byte-identical to this study's).
     argv += ["--patience", f["patience"],
              "--patches_dir", to_cluster(spec.raw["patches_dir"]),
-             "--partition_mode", "preset_by_intf", "--partition_file", study_partition(spec),
+             "--partition_mode", "preset_by_intf",
+             "--partition_file", trial.get("partition_file") or study_partition(spec),
              "--patch_size", *f["patch_size"], "--stride", f["stride"]]
     if tuple(g["context_margin"]) != (0, 0):
         argv += ["--context_margin", *g["context_margin"]]

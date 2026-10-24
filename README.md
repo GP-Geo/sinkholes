@@ -28,7 +28,8 @@ pip install -e . && sinkholes <command>
 | `eval-scenes` | full-scene reconstruction → confidence maps, polygons, arrays |
 | `eval-outputs` | object-level metrics + figures over saved eval-scenes outputs |
 | `eval-snapshots` | the same RTh protocol for many checkpoints from one data pass (model selection) |
-| `hpo` | the plain-vs-ctx50 Optuna study: `init`, `approve`, `step` (dry run / `--submit`), `status`, `coverage`, `report`, `panel` -- see [`docs/HPO.md`](docs/HPO.md) |
+| `hpo` | the plain-vs-ctx50 Optuna study: `init`, `adopt`, `approve`, `step` (dry run / `--submit`), `status`, `coverage`, `report`, `panel` -- see [`docs/HPO.md`](docs/HPO.md) |
+| `relabel` | test-set relabelling: QGIS workspace, validation, change review, re-scoring -- see [`docs/RELABELING.md`](docs/RELABELING.md) |
 | `predict` | predict polygons on new raw `.unw` scenes (no ground truth) |
 | `inspect-run` | learning curve + decision-threshold sweep for a finished run |
 | `attention-probe` | where a `tattn_unet`'s attention lands over a long, gappy history |
@@ -55,10 +56,13 @@ Where to look for what:
 **Object-level F1 decides everything.** Patch `val/dice` ranks these models
 *backwards* and is a training-health signal only — see `RESULTS.md` finding ②.
 
-**Where things stand (2026-10-15).** The best model is plain temporal attention at k10 on
+**Where things stand (2026-10-24).** The best model is plain temporal attention at k10 on
 filled history chains, `outputs/2026-10-06/temporal_k10_th350_fill_tattn_posw8_30e`
 (object F1 0.8114 on the 24 generation-5 test scenes). The active work is the HPO study
-in `studies/k10t2026_hpo_v1`, driven by `sinkholes hpo`.
+`k10t2026_hpo_v2`, driven by `sinkholes hpo`: v1 finished its baseline pair, but its
+threshold grid stopped too low, so v2 adopts that pair with a wider grid (`docs/HPO.md` §13).
+Next: `hpo init` and `hpo adopt` on WEXAC, which create `studies/k10t2026_hpo_v2`, then the
+`shared` phase.
 
 ## Layout
 

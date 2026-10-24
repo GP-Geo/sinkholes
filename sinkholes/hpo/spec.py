@@ -4,7 +4,9 @@ A study is one JSON file (``assets/hpo/*.json``) naming the data, the two
 geometries, the fixed training configuration, the search space, the shared
 designs, the budget, the evaluation protocol and the resources. It is hashed
 into the ledger at ``init`` and every later controller call checks the hash,
-so a study cannot be quietly re-specified halfway through.
+so a study cannot be quietly re-specified halfway through. A changed protocol
+is a new study; its optional ``adopt`` section names finished trials of an
+earlier study it takes over (``sinkholes hpo adopt``).
 
 Paths: the spec holds cluster paths (``/home/labs/rudich/...``). On the Mac the
 same files are under ``/Volumes/rudich/...``; :func:`localize` maps between the
@@ -179,6 +181,13 @@ def validate(spec: Spec) -> None:
     ev = spec.evaluation
     for key in ("initial_epochs", "promoted_epochs"):
         parse_epoch_spec(ev[key])
+    if list(ev["rth"]) != sorted(set(ev["rth"])) or not all(0 < t < 1 for t in ev["rth"]):
+        raise SpecError("evaluation.rth must be increasing, each strictly between 0 and 1")
+    adopt = r.get("adopt")
+    if adopt is not None and (not isinstance(adopt.get("from_spec"), str)
+                              or not isinstance(adopt.get("trials"), list) or not adopt["trials"]):
+        raise SpecError("'adopt' needs 'from_spec' (the source study's spec.json) and a "
+                        "non-empty list of 'trials'")
     b = spec.budget
     if max(parse_epoch_spec(ev["initial_epochs"])) > b["initial_epochs"]:
         raise SpecError("an initial evaluation epoch exceeds the initial budget")

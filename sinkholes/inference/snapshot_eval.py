@@ -569,6 +569,86 @@ def load_net(path, device, patch_size, arch: Optional[str] = None):
     return net, tuple(context), loaded.architecture
 
 
+# -- re-scoring saved maps -------------------------------------------------------------------
+
+class RescoreMismatch(SystemExit):
+    """A saved map no longer reproduces the scores it was saved with."""
+
+
+def _same(a, b) -> bool:
+    if isinstance(a, float) and isinstance(b, float) and np.isnan(a) and np.isnan(b):
+        return True
+    return a == b
+
+
+def rescore_saved(src_dir, out_dir, labels: Sequence[str], rth: Sequence[float],
+                  gt_dir) -> List[str]:
+    """Score a finished evaluation's saved vote maps at the thresholds ``rth``.
+
+    A map holds a scene's raw votes and counts, so another threshold needs no
+    model and no data grid -- only the confidence map and the cached GT. Every
+    threshold the source scored must come out identical, field for field, for
+    every scene and label before anything is written, so a map or GT file that
+    changed since cannot pass. Writes ``<label>.json`` (the source's header and
+    checkpoint, the new per-scene results and summary, and a ``rescored``
+    record) and a copy of the maps into ``out_dir``. Returns the labels written.
+    """
+    import shutil
+    from dataclasses import replace
+
+    src_dir, out_dir, gt_dir = Path(src_dir), Path(out_dir), Path(gt_dir)
+    rth = tuple(float(t) for t in rth)
+    results, gts = {}, {}
+    for label in labels:
+        src_file = src_dir / f"{label}.json"
+        src = json.loads(src_file.read_text())
+        fields = {k: v for k, v in src["protocol"].items() if k != "engine"}
+        old = Protocol(**fields)
+        if not set(old.rth) <= set(rth):
+            raise SystemExit(f"{src_file}: the thresholds {list(rth)} must include the scored "
+                             f"{list(old.rth)}, which the maps are checked against")
+        protocol = replace(old, rth=rth)
+        per_scene = {}
+        for intf in src["scenes"]:
+            if intf not in gts:
+                with np.load(gt_dir / f"{intf}_s{old.data_stride}.npz") as z:
+                    gt, crop, canvas = z["gt"], z["crop"], z["canvas"]
+                gts[intf] = (gt, gt_geometry(gt, old.buffer), crop, canvas)
+            gt, gt_geo, crop, canvas = gts[intf]
+            with np.load(src_dir / "maps" / label / f"{intf}.npz") as z:
+                if not (np.array_equal(z["crop"], crop) and np.array_equal(z["canvas"], canvas)):
+                    raise RescoreMismatch(f"{label} {intf}: the map and the cached GT disagree "
+                                          f"on the scored crop")
+                confidence = confidence_from_votes(z["votes"], z["counts"])
+            result = score_maps(gt_geo, gt, confidence, protocol)
+            for t in old.rth:
+                ref, got = src["per_scene"][intf][str(t)], result[str(t)]
+                bad = [k for k in ref if not _same(got.get(k), ref[k])]
+                if bad:
+                    raise RescoreMismatch(
+                        f"{label} {intf} RTh {t}: the saved map gives {bad[0]} "
+                        f"{got.get(bad[0])!r}, the source recorded {ref[bad[0]]!r} -- nothing written")
+            per_scene[intf] = result
+            log.info(f"{label} {intf}: re-scored at {len(rth)} thresholds")
+        summary = aggregate(per_scene, rth)
+        best = max(rth, key=lambda t: summary[str(t)]["f1"] or -1)
+        results[label] = {
+            **src, "protocol": protocol.key(), "per_scene": per_scene, "summary": summary,
+            "best_rth": best, "best_f1": summary[str(best)]["f1"],
+            "finished": datetime.now().isoformat(timespec="seconds"),
+            "rescored": {"from": str(src_file), "from_sha256": sha256_of(src_file),
+                         "maps": str(src_dir / "maps" / label), "gt": str(gt_dir),
+                         "verified_rth": list(old.rth), "engine": ENGINE_VERSION}}
+
+    for label, rec in results.items():
+        maps = out_dir / "maps" / label
+        maps.mkdir(parents=True, exist_ok=True)
+        for intf in rec["scenes"]:
+            shutil.copy2(src_dir / "maps" / label / f"{intf}.npz", maps / f"{intf}.npz")
+        _atomic_json(out_dir / f"{label}.json", rec)
+    return list(results)
+
+
 # -- the command -----------------------------------------------------------------------------
 
 def add_arguments(p: argparse.ArgumentParser) -> None:

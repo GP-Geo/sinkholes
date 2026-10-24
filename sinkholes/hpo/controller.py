@@ -7,6 +7,8 @@
     sinkholes hpo step     --spec S            DRY RUN: collect results, list next actions
     sinkholes hpo step     --spec S --submit   ... and submit the approved ones
     sinkholes hpo collect  --spec S            only read finished evaluations into the ledger
+    sinkholes hpo adopt    --spec S            take over the finished trials the spec's
+                                                'adopt' section names (see :func:`adopt`)
 
 Phases, in the order the study reaches them:
 
@@ -574,6 +576,143 @@ def execute(spec: Spec, ledger: Ledger, actions: List[dict], submit: bool,
     return lines
 
 
+# -- adoption --------------------------------------------------------------------------------
+
+#: What an adopting study's spec may change relative to its source: names,
+#: places, prose, the adoption itself -- and evaluation.rth, which may only grow
+#: (the source's thresholds are what the re-scored maps are checked against).
+ADOPT_MAY_DIFFER = ("study", "root", "description", "adopt")
+
+#: Trial fields that must agree for a finished run to stand for the new trial.
+ADOPT_SAME = ("geometry", "origin", "phase", "params", "seed", "target_epochs",
+              "snapshot_epochs", "eval_batches", "budgets", "schedule", "design_index")
+
+
+def _comparable(raw: dict) -> dict:
+    out = {k: v for k, v in raw.items() if k not in ADOPT_MAY_DIFFER}
+    out["evaluation"] = {k: v for k, v in raw["evaluation"].items() if k != "rth"}
+    return out
+
+
+def adoption_problems(spec: Spec, src: Spec) -> List[str]:
+    """Why ``src``'s runs could not stand for this study's (empty when they can)."""
+    a, b = _comparable(src.raw), _comparable(spec.raw)
+    probs = [f"spec section {k!r} differs" for k in sorted(set(a) | set(b)) if a.get(k) != b.get(k)]
+    if not set(src.evaluation["rth"]) <= set(spec.evaluation["rth"]):
+        probs.append(f"evaluation.rth {spec.evaluation['rth']} drops some of the source's "
+                     f"{src.evaluation['rth']}")
+    for which in ("partition", "test_partition"):
+        mine, theirs = (Path(localize(J.study_partition(s, which))) for s in (spec, src))
+        if not mine.exists() or mine.read_bytes() != theirs.read_bytes():
+            probs.append(f"the frozen {which} {mine} is not byte-identical to {theirs}")
+    return probs
+
+
+def _adopt_trial(spec: Spec, src: Spec, t: dict, s: dict) -> List[str]:
+    from ..inference.snapshot_eval import rescore_saved, sha256_of
+
+    key = t["key"]
+    diff = [f for f in ADOPT_SAME if t.get(f) != s.get(f)]
+    if diff:
+        raise LedgerError(f"{key}: {diff} differ from {src.name}'s {key}")
+    if t["jobs"] or t["evals"] or t["scores"] or t["told"]:
+        raise LedgerError(f"{key} already has jobs or scores here -- it cannot be adopted")
+    st = run_status(s)
+    if st.get("state") != "complete" or int(st.get("completed_epoch") or 0) != s["target_epochs"]:
+        raise LedgerError(f"{src.name} {key} is not complete ({st.get('state')}, "
+                          f"{st.get('completed_epoch')}/{s['target_epochs']})")
+    pending = [n for n, b in s["evals"].items() if not b.get("collected")]
+    if pending or len(s["evals"]) != len(s["eval_batches"]):
+        raise LedgerError(f"{src.name} {key}: evaluations {pending or 'missing'} not collected")
+    for e, sha in s["checkpoint_sha256"].items():
+        if sha256_of(localize(J.snapshot_file(s, int(e)))) != sha:
+            raise LedgerError(f"{src.name} {key}: epoch {e}'s snapshot is not the one it scored")
+
+    evals = {}
+    for name, b in s["evals"].items():
+        out_dir = eval_dir(spec, t, b["epochs"])
+        rescore_saved(localize(b["out_dir"]), localize(out_dir), [f"e{e:03d}" for e in b["epochs"]],
+                      spec.evaluation["rth"], localize(f"{J.cache_dir(src)}/gt"))
+        evals[name] = {"epochs": b["epochs"], "out_dir": out_dir, "rescored_from": b["out_dir"]}
+    # The run is shared, not copied: a promotion resumes it in place, under the
+    # name and partition path its resume fingerprint was written with.
+    for f in ("run_dir", "resume_path", "resume_prev_path", "slug"):
+        t[f] = s[f]
+    t["partition_file"] = J.study_partition(src)
+    t["evals"] = evals
+    t["adopted_from"] = {"study": src.name, "root": src.root, "spec_sha256": src.sha256,
+                         "time": now(), "jobs": s["jobs"],
+                         "checkpoint_sha256": s["checkpoint_sha256"],
+                         "objectives": s["objectives"]}
+    return [f"{key}: adopted {src.name}'s run {s['run_dir']}; evaluations {sorted(evals)} "
+            f"re-scored at RTh {spec.evaluation['rth']}"]
+
+
+def _copy_missing(src_dir: Path, dst_dir: Path) -> int:
+    n = 0
+    for f in sorted(p for p in src_dir.rglob("*") if p.is_file()):
+        to = dst_dir / f.relative_to(src_dir)
+        if not to.exists():
+            to.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, to)
+            n += 1
+    return n
+
+
+def adopt(spec: Spec) -> List[str]:
+    """Take over the finished trials the spec's ``adopt`` section names.
+
+    For a protocol change that leaves training untouched (so far: a wider RTh
+    list). Each named trial of the source study must be complete, collected,
+    and configured exactly as its namesake here, and the two specs may differ
+    only as :data:`ADOPT_MAY_DIFFER` allows. The run directory is shared, not
+    copied; its evaluations are re-scored from their saved vote maps at this
+    study's thresholds -- no GPU, and every threshold the source scored must
+    reproduce exactly. The source's caches are copied, and the source study is
+    marked superseded: its controller then refuses every change, so nothing
+    there can touch the runs this study now owns.
+
+    Idempotent: adopted trials are skipped. Collection and the Optuna tell
+    happen at the next ``step --submit``, as for any finished evaluation.
+    """
+    a = spec.raw.get("adopt")
+    if not a:
+        raise LedgerError(f"{spec.path} has no 'adopt' section")
+    src = load_spec(a["from_spec"])
+    probs = adoption_problems(spec, src)
+    if probs:
+        raise LedgerError(f"cannot adopt from {src.name}: " + "; ".join(probs))
+    notes = []
+    ledger = open_ledger(spec)
+    with ledger.locked():
+        open_ledger(spec)
+        src_ledger = Ledger(src.root)
+        with src_ledger.locked(allow_superseded=True):
+            open_ledger(src)
+            sup = src_ledger.data.get("superseded_by")
+            if sup and sup["study"] != spec.name:
+                raise LedgerError(f"{src.name} was already superseded by {sup['study']}")
+            for key in a["trials"]:
+                t = ledger.trial(key)
+                if t.get("adopted_from"):
+                    notes.append(f"{key}: already adopted")
+                    continue
+                notes += _adopt_trial(spec, src, t, src_ledger.trial(key))
+                ledger.save()
+                ledger.event("adopt", trial=key, from_study=src.name, run_dir=t["run_dir"],
+                             evals=t["evals"])
+            n = _copy_missing(Path(localize(J.cache_dir(src))), Path(localize(J.cache_dir(spec))))
+            notes.append(f"copied {n} cache file(s) from {src.name}")
+            if not sup:
+                src_ledger.data["superseded_by"] = {
+                    "study": spec.name, "root": spec.root, "time": now(),
+                    "adopted": list(a["trials"]), "note": a.get("note", "")}
+                src_ledger.save()
+                src_ledger.event("superseded", by=spec.name, adopted=list(a["trials"]))
+                notes.append(f"{src.name} is now closed (superseded by {spec.name})")
+    return notes
+
+
 # -- status ----------------------------------------------------------------------------------
 
 def status_rows(spec: Spec, ledger: Ledger) -> List[dict]:
@@ -671,6 +810,10 @@ def step(spec: Spec, *, submit: bool, only=(), retry=(), break_lock=False,
                              coverage_ok=_coverage_gate(spec) if coverage_check else None)
             ledger.save()
     else:
+        sup = ledger.data.get("superseded_by")
+        if sup:
+            lines.append(f"SUPERSEDED by {sup['study']} on {sup['time']}: this study is closed "
+                         f"and `--submit` is refused; the lines below are hypothetical")
         lines += [f"(dry run) {n}" for n in collect(spec, ledger, tell=False)]
         lines += [f"(dry run) {n}" for n in transitions(spec, ledger, apply=False)]
         state = lsf_snapshot(ledger)

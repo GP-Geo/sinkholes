@@ -29,6 +29,11 @@ by object against the mapped sinkhole polygons.
   Thresholds 0.125 / 0.25 / 0.375 / 0.5. Numbers are the best of the four, at the strict
   Intersection Tolerance `ith0.7_b5` unless marked; the soft `ith0.5_b10` compresses every
   table into a band ~0.02 wide, so always quote the tolerance.
+- **The four thresholds can stop too low.** On the t2026 val scenes the k10 baseline pair
+  scored best at the top of the grid, 0.5, and kept improving above it: plain 0.7329 → 0.7568
+  at 0.875, ctx50 0.7040 → 0.7401 at 0.9375, where all 16 tiles agree
+  ([`HPO.md`](HPO.md) §13). The HPO study now scores every 1/16 step from 0.5 to 0.9375. Elsewhere on this page a
+  number is the best of the four, which may understate a model that over-predicts.
 - **Compare within one scene list.** A partition generation changes the scenes *and* the
   scored ground ([`assets/PARTITIONS.md`](../assets/PARTITIONS.md)). Re-average a model's
   saved per-scene results over the other list instead.
@@ -217,15 +222,17 @@ paper, never to choose a model.
 ## Open
 
 1. **The HPO study** ([`HPO.md`](HPO.md)): plain vs ctx50 temporal attention at k10 on the
-   t2026 split, tuned and seed-repeated, with 300-epoch runs. The baseline pair has trained
-   (best val/dice plain 0.6189 @ epoch 15, ctx50 0.6356 @ 17 — patch level, ranks nothing)
-   and the engine check passed; next is `hpo step --submit` for their scene evaluations.
+   t2026 split, tuned and seed-repeated, with 300-epoch runs. The baseline pair is trained
+   and scored: val objective plain **0.7568** @ RTh 0.875, ctx50 0.7401 @ 0.9375 (best
+   val/dice was the other way round, 0.6189 vs 0.6356). Since 2026-10-18 the study is v2
+   (`k10t2026_hpo_v2`, every 1/16 step from 0.5 to 0.9375), which adopts that pair. Next: `hpo init`
+   and `hpo adopt` on WEXAC, then `approve --phase shared`.
    Its plain baseline is the leader's configuration on the t2026 split, so scoring its
    chosen checkpoint on the 10 test scenes answers whether training up to 2025 helps (bar:
    0.8660).
 2. **The LiDAR control** and **extending `lidar_intf_mask.txt` past 2024-06-05** (above).
 3. **Deeper history.** The data layer materialises every sample's full stack, so host
-   memory grows with T (ctx50 k10 already peaked at 206 GB). A deduplicated frame store —
+   memory grows with T (ctx50 k10 peaked at 298 GB in the HPO baseline). A deduplicated frame store —
    each grid loaded once, samples pointing at rows — comes first.
 4. **A context-checkpoint attention probe**, folded into `sinkholes attention-probe`.
 5. **The hybrid** (ConvLSTM + attention) won at neither operating point and 3 of 4 August

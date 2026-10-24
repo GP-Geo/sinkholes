@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
-DEFAULT_SPEC = "assets/hpo/k10t2026_plain_vs_ctx50.json"
+DEFAULT_SPEC = "assets/hpo/k10t2026_plain_vs_ctx50_v2.json"
 
 
 def add_arguments(p: argparse.ArgumentParser) -> None:
@@ -40,6 +41,10 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     s.add_argument("--no_coverage_check", action="store_true")
 
     cmd("collect", "read finished evaluations into the ledger and Optuna (submits nothing)")
+
+    cmd("adopt", "take over the finished trials the spec's 'adopt' section names: share their "
+                 "runs, re-score their saved maps at this study's RTh, close the source study "
+                 "(CPU only, submits nothing)")
 
     s = cmd("coverage", "check every grid both geometries need; print generation commands")
     s.add_argument("--splits", nargs="+", default=["val", "test"], choices=["val", "test"])
@@ -113,8 +118,16 @@ def main(args) -> None:
             print(json.dumps(rows, indent=1))
         else:
             print(f"study {spec.name}  root {ledger.root}  repo {ledger.data['repo']}")
+            sup = ledger.data.get("superseded_by")
+            if sup:
+                print(f"SUPERSEDED by {sup['study']} on {sup['time']} ({sup['root']}): closed")
             print(f"approved phases: {ledger.data.get('approved_phases') or 'none'}")
             print(C.format_table(rows))
+            adopted = {t["key"]: t["adopted_from"]["study"] for t in ledger.trials.values()
+                       if t.get("adopted_from")}
+            if adopted:
+                print(f"adopted from {', '.join(sorted(set(adopted.values())))} (run shared, "
+                      f"re-scored from saved maps): {', '.join(adopted)}")
             for d in ledger.data.get("decisions", []):
                 print(f"decision {d['time']}: {d['what']} {d['geometry']} "
                       f"{d.get('trials') or d.get('config_of') or ''}")
@@ -142,6 +155,13 @@ def main(args) -> None:
             notes = C.collect(spec, ledger, tell=True)
             ledger.save()
         print("\n".join(notes) if notes else "nothing new")
+        return
+
+    if step == "adopt":
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+        print("\n".join(C.adopt(spec)))
+        print("Next: `step` (dry run), then `step --submit` collects the adopted evaluations "
+              "and tells Optuna.")
         return
 
     if step == "coverage":

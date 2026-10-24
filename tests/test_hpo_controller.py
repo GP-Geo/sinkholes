@@ -27,6 +27,8 @@ from sinkholes.hpo import jobs as J
 from sinkholes.hpo import objective as O
 from sinkholes.hpo.ledger import Ledger, LedgerError
 from sinkholes.hpo.spec import load_spec
+from sinkholes.inference import snapshot_eval as SE
+from sinkholes.inference.snapshot_eval import sha256_of
 
 REPO = Path(__file__).resolve().parents[1]
 RTH = ["0.125", "0.25", "0.375", "0.5"]
@@ -144,7 +146,8 @@ def run_jobs(spec, lsf_):
                                   "background_area": 50.0}
                 (out / f"e{e:03d}.json").write_text(json.dumps({
                     "summary": summary, "per_scene": {},
-                    "checkpoint": {"path": J.snapshot_file(t, e), "sha256": "x" * 64}}))
+                    "checkpoint": {"path": J.snapshot_file(t, e),
+                                   "sha256": sha256_of(J.snapshot_file(t, e))}}))
                 (out / "maps" / f"e{e:03d}").mkdir(exist_ok=True)
                 (out / "maps" / f"e{e:03d}" / "s.npz").write_bytes(b"m")
         lsf_.set(jid, "DONE")
@@ -419,6 +422,134 @@ def test_the_full_protocol(spec, lsf):
     from sinkholes.hpo.report import report
     out = report(spec)
     assert "report ->" in out
+
+
+# -- adoption by a successor study ---------------------------------------------------------
+
+PAIR = ("plain/s0", "ctx50/s0")
+RTH2 = [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 0.9375]
+
+
+def successor(spec, tmp_path, **changes):
+    """The same study with a wider RTh list, adopting the baseline pair."""
+    raw = json.loads(json.dumps(spec.raw))
+    raw.update(study="k10t2026_hpo_v2", root=str(tmp_path / "study2"))
+    raw["evaluation"]["rth"] = RTH2
+    raw["adopt"] = {"from_spec": str(Path(spec.root) / "spec.json"), "trials": list(PAIR)}
+    raw.update(changes)
+    path = tmp_path / "spec2.json"
+    path.write_text(json.dumps(raw))
+    return load_spec(path)
+
+
+def fake_rescore(src_dir, out_dir, labels, rth, gt_dir):
+    """rescore_saved's contract (tested in test_snapshot_eval) on run_jobs' fake results."""
+    (Path(out_dir) / "maps").mkdir(parents=True, exist_ok=True)
+    for label in labels:
+        src = json.loads((Path(src_dir) / f"{label}.json").read_text())
+        summary = dict(src["summary"])
+        for r in rth:
+            if str(r) not in summary:   # the new thresholds beat v1's best, the widest most
+                summary[str(r)] = dict(src["summary"]["0.25"],
+                                       f1=src["summary"]["0.25"]["f1"] + 0.05 * r)
+        (Path(out_dir) / f"{label}.json").write_text(json.dumps(dict(src, summary=summary)))
+    return list(labels)
+
+
+@pytest.fixture
+def scored_pair(spec, lsf):
+    C.init(spec, spec.path)
+    C.approve(spec, ["baseline"])
+    drive(spec, lsf)
+    assert all(C.E30 in ledger_of(spec).trial(k)["objectives"] for k in PAIR)
+    return ledger_of(spec)
+
+
+def test_a_successor_adopts_the_baseline_pair_and_closes_the_source(
+        spec, tmp_path, lsf, scored_pair, monkeypatch):
+    from sinkholes.hpo import optuna_io as Q
+    from sinkholes.training.train import add_arguments
+
+    v1 = scored_pair
+    (Path(spec.root) / "cache" / "gt").mkdir(parents=True)
+    (Path(spec.root) / "cache" / "gt" / "x_s4.npz").write_bytes(b"gt")
+    new = successor(spec, tmp_path)
+    C.init(new, new.path)
+    monkeypatch.setattr(SE, "rescore_saved", fake_rescore)
+    notes = C.adopt(new)
+    assert sum("adopted k10t2026_hpo_v1's run" in n for n in notes) == 2
+    assert (Path(new.root) / "cache" / "gt" / "x_s4.npz").read_bytes() == b"gt"
+    led = ledger_of(new)
+    for k in PAIR:
+        t, s = led.trial(k), v1.trial(k)
+        assert (t["run_dir"], t["resume_path"], t["slug"]) == (s["run_dir"], s["resume_path"], s["slug"])
+        assert t["adopted_from"]["study"] == "k10t2026_hpo_v1" and t["jobs"] == []
+
+    # the source is closed for every change, and says so
+    with pytest.raises(LedgerError, match="superseded by k10t2026_hpo_v2"):
+        C.approve(spec, ["shared"])
+    with pytest.raises(LedgerError, match="superseded"):
+        step(spec, submit=True)
+    assert "SUPERSEDED" in step(spec, submit=False)[0]
+
+    # the adopted pair needs no job: one step collects it at the new thresholds and tells Optuna
+    C.approve(new, ["baseline"])
+    lines = step(new, submit=True)
+    assert not any("SUBMITTED" in l for l in lines)
+    assert not any(j["name"].startswith("k10t2026_hpo_v2") for j in lsf.jobs().values())
+    led = ledger_of(new)
+    for k in PAIR:
+        t = led.trial(k)
+        o = t["objectives"]["e30"]
+        assert o["rth"] == 0.9375 and sorted(map(float, o["by_rth"])) == RTH2
+        assert o["value"] > v1.trial(k)["objectives"]["e30"]["value"]
+        st = Q.open_study(new, t["geometry"], "e30")
+        assert st.trials[t["optuna"]["number"]].value == pytest.approx(o["value"])
+    assert all("already adopted" in n for n in C.adopt(new) if n.startswith(PAIR))
+
+    # the shared phase runs in the successor, under its own names
+    C.approve(new, ["shared"])
+    lines = step(new, submit=False)
+    assert sum("WOULD SUBMIT (shared)" in l and "k10t2026_hpo_v2-" in l for l in lines) == 10
+
+    # a promotion resumes the adopted run with the fingerprint it was written with
+    t = led.trial("plain/s0")
+    C.promote(new, t)
+    a = _parse(add_arguments, J.train_argv(new, t, time_budget_hours=22.5)[4:])
+    assert a.partition_file == J.study_partition(spec) != J.study_partition(new)
+    assert (a.resume, a.job_name, a.epochs) == (v1.trial("plain/s0")["run_dir"],
+                                                v1.trial("plain/s0")["slug"], 60)
+
+
+def test_adoption_refuses_a_different_protocol(spec, tmp_path, lsf):
+    C.init(spec, spec.path)
+    longer = successor(spec, tmp_path, budget=dict(spec.budget, initial_epochs=31))
+    with pytest.raises(LedgerError, match="'budget' differs"):
+        C.adopt(longer)
+    narrower = successor(spec, tmp_path)
+    narrower.raw["evaluation"]["rth"] = [0.25, 0.5, 0.9375]
+    with pytest.raises(LedgerError, match="drops some"):
+        C.adopt(narrower)
+
+
+def test_only_a_finished_untouched_run_is_adopted(spec, tmp_path, lsf, monkeypatch):
+    C.init(spec, spec.path)
+    new = successor(spec, tmp_path)
+    C.init(new, new.path)
+    monkeypatch.setattr(SE, "rescore_saved", fake_rescore)
+    with pytest.raises(LedgerError, match="not complete"):
+        C.adopt(new)
+    assert "superseded_by" not in ledger_of(spec).data      # a refusal closes nothing
+
+
+def test_a_snapshot_changed_since_it_was_scored_is_refused(spec, tmp_path, lsf, scored_pair,
+                                                           monkeypatch):
+    torch.save({"w": torch.tensor([-1.0])}, J.snapshot_file(scored_pair.trial("plain/s0"), 20))
+    new = successor(spec, tmp_path)
+    C.init(new, new.path)
+    monkeypatch.setattr(SE, "rescore_saved", fake_rescore)
+    with pytest.raises(LedgerError, match="epoch 20's snapshot"):
+        C.adopt(new)
 
 
 # -- objective and pattern -----------------------------------------------------------------
