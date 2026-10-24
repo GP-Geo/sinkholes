@@ -2,7 +2,7 @@
 object-level precision/recall.
 
 Run as ``sinkholes test-patches``. Reports the mean of per-patch Dice (macro —
-the harsher number; ``inspect-run`` reports the pooled micro variant).
+the harsher number than the pooled micro variant).
 
 The split comes from one of two sources:
 

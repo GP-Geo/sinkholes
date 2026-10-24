@@ -228,7 +228,7 @@ function of the offset from the present. A model trained at `--k_prevs 5` runs a
 | `random_by_patch` | individual patches | overlapping patches leak across splits — optimistic |
 | `random_by_intf` | whole interferograms | recommended; `--seed` makes the shuffle reproducible |
 | `spatial` | latitude line (`--thresh_lat`) within each interferogram | train north of it, val/test south |
-| `preset_by_intf` | `--partition_file partition_*.json` | fixed split from `make-partition` |
+| `preset_by_intf` | `--partition_file partition_*.json` | fixed split from `make-benchmark-partitions` |
 
 Add-ons: `--preset_test_val_21` (fixed 2021 hold-out for val+test);
 `--test_data_to_exclude <old test pickle>` (pin the test split to a previous run's
@@ -478,9 +478,7 @@ adds them by hand. Everything, primary included, is also reported under
 
 Crop the canvas with `--aoi_from_partition <partition.json>` (preferred) or
 `--aoi_window`; it **must** match the window `eval-scenes` predicted with or the metrics
-cover different ground than the predictions. `--legacy_south_half` reproduces the pre-AOI
-rule that scored only the northern half of a South-frame canvas, kept so archived
-evaluations re-score exactly as they were.
+cover different ground than the predictions.
 
 **In practice** both stages run through `scripts/eval/run_eval.sh` (one `bsub` job,
 `GEN` / `GROUP` / `SPLIT` pick the partition, defaults score the leader under the current
@@ -497,16 +495,11 @@ metrics as `eval-scenes` + `eval-outputs`. The engine check (LSF 797689) found i
 bit-identical to them at `--tile_batch 1`; at 32, recall is identical and precision within
 4.2e-5. It is what the HPO study scores with.
 
-### Inspect a finished run
+### Learning curves of a finished run
 
 ```bash
-sinkholes inspect-run outputs/<run_dir> [epoch]     # curve + threshold sweep
-sinkholes curves outputs/<run_dir>                  # regenerate curves.png only
+sinkholes curves outputs/<run_dir>                  # regenerate curves.png
 ```
-
-The sweep reports Dice over pooled test pixels (micro) — quote `test-patches`' macro
-number when comparing runs. The default 0.5 threshold is rarely optimal; on the runs to
-date the best pooled Dice sat at 0.70 (single-frame U-Net) to 0.85 (temporal U-Net).
 
 ## (4) Predict on new scenes
 

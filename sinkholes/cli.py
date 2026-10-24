@@ -23,9 +23,6 @@ _COMMANDS = {
                         "fill nonz_num counts into the coordinate dictionary"),
     "clean-patches": ("sinkholes.dataprep.clean_patches", "add_arguments", "main",
                       "drop no-data / edge-sliver mask polygons (-> cleaned/)"),
-    "make-partition": ("sinkholes.dataprep.partition", "add_make_partition_arguments",
-                       "make_partition_main",
-                       "write a reproducible train/val partition JSON"),
     "make-benchmark-partitions": ("sinkholes.dataprep.benchmark_partitions", "add_arguments",
                                   "main",
                                   "write the geo/temporal benchmark partitions (AOI + cut)"),
@@ -45,8 +42,6 @@ _COMMANDS = {
                        "score many checkpoints on whole scenes from one data pass (RTh protocol)"),
     "predict": ("sinkholes.inference.predict", "add_arguments", "main",
                 "predict polygons on new raw .unw scenes (no ground truth)"),
-    "inspect-run": ("sinkholes.inference.inspect_run", "add_arguments", "main",
-                    "learning curve + threshold sweep for a finished run"),
     "attention-probe": ("sinkholes.inference.attention_probe", "add_arguments", "main",
                         "where a tattn_unet's attention lands when given a long, gappy history"),
     # ground-truth relabelling of the test set

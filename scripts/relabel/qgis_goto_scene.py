@@ -254,7 +254,8 @@ def _set_flag(value, note):
         print("select the polygon(s) in working_gt first (Select Features tool)")
         return
     if work.fields().indexOf("qc_flag") < 0:
-        raise RuntimeError("working_gt has no qc_flag field yet: run 'sinkholes relabel migrate'")
+        raise RuntimeError("working_gt has no qc_flag field: the workspace predates the QC "
+                           "fields (`sinkholes relabel init` writes them)")
     started = not work.isEditable()
     if started:
         work.startEditing()

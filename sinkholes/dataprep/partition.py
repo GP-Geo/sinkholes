@@ -180,62 +180,6 @@ def load_partition_window(path, split: str = "val"):
     return tuple(float(v) for v in box)
 
 
-def add_make_partition_arguments(p) -> None:
-    p.add_argument("--patches_dir", type=str, required=True,
-                   help="root holding the data_patches_* tree")
-    p.add_argument("--patch_size", nargs=2, type=int, default=[200, 100], metavar=("H", "W"))
-    p.add_argument("--strides_per_patch", type=int, default=2)
-    p.add_argument("--days_diff", type=int, default=11)
-    p.add_argument("--val_percent", type=int, default=10)
-    p.add_argument("--seed", type=int, default=None)
-    p.add_argument("--out_path", type=str, default=None,
-                   help="partition JSON to write (default: partition_<ts>.json)")
-
-
-def make_partition_main(args) -> None:
-    """Write a train/val partition JSON, splitting whole interferograms so the
-    validation side holds ~``--val_percent`` of the positive patches.
-
-    Run as ``sinkholes make-partition``; the result feeds
-    ``--partition_mode preset_by_intf --partition_file <json>``.
-    """
-    import logging
-    import os
-    from datetime import datetime
-
-    from .patchify import patch_dir_name, patch_file_name
-
-    logging.basicConfig(level=logging.INFO)
-    if args.seed is not None:
-        random.seed(args.seed)
-    H, W = args.patch_size
-    in_path = os.path.join(args.patches_dir,
-                           patch_dir_name("data", H, W, args.strides_per_patch, args.days_diff))
-    if not os.path.exists(in_path):
-        raise SystemExit(f"patch directory not found: {in_path}")
-
-    ids = discover_intf_ids(in_path, nonz=False)
-    random.shuffle(ids)
-    logging.info(f"{len(ids)} interferograms, shuffled")
-
-    counts = [
-        np.load(os.path.join(in_path, patch_file_name("data", i, H, W, args.strides_per_patch,
-                                                      nonz=True)), mmap_mode="r").shape[0]
-        for i in ids
-    ]
-    total = sum(counts)
-    cut = int(np.where(np.cumsum(counts) / total >= (100 - args.val_percent) / 100)[0][0])
-    partition = {"train": ids[: cut + 1], "val": ids[cut + 1 :]}
-
-    out_path = args.out_path or f"partition_{datetime.now().strftime('%d_%m_%Hh%M')}.json"
-    with open(out_path, "w") as fh:
-        json.dump(partition, fh, indent=4)
-    val_share = sum(counts[cut + 1 :]) / total
-    logging.info(f"wrote {out_path}: {len(partition['train'])} train / "
-                 f"{len(partition['val'])} val interferograms "
-                 f"({100 * val_share:.1f}% of positive patches in val)")
-
-
 def split_nonoverlap_patches(
     image_grid: np.ndarray,
     mask_grid: np.ndarray,

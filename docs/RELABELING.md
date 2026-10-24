@@ -287,9 +287,6 @@ Flags travel everywhere:
   `recall_new_unflagged`, plus `flagged_gt_area_share`. That measures how much of the miss
   rate comes from the hard polygons, without removing them.
 
-The fields were added to an existing working file with `sinkholes relabel migrate` (QGIS
-closed; additive; backup in `history/`).
-
 `edit_status` is a declaration. **`relabel diff` decides what changed from the geometry**
 and reports any declaration it disagrees with.
 

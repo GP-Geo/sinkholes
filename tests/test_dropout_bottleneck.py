@@ -116,7 +116,7 @@ def test_rejects_a_rate_outside_zero_to_one(rate):
 
 def test_inference_is_unaffected_at_any_rate():
     """Every inference path calls eval() (scenes, patch_test, predict,
-    reconstruct, inspect_run, attention_probe), so a dropout checkpoint must
+    reconstruct, attention_probe), so a dropout checkpoint must
     predict exactly what the same weights predict without dropout."""
     plain, dropped = make_model(0.0), make_model(0.5)
     dropped.load_state_dict(plain.state_dict())

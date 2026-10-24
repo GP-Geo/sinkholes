@@ -20,7 +20,6 @@ pip install -e . && sinkholes <command>
 | `count-positives` | fill per-interferogram positive-patch counts into the dictionary |
 | `clean-patches` | optional QC: drop no-data / edge-sliver mask polygons |
 | `merge-lidar` | merge the per-year LiDAR coverage shapefiles into one |
-| `make-partition` | write a reproducible train/val partition JSON |
 | `make-benchmark-partitions` | write the geo/temporal benchmark partitions (AOI + cut) |
 | `prepare-local-subset` | make a partial patch download training-ready |
 | `train` | train UNet / UNet+attention / AttentionUNet / ConvLSTM / temporal-attention U-Net |
@@ -31,7 +30,6 @@ pip install -e . && sinkholes <command>
 | `hpo` | the plain-vs-ctx50 Optuna study: `init`, `adopt`, `approve`, `step` (dry run / `--submit`), `status`, `coverage`, `report`, `panel` -- see [`docs/HPO.md`](docs/HPO.md) |
 | `relabel` | test-set relabelling: QGIS workspace, validation, change review, re-scoring -- see [`docs/RELABELING.md`](docs/RELABELING.md) |
 | `predict` | predict polygons on new raw `.unw` scenes (no ground truth) |
-| `inspect-run` | learning curve + decision-threshold sweep for a finished run |
 | `attention-probe` | where a `tattn_unet`'s attention lands over a long, gappy history |
 | `curves` | regenerate `curves.png` for a finished run |
 | `architectures` | list the registered model architectures |

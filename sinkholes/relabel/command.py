@@ -21,7 +21,6 @@ _STEPS = {
     "review": "sinkholes.relabel.review",
     "eval": "sinkholes.relabel.evaluate",
     "predictions": "sinkholes.relabel.predictions",
-    "migrate": "sinkholes.relabel.migrate",
 }
 
 

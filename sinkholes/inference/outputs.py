@@ -83,10 +83,6 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
                         "--aoi_window: one source for all three consumers)")
     p.add_argument("--aoi_split", type=str, default="test",
                    help="which split's window to read from --aoi_from_partition")
-    p.add_argument("--legacy_south_half", action="store_true",
-                   help="reproduce the pre-AOI rule that scored only the northern half of a "
-                        "South-frame canvas. Superseded by --aoi_window; kept so archived "
-                        "evaluations can be re-scored exactly as they were")
     p.add_argument("--gt_dir", type=str, default=None,
                    help="read <intf>_gt.npy from this directory instead of --path: scores the "
                         "SAME saved confidence maps against a different ground truth (e.g. "
@@ -156,11 +152,6 @@ def _resolve_aoi(args):
         raise SystemExit(
             f"--aoi_window {explicit} conflicts with {args.aoi_from_partition} "
             f"[{args.aoi_split}] = {from_file}. Pass one, not both."
-        )
-    if (explicit or from_file) and args.legacy_south_half:
-        raise SystemExit(
-            "--legacy_south_half is the rule the AOI window replaced; passing both is "
-            "contradictory. Use the window for new evaluations, the flag for archived ones."
         )
     return explicit if explicit is not None else from_file
 
@@ -247,8 +238,6 @@ def main(args) -> None:
     aoi = _resolve_aoi(args)
     if aoi is not None:
         logging.info(f"scoring inside AOI lat {aoi[0]}-{aoi[1]}, lon {aoi[2]}-{aoi[3]}")
-    elif args.legacy_south_half:
-        logging.info("legacy South-half crop in force (pre-AOI behaviour)")
     intf_ids = sorted({
         m.group(0)
         for f in os.listdir(path)
@@ -326,8 +315,6 @@ def main(args) -> None:
             step_y, step_x = patch_h // args.data_stride, patch_w // args.data_stride
             row_slice = slice(min(r0 * step_y, H_), min(r1 * step_y + patch_h - step_y, H_))
             col_slice = slice(min(c0 * step_x, W_), min(c1 * step_x + patch_w - step_x, W_))
-        elif args.legacy_south_half and meta.frame == "South":
-            row_slice = slice(0, confidence.shape[0] // 2)
 
         if row_slice is not None or col_slice is not None:
             rs = row_slice or slice(None)

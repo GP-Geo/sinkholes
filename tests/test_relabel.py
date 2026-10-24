@@ -304,27 +304,3 @@ def test_flags_are_not_changes_and_get_stable_ids(tmp_path):
     assert flags2[0]["change_id"] == fid                             # stable across runs
     W.loc[1, "edit_status"] = "deleted"
     assert d.flag_items(W) == []                                     # moot on a deleted polygon
-
-
-def test_migrate_adds_fields_without_touching_rows(tmp_path, monkeypatch):
-    import sqlite3
-    from types import SimpleNamespace
-
-    from sinkholes.relabel import migrate
-    from sinkholes.relabel.common import write_gt
-
-    ws = tmp_path / "ws"
-    (ws / "gt").mkdir(parents=True)
-    (ws / "history").mkdir()
-    g = _work([("a", "a", "unchanged", sq(0, 0)), ("b", None, "added", sq(5, 0))])
-    write_gt(g, ws / "gt" / "gt_test_working.gpkg", layer="working_gt")
-    before = gpd.read_file(ws / "gt" / "gt_test_working.gpkg", layer="working_gt")
-    monkeypatch.setattr(migrate, "qgis_running", lambda: False)
-    migrate.main(SimpleNamespace(workspace=str(ws)))
-    after = gpd.read_file(ws / "gt" / "gt_test_working.gpkg", layer="working_gt")
-    assert {"qc_flag", "qc_note"} <= set(after.columns)
-    assert after.drop(columns=["qc_flag", "qc_note"]).equals(before)
-    assert list((ws / "history").glob("*before_migrate*"))
-    migrate.main(SimpleNamespace(workspace=str(ws)))                 # idempotent
-    con = sqlite3.connect(ws / "gt" / "gt_test_working.gpkg")
-    assert [r[1] for r in con.execute("PRAGMA table_info(working_gt)")].count("qc_flag") == 1
