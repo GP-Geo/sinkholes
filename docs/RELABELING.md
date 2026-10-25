@@ -7,7 +7,7 @@ as `README.md`.*
 
 **Status (2026-10-25): done.** All 20 official test scenes are relabelled; the final export is
 `v2_20_20261013_fixed` and the results are §6c (summary: `RESULTS.md` ⑧). Every change was
-rendered for the review with GSI on 2026-10-19 (`GSI_meeting_GT_review/` in the repo root,
+rendered for a review with GSI (slides dated 2026-10-19) (`GSI_meeting_GT_review/` in the repo root,
 untracked; §7 lists what it found).
 
 The goal: correct the ground truth of the official temporal test scenes **without touching

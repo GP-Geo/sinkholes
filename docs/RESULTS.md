@@ -26,7 +26,7 @@ prediction can be scored ([`DATASET_11DAY.md`](DATASET_11DAY.md)).
 | 3 | Use the history | The current interferogram plus the *k* before it: a ConvLSTM, then temporal attention, repaired from a collapse to uniform weights. History helps, more at k10 than k5. | ④ ⑨ |
 | 4 | Make training correct | Two mixed-precision bugs (fixed 2026-09-07/08) meant earlier runs at batch ≥ 32 optimised BCE alone; the old RMSprop setting then diverged, so every run since uses AdamW 3e-4, weight decay 1e-2. | ③ |
 | 5 | Clean the benchmark | AOI windows; the temporal split (train on earlier years, test on later ones, which is how the model would be used) replaced the geographic one on 2026-09-03; a label-quality threshold; history chains that skip a missing acquisition (+0.021). | ⑦ ⑥ |
-| 6 | Check the labels | All 20 official test scenes relabelled (366 changes, 46 doubtful polygons flagged) and reviewed with GSI on 2026-10-19: the old labels missed objects the models found. | ⑧ |
+| 6 | Check the labels | All 20 official test scenes relabelled (366 changes, 46 doubtful polygons flagged), with every change rendered for a GSI review (2026-10-19): the old labels missed objects the models found. | ⑧ |
 | 7 | Tune it | A new split with full chain separation (test = 2026) and an Optuna study: plain vs ctx50 temporal attention, then 300-epoch runs. Running. | Open 1 |
 
 Underneath: the inherited scripts became one package with one CLI (`python -m sinkholes`),
