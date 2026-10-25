@@ -5,6 +5,11 @@
 (`/Volumes/rudich/Rudich_Collaboration/...` on a Mac). This file is copied into the workspace
 as `README.md`.*
 
+**Status (2026-10-25): done.** All 20 official test scenes are relabelled; the final export is
+`v2_20_20261013_fixed` and the results are §6c (summary: `RESULTS.md` ⑧). Every change was
+rendered for the review with GSI on 2026-10-19 (`GSI_meeting_GT_review/` in the repo root,
+untracked; §7 lists what it found).
+
 The goal: correct the ground truth of the official temporal test scenes **without touching
 anything that already exists**. The workflow produces two separate things:
 
@@ -345,23 +350,23 @@ operating points are RTh 0.125–0.25. The map is zero where no tile was predict
 the AOI tiles and the LiDAR2022 gate (the dashed `predictable_area`). Colours are greens,
 the one hue the phase colour scale never uses.
 
-**Reference model: `posw8_tattn_k10_plain_30e`**, plain temporal attention at k10, no
+**Reference model: `temporal_k10_th350_tattn_posw8_30e`**, plain temporal attention at k10, no
 context margin. Its predictions come from its generation-5 evaluation,
 `outputs/predictions/temporal_k10_th350_tattn_posw8_30e/best/scenes_temporal_k10_fill_rth_10_06_13h28`,
 which covers all 24 scenes: the 20 official ones plus the 4 that filled chains admit.
 
 **Do not use a ctx50 model as the reference.** Context (ctx50) lost to plain in every pair
 scored (5/5, `docs/RESULTS.md`). The two leaders' headline numbers (0.7905 for
-`th350_tattn_ctx50_neg10`, 0.7907 for this model) look tied, but they come from different
+`temporal_k5_th350_tattn_ctx50_neg10`, 0.7907 for this model) look tied, but they come from different
 scene lists. On the **same 17 scenes**, strict tolerance, best of four RTh (2026-10-07):
 
 | model | mean object F1 | area-weighted F1 |
 |---|---|---|
-| `posw8_tattn_k10_plain_30e` | **0.7907** | **0.7881** |
-| `th350_tattn_ctx50_neg10` (k5, ctx50) | 0.7863 | 0.7725 |
+| `temporal_k10_th350_tattn_posw8_30e` | **0.7907** | **0.7881** |
+| `temporal_k5_th350_tattn_ctx50_neg10` (k5, ctx50) | 0.7863 | 0.7725 |
 
-(`th350_tattn_ctx50_neg10` was the reference until 2026-10-07; its rasters remain in
-`predictions/th350_tattn_ctx50_neg10/`. The first corrected-label comparison was run on it
+(`temporal_k5_th350_tattn_ctx50_neg10` was the reference until 2026-10-07; its rasters are in
+`outputs/archive/predictions/temporal_k5_th350_tattn_ctx50_neg10/`. The first corrected-label comparison was run on it
 too, and is kept.)
 
 **Choosing a reference later:** rank every evaluation of the current generation on the
@@ -592,47 +597,21 @@ polygons were ignored per scene (`flagged_polygons_ignored`).
 - `model_ranking_th0.25.csv` + `comparison_th0.25.md`: rank old → new and Kendall τ,
   **within one scene list only** (k10 models are scored on 17 scenes, k5 on 20)
 
-Default scope: the 12 generation-4 vote-protocol evaluations (8 on the k=5 list, 4 on the
-k=10 list). Pass `--eval_dirs` for others; each must pass the bit-identity check.
+Default scope (no `--eval_dirs`): every generation-4 vote-protocol evaluation under
+`outputs/predictions/`, which since the 2026-10-07 archive is only the focus models'. The §6c
+numbers name their evaluations with `--eval_dirs` (`scripts/relabel/eval_v2.sh`); each must
+pass the bit-identity check.
 
 Nothing is written to any `outputs/predictions/...` directory.
 
-## 6b. First results: 10 relabelled scenes (export `v2_partial_20261006`)
+## 6b. First look: 10 relabelled scenes (superseded by §6c)
 
-These are provisional. The labels are as saved on 2026-10-06 15:49: 10 of 20 official scenes
-(all 2025), 182 changes, 36 flags. One split piece with an empty geometry in
-20250830_20250910 was exported with `--allow_errors`; it rasterises to nothing. Both models'
-saved GTs reproduce bit for bit, and the re-score of the original labels matches the archived
-metrics exactly. The numbers below cover the 10 relabelled scenes only, at strict tolerance.
-
-| model | RTh | recall old → new | precision old → new | area-weighted F1 | mean F1 |
-|---|---|---|---|---|---|
-| `posw8_tattn_k10_plain_30e` (reference) | 0.125 | 0.691 → 0.763 | 0.816 → 0.816 | 0.748 → **0.788** | 0.768 → 0.802 |
-| | 0.25 | 0.603 → 0.689 | 0.852 → 0.858 | 0.706 → 0.764 | 0.751 → 0.798 |
-| `th350_tattn_ctx50_neg10` | 0.125 | 0.609 → 0.696 | 0.846 → 0.854 | 0.708 → 0.767 | 0.757 → 0.804 |
-| | 0.25 | 0.587 → 0.682 | 0.849 → 0.859 | 0.694 → 0.760 | 0.748 → 0.801 |
-| `posw8_single_k10_plain_30e` (single-frame U-Net) | 0.125 | 0.642 → 0.738 | 0.762 → 0.773 | 0.697 → 0.755 | 0.735 → 0.779 |
-| | 0.25 | 0.579 → 0.671 | 0.813 → 0.825 | 0.676 → 0.740 | 0.730 → 0.781 |
-
-- **The gain is recall.** Missed GT objects roughly halve (plain: 220 → 125; ctx50:
-  228 → 117). Precision barely moves: few false positives were missing labels (18 and 23
-  turned FP → TP).
-- **The flags mark what the models miss.** On flagged polygons (26 objects, 22% of the
-  labelled area) recall is 0.13 (plain) and 0.12 (ctx50), against 0.84 on the rest.
-- **Model order.** Plain k10 stays ahead on area-weighted F1 (0.788 vs 0.767). On mean F1 the
-  two are now level (0.802 vs 0.804, inside the ±0.006 noise floor). Ten scenes cannot
-  separate them.
-- **Temporal vs single frame.** The single-frame U-Net gains as much from the corrections as
-  the tattn models (area-weighted F1 0.697 → 0.755) and stays third. The plain-tattn lead
-  narrows: 0.052 → 0.034 area-weighted, 0.034 → 0.021 mean. Part of the old gap was label
-  noise, but not all of it. On unflagged polygons the two have the same recall (0.845 vs
-  0.843). The tattn lead comes from precision (0.816 vs 0.773 at RTh 0.125) and from the
-  flagged hard polygons (recall 0.13 vs 0.04).
-- **Caveat.** If predictions were visible while a scene was edited, deleting labels the model
-  misses raises recall by construction. Record which scenes were labelled blind.
-
-Outputs: `eval/v2_partial_20261006/<model>/…/` (`olm_original.json`,
-`olm_corrected_v2_partial_20261006.json`, `objects_th0.25.gpkg`, `meta.json`).
+The first export (`v2_partial_20261006`: the ten 2025 scenes, 182 changes, 36 flags) showed
+what the full set confirms. **The gain is recall:** missed GT objects roughly halved (the
+reference model 220 → 125, the k5 ctx50 model 228 → 117) while precision barely moved (18 and
+23 false positives turned true positives). **The flags mark what the models miss:** recall
+0.13 on the 26 flagged polygons against 0.84 on the rest. Outputs:
+`eval/v2_partial_20261006/`.
 
 ## 6c. All 20 scenes relabelled (export `v2_20_20261013`)
 
@@ -668,7 +647,7 @@ mean F1:
 | corrected, flagged not counted | **0.8863** / **0.8757** | 0.8660 / 0.8557 | 0.8583 / 0.8523 (RTh 0.25) |
 
 - **Fill leads under every labeling.** Its lead over the no-fill twin holds steady at about
-  +0.015 to +0.020 area-weighted F1, three times the ±0.006 noise floor. With flagged
+  +0.015 to +0.020 area-weighted F1 under all three labelings. With flagged
   polygons not counted it wins 16/20 scenes against the twin and 18/20 against the single
   U-Net (RTh 0.125). It gains in both recall (0.899 vs 0.880) and precision (0.874 vs 0.852).
   Its largest loss is 20260406_20260417 (−0.08 F1 vs the twin), one of the three South
@@ -690,20 +669,27 @@ Outputs: `eval/v2_20_20261013/<model>/…/` (`olm_original.json`, `olm_corrected
 
 - **Wrong-scene original.** `20250706_20250717_O69042`, a polygon of the candidate scene
   20250706_20250717 (North frame, ascending, reporter Dafnash), lies at 30.99°N, entirely
-  outside that interferogram's raster (31.25–31.81°N). It is probably a South-area polygon
-  filed under the North pair's dates. `validate` reports it as an inherited `outside_raster`.
+  outside that interferogram's raster (31.25–31.81°N). It is an exact copy (IoU 1.00) of
+  `20250602_20250613_O68716`, filed under the wrong pair's dates. `validate` reports it as an
+  inherited `outside_raster`.
+- **Found by the GSI review package** (`GSI_meeting_GT_review/README.txt`, 2026-10-17):
+  ten modifications changed a polygon's geometry while it stayed declared `unchanged`, with no
+  editor or timestamp (six in 20250511_20250522; marked CHECK, to be confirmed); none of the
+  366 changes carries an `edit_reason` and none a "pass 2" note, so blind and
+  prediction-informed edits cannot be told apart; two deletions are absorbed into a
+  neighbour rather than erased (20250830_20250910_DEL_028, 20260211_20260222_DEL_008).
 - **Pre-existing problems.** One original 2025–26 polygon outside the scope is an invalid
   geometry, and five scope originals burn fewer than 4 pixels. `validate` lists them.
 - **The export guard works.** Writing dates through pyogrio would have produced String fields
   (`2025/03/29 00:00:00`) that prepare-patches' exact match never finds. The export's
   read-back check caught it, and the writer now uses fiona with a DATE schema.
 
-## 8. Open questions to settle before labelling
+## 8. Open questions
 
 1. **Labelling standard.** What counts as "subsidence" in an 11-day pair: one fringe? a
-   minimum size? an outline at the fringe edge or the deformation edge? Decide with the
-   Geological Survey collaborator **before** starting, and write it in this README. Today's
-   labels come from two reporters with visibly different styles.
+   minimum size? an outline at the fringe edge or the deformation edge? Still not written
+   down; the labels come from two reporters with visibly different styles. Settle it with
+   GSI and write it here.
 2. **Inside the AOI only?** Only polygons inside the test AOI are scored. Polygons inside
    the AOI but outside `predictable_area` (LiDAR2022 gate) are always misses. Fix those
    anyway, or treat the gate as part of the protocol?
@@ -713,8 +699,8 @@ Outputs: `eval/v2_20_20261013/<model>/…/` (`olm_original.json`, `olm_corrected
    evaluated as a separate label version (export once after pass 1 with `--tag v2_blind`,
    then again after pass 2).
 4. **Candidates.** Relabelling the seven threshold-excluded scenes may make them eligible.
-   Adding them changes the test set and makes old and new numbers incomparable. Should that
-   be a new partition generation (5)?
+   Adding them changes the test set and makes old and new numbers incomparable, so it would
+   be a new partition generation.
 5. **Training labels.** The same labelling problems presumably exist in the training years.
    Corrected *test* labels measure error better; they do not fix what the models learned.
 6. **One labeller or two?** For an inter-annotator check, a second person could relabel a

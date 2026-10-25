@@ -78,8 +78,13 @@ object metric ITh 0.7 / buffer 5 px. Object F1 is this project's: the harmonic m
 per-scene **mean** recall and **mean** precision (`F1 = 2·P̄·R̄/(P̄+R̄)`; 0.8114 for the fill
 k10 model on its 24-scene test list reproduces this way). A scene without ground truth has no
 recall or precision and is left out of the means: 3 of the 11 val scenes (20231029_20231109,
-20231222_20240102, 20231223_20240103), so the objective averages 8. The objects predicted on
-those three (110–262 per scene for the baseline pair) never reach the objective.
+20231222_20240102, 20231223_20240103), so the objective averages 8. Those three *are*
+labelled in the current GT (86–207 polygons), but their stride-4 masks were cut in June 2026
+from the previous GT file, which had not labelled them yet
+([`DATASET_11DAY.md`](DATASET_11DAY.md#known-stale)). Every trial is scored on the same 8, so
+comparisons inside the study hold; the study keeps it that way (decided 2026-10-25) and the
+masks are rebuilt after it. The objects predicted on those three (110–262 per scene for the
+baseline pair) never reach the objective.
 
 ```
 F(t)      = mean over e in {20, 30} of F1(e, t)        (budget e30)
@@ -297,6 +302,9 @@ would change it is refused.
   min (v1's four thresholds reproduced), then collected and told to Optuna: plain/s0 **0.7568** @
   0.875, ctx50/s0 **0.7401** @ 0.9375, as §13 predicted. The new 1/16 steps did not move either
   best (plain 0.7420 @ 0.5625, 0.7560 @ 0.6875).
+* `shared` phase submitted 2026-10-24: ten training jobs (LSF 341833–341844). The guard below
+  caught one LSF duplicate on its first use (plain/s1: 341839 killed, 341840 kept). All ten
+  runs recorded a clean tree at da449d9.
 * Duplicate-submission guard, 2026-10-24: `test_hpo_controller.py` drives a bsub that queues a
   job twice (the twin is killed, the recorded job kept), a crash with two jobs queued, and a
   dry-run `step` that must leave `events.jsonl` untouched; full suite 625 passed, 6 skipped.

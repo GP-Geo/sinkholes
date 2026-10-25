@@ -140,8 +140,8 @@ Four properties of the threshold, each easy to get wrong:
 
 **What the threshold is worth, measured.** Re-averaging three finished generation-3 ctx50
 runs over only the above-threshold scenes moves object F1 by **+0.013 to +0.024** at every
-RTh, for all three models — three to four times the ±0.006 noise floor. That is a level
-shift from an easier scene list, **not** model quality, and it is the amount by which a
+RTh, for all three models alike. That is a level shift from an easier scene list, **not**
+model quality, and it is the amount by which a
 generation-4 number is inflated against a generation-3 one before any model difference is
 counted.
 

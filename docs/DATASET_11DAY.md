@@ -107,7 +107,14 @@ Exits non-zero on any failure, so it can gate a pipeline.
 
 ## Known stale
 
-`strpp4_11days` (331 ids) and `strpp4_77days` were built from the older
-`sub_20231001.shp` and do not match this dictionary. `strpp4_11days`'s own
-`nonz_indices.json` is missing 32 ids. Same procedure with
-`--strides_per_patch 4` when they are needed.
+- **Six stride-4 masks predate the current GT.** `strpp4_11days` holds all 437 ids, but its
+  first 331 were cut on 2026-06-10 from the previous GT file, `sub_20231001.shp` (last date
+  2023-09-15). Those 331 match the current GT except six scenes the old file had not labelled:
+  20230801_20230812, 20231029_20231109, 20231222_20240102, 20231223_20240103,
+  20240102_20240113 and 20240103_20240114 (54–207 polygons each now). Their stride-4 masks are
+  empty, so an RTh evaluation scores them as scenes without ground truth. They are training
+  scenes (stride 2, correct) in every kept partition except 5-t2026, whose val holds three of
+  them ([`HPO.md`](HPO.md) §3). Rebuild them after the HPO study: remove the six ids'
+  stride-4 data and mask grids and rerun `scripts/data/make_stride4_patches.sh`, which fills
+  every id the stride-4 tree lacks.
+- `strpp4_77days` was built from `sub_20231001.shp` and does not match this dictionary.

@@ -42,7 +42,7 @@ Where to look for what:
 
 | Question | File |
 |---|---|
-| What do we know, which model is best, what not to repeat? | [`docs/RESULTS.md`](docs/RESULTS.md) |
+| The project in brief, what we know, which model is best, what not to repeat | [`docs/RESULTS.md`](docs/RESULTS.md) |
 | How to run a stage, and the current training recipe | [`docs/PIPELINE.md`](docs/PIPELINE.md) |
 | Which partition file, and why | [`assets/PARTITIONS.md`](assets/PARTITIONS.md) |
 | The HPO / long-training study | [`docs/HPO.md`](docs/HPO.md) |
@@ -54,13 +54,13 @@ Where to look for what:
 **Object-level F1 decides everything.** Patch `val/dice` ranks these models
 *backwards* and is a training-health signal only — see `RESULTS.md` finding ②.
 
-**Where things stand (2026-10-24).** The best model is plain temporal attention at k10 on
-filled history chains, `outputs/2026-10-06/temporal_k10_th350_fill_tattn_posw8_30e`
-(object F1 0.8114 on the 24 generation-5 test scenes). The active work is the HPO study
-`k10t2026_hpo_v2`, driven by `sinkholes hpo`: v1 finished its baseline pair, but its
-threshold grid stopped too low, so v2 adopts that pair with a wider grid (`docs/HPO.md` §13).
-Next: `hpo init` and `hpo adopt` on WEXAC, which create `studies/k10t2026_hpo_v2`, then the
-`shared` phase.
+**Where things stand (2026-10-25).** The story of the project (the question, the starting
+point in the published benchmark, what was done, where it stands and what is next) is the
+first section of [`docs/RESULTS.md`](docs/RESULTS.md). In one line: plain temporal attention
+over the current interferogram and the ten before it, on filled history chains, is the best
+model (`outputs/2026-10-06/temporal_k10_th350_fill_tattn_posw8_30e`, object F1 0.8114 on the
+24 generation-5 test scenes), and the plain-vs-ctx50 HPO study (`studies/k10t2026_hpo_v2`,
+`docs/HPO.md`) is running its `shared` phase.
 
 ## Layout
 

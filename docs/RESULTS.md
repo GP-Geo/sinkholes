@@ -1,19 +1,55 @@
-# Results
+# Project summary and results
 
-*Rewritten 2026-10-15 as the one results document. It condenses the lab notebooks that
-used to sit beside it — `EXPERIMENTS.md` (what each batch was for), `MODEL_RUNS.md` (every
-run), `PREDICTIONS.md` (every evaluation), `ATTENTION.md`, `CORRECTNESS_FIXES.md`,
-`POSITIVES_ONLY_EVAL.md` and the two executed `PLAN_*` documents. They are kept verbatim at
-the tag `notebook-2026-10-15`:*
+## The project in brief
 
-```bash
-git show notebook-2026-10-15:docs/EXPERIMENTS.md      # or any other of them
-```
+**The question.** Sinkhole-induced land subsidence along the Dead Sea shows up in Sentinel-1
+interferograms as small, local fringe patterns. The Geological Survey of Israel (GSI) maps it
+by hand, one 11-day interferogram at a time. Can a network do that mapping automatically, on
+whole scenes?
 
-We detect sinkhole subsidence in 11-day Sentinel-1 interferograms over the Dead Sea. A
-model sees the current interferogram plus the *k* before it and predicts which pixels
-subside; whole scenes are reconstructed from overlapping 200×100 tiles and scored object
-by object against the mapped sinkhole polygons.
+**The starting point.** The published benchmark, Dekel, Nof, Sarafian & Rudich, *Remote
+Sensing* 18:211 ([PDF](reference/remotesensing-18-00211-v2.pdf)): a single-frame U-Net on
+200×100 patches of the wrapped phase, with object-level scores above 0.8, measured on the
+tiles that contain subsidence. The inherited code (Gali Dekel, 2024 – mid-2026) also had first
+versions of a LiDAR coverage gate, ring negatives and temporal input.
+
+**The data.** 437 11-day interferograms, 2019–2026, on two frames (North, South). 273 are
+labelled by GSI (30,729 polygons, `sub_20260701.shp`); a LiDAR coverage mask gates where a
+prediction can be scored ([`DATASET_11DAY.md`](DATASET_11DAY.md)).
+
+**What the rotation did (late July – October 2026).** Each step is a numbered finding below.
+
+| | step | what changed | finding |
+|---|---|---|---|
+| 1 | Score the real task | Whole scenes, every tile, object-level F1. The paper's positives-only scoring inflates precision up to 10× and ranked the worst full-scene model first; patch Dice ranked models backwards. | ⑩ ② |
+| 2 | Stop the over-prediction | Ring negatives (empty patches around each sinkhole) measured at scene level and made standard at ring 1–10: precision +0.10 (geographic split) and +0.28 (temporal). The largest single gain. | ① |
+| 3 | Use the history | The current interferogram plus the *k* before it: a ConvLSTM, then temporal attention, repaired from a collapse to uniform weights. History helps, more at k10 than k5. | ④ ⑨ |
+| 4 | Make training correct | Two mixed-precision bugs (fixed 2026-09-07/08) meant earlier runs at batch ≥ 32 optimised BCE alone; the old RMSprop setting then diverged, so every run since uses AdamW 3e-4, weight decay 1e-2. | ③ |
+| 5 | Clean the benchmark | AOI windows; the temporal split (train on earlier years, test on later ones, which is how the model would be used) replaced the geographic one on 2026-09-03; a label-quality threshold; history chains that skip a missing acquisition (+0.021). | ⑦ ⑥ |
+| 6 | Check the labels | All 20 official test scenes relabelled (366 changes, 46 doubtful polygons flagged) and reviewed with GSI on 2026-10-19: the old labels missed objects the models found. | ⑧ |
+| 7 | Tune it | A new split with full chain separation (test = 2026) and an Optuna study: plain vs ctx50 temporal attention, then 300-epoch runs. Running. | Open 1 |
+
+Underneath: the inherited scripts became one package with one CLI (`python -m sinkholes`),
+625 tests and an LSF workflow for WEXAC.
+
+**Where it stands (2026-10-25).** The best model is plain temporal attention over the current
+interferogram and the ten before it, on filled history chains
+(`outputs/2026-10-06/temporal_k10_th350_fill_tattn_posw8_30e`): object F1 **0.8114** on the 24
+generation-5 test scenes (2025–26) and **0.8660** on the ten 2026 scenes. On the 20 relabelled
+test scenes, same scenes for all three (mean object F1):
+
+| | single-frame U-Net | temporal attention, k10 | + filled history chains |
+|---|---|---|---|
+| original labels | 0.7777 | 0.7974 | **0.8146** |
+| corrected labels | 0.8140 | 0.8291 | **0.8455** |
+| corrected, doubtful polygons not counted | 0.8523 | 0.8557 | **0.8757** |
+
+Spatial context (ctx50: a 300×200 input around each 200×100 tile) raised patch Dice and lost
+all five object-level comparisons (⑤); the HPO study is re-testing it at tuned settings.
+
+**What is next.** The HPO study's result: a tuned configuration per geometry, scored once on
+the 2026 test block against the 0.8660 bar. Then the LiDAR control, deeper history (it needs a
+leaner data layer first) and the six stale stride-4 masks ([Open](#open)).
 
 ---
 
@@ -54,7 +90,7 @@ by object against the mapped sinkhole polygons.
 
 ## The best models
 
-The five focus models (`outputs/README.md`); everything else is under `outputs/archive/`.
+The five focus models, kept in `outputs/`; everything else is under `outputs/archive/`.
 Strict tolerance, best RTh (all peak at 0.125), original labels.
 
 | Run (`outputs/<date>/…`) | Role | 24-scene gen-5 list | 17-scene gen-4 k10 list |
@@ -211,6 +247,11 @@ paper, never to choose a model.
 
 ### Known data limits
 
+- **Six stride-4 masks are stale.** They were cut in June 2026 from the previous GT file,
+  which had not labelled these six scenes yet; the current GT holds 54–207 polygons in each
+  ([`DATASET_11DAY.md`](DATASET_11DAY.md#known-stale)). Every RTh evaluation reads stride 4, so
+  it scores them as scenes without ground truth. No evaluation on this page scores them; the
+  HPO study's validation holds three of them and therefore averages the other 8.
 - **`assets/lidar_intf_mask.txt` ends 2024-06-05**, so every temporal test scene falls
   back to the 2022 LiDAR coverage for gating. The decisive control — one model, the same
   scenes, `--no-add_lidar_mask` — has never been run.
@@ -222,14 +263,14 @@ paper, never to choose a model.
 ## Open
 
 1. **The HPO study** ([`HPO.md`](HPO.md)): plain vs ctx50 temporal attention at k10 on the
-   t2026 split, tuned and seed-repeated, with 300-epoch runs. The baseline pair is trained
-   and scored: val objective plain **0.7568** @ RTh 0.875, ctx50 0.7401 @ 0.9375 (best
-   val/dice was the other way round, 0.6189 vs 0.6356). Since 2026-10-18 the study is v2
-   (`k10t2026_hpo_v2`, every 1/16 step from 0.5 to 0.9375), which adopts that pair. Next: `hpo init`
-   and `hpo adopt` on WEXAC, then `approve --phase shared`.
-   Its plain baseline is the leader's configuration on the t2026 split, so scoring its
-   chosen checkpoint on the 10 test scenes answers whether training up to 2025 helps (bar:
-   0.8660).
+   t2026 split, tuned and seed-repeated, with 300-epoch runs. Study v2 (`k10t2026_hpo_v2`,
+   thresholds in 1/16 steps up to 0.9375) adopted v1's baseline pair: val objective plain
+   **0.7568** @ RTh 0.875, ctx50 0.7401 @ 0.9375 (best val/dice was the other way round,
+   0.6189 vs 0.6356). The ten `shared` trials were submitted 2026-10-24; TPE, promotion to 60
+   epochs, seed repeats, a locked threshold and the 300-epoch runs follow. The objective
+   averages 8 of the 11 val scenes (the stale masks below). Its plain baseline is the
+   leader's configuration on the t2026 split, so scoring its chosen checkpoint on the 10 test
+   scenes answers whether training up to 2025 helps (bar: 0.8660).
 2. **The LiDAR control** and **extending `lidar_intf_mask.txt` past 2024-06-05** (above).
 3. **Deeper history.** The data layer materialises every sample's full stack, so host
    memory grows with T (ctx50 k10 peaked at 298 GB in the HPO baseline). A deduplicated frame store —
@@ -237,3 +278,14 @@ paper, never to choose a model.
 4. **A context-checkpoint attention probe**, folded into `sinkholes attention-probe`.
 5. **The hybrid** (ConvLSTM + attention) won at neither operating point and 3 of 4 August
    hybrids collapsed to uniform attention: give it a term that forces selection, or drop it.
+6. **Rebuild the six stale stride-4 masks** once the HPO study is finished (not before: its
+   scores must stay comparable).
+
+---
+
+## History
+
+This page condenses the lab notebooks that used to sit beside it (`EXPERIMENTS.md`,
+`MODEL_RUNS.md`, `PREDICTIONS.md`, `ATTENTION.md`, `CORRECTNESS_FIXES.md`,
+`POSITIVES_ONLY_EVAL.md` and the executed `PLAN_*` documents). They are kept verbatim at the
+tag `notebook-2026-10-15`: `git show notebook-2026-10-15:docs/EXPERIMENTS.md`.
