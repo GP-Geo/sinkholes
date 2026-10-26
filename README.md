@@ -58,9 +58,10 @@ Where to look for what:
 point in the published benchmark, what was done, where it stands and what is next) is the
 first section of [`docs/RESULTS.md`](docs/RESULTS.md). In one line: plain temporal attention
 over the current interferogram and the ten before it, on filled history chains, is the best
-model (`outputs/2026-10-06/temporal_k10_th350_fill_tattn_posw8_30e`, object F1 0.8114 on the
-24 generation-5 test scenes), and the plain-vs-ctx50 HPO study (`studies/k10t2026_hpo_v2`,
-`docs/HPO.md`) is running its `shared` phase.
+model (`outputs/2026-10-06/temporal_k10_th350_fill_tattn_posw8_30e`: object F1 0.8114 on the
+24 generation-5 test scenes, precision 0.834, recall 0.790). The plain-vs-ctx50 HPO study
+(`studies/k10t2026_hpo_v2`, `docs/HPO.md`) is in its first phase: plain leads (0.770 vs 0.757)
+and, at equal precision, also recalls more (`RESULTS.md` ⑫).
 
 ## Layout
 

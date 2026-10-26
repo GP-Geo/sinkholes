@@ -27,7 +27,7 @@ prediction can be scored ([`DATASET_11DAY.md`](DATASET_11DAY.md)).
 | 4 | Make training correct | Two mixed-precision bugs (fixed 2026-09-07/08) meant earlier runs at batch ≥ 32 optimised BCE alone; the old RMSprop setting then diverged, so every run since uses AdamW 3e-4, weight decay 1e-2. | ③ |
 | 5 | Clean the benchmark | AOI windows; the temporal split (train on earlier years, test on later ones, which is how the model would be used) replaced the geographic one on 2026-09-03; a label-quality threshold; history chains that skip a missing acquisition (+0.021). | ⑦ ⑥ |
 | 6 | Check the labels | All 20 official test scenes relabelled (366 changes, 46 doubtful polygons flagged), with every change rendered for a GSI review (2026-10-19): the old labels missed objects the models found. | ⑧ |
-| 7 | Tune it | A new split with full chain separation (test = 2026) and an Optuna study: plain vs ctx50 temporal attention, then 300-epoch runs. Running. | Open 1 |
+| 7 | Tune it | A new split with full chain separation (test = 2026) and an Optuna study: plain vs ctx50 temporal attention, then 300-epoch runs. First phase: plain reaches 0.770, ctx50 0.757; at equal precision plain also recalls more. Running. | ⑫ |
 
 Underneath: the inherited scripts became one package with one CLI (`python -m sinkholes`),
 625 tests and an LSF workflow for WEXAC.
@@ -35,17 +35,25 @@ Underneath: the inherited scripts became one package with one CLI (`python -m si
 **Where it stands (2026-10-25).** The best model is plain temporal attention over the current
 interferogram and the ten before it, on filled history chains
 (`outputs/2026-10-06/temporal_k10_th350_fill_tattn_posw8_30e`): object F1 **0.8114** on the 24
-generation-5 test scenes (2025–26) and **0.8660** on the ten 2026 scenes. On the 20 relabelled
-test scenes, same scenes for all three (mean object F1):
+generation-5 test scenes (2025–26), from **precision 0.834 and recall 0.790**, and **0.8660**
+on the ten 2026 scenes. On the 20 relabelled test scenes, same scenes for all three, object F1
+(precision / recall):
 
 | | single-frame U-Net | temporal attention, k10 | + filled history chains |
 |---|---|---|---|
-| original labels | 0.7777 | 0.7974 | **0.8146** |
-| corrected labels | 0.8140 | 0.8291 | **0.8455** |
-| corrected, doubtful polygons not counted | 0.8523 | 0.8557 | **0.8757** |
+| original labels | 0.778 (0.790 / 0.766) | 0.797 (0.832 / 0.766) | **0.815** (0.851 / 0.781) |
+| corrected labels | 0.814 (0.805 / 0.823) | 0.829 (0.844 / 0.815) | **0.846** (0.861 / 0.830) |
+| corrected, doubtful polygons not counted | 0.852 (0.866 / 0.839) | 0.856 (0.838 / 0.875) | **0.876** (0.855 / 0.897) |
+
+Read across the first row: temporal attention's gain over the single frame is **precision**
+(same recall, 0.766); filling the history chains adds **both**. Read down: correcting the labels
+is mostly a **recall** gain (0.781 → 0.830 → 0.897), because the old labels missed objects the
+models found. **On these test scenes recall is the limiting side**, and every model does best
+at the loosest threshold scored (RTh 0.125), so a lower threshold may recover more.
 
 Spatial context (ctx50: a 300×200 input around each 200×100 tile) raised patch Dice and lost
-all five object-level comparisons (⑤); the HPO study is re-testing it at tuned settings.
+all five object-level comparisons (⑤). Tuned in the HPO study it still trails, and at equal
+precision it recalls less than plain (⑫).
 
 **What is next.** The HPO study's result: a tuned configuration per geometry, scored once on
 the 2026 test block against the 0.8660 bar. Then the LiDAR control, deeper history (it needs a
@@ -57,6 +65,15 @@ leaner data layer first) and the six stale stride-4 masks ([Open](#open)).
 
 - **Object-level F1 on whole scenes decides everything.** Patch `val/dice` ranked models
   backwards in four separate batches (finding ②); it is a training-health signal only.
+- **Read precision and recall, not only F1.** Recall (the share of mapped subsidence that is
+  found) matters most to this project: a missed subsidence costs more than a false alarm. So
+  tables give F1 with its precision / recall. Recall moves with the threshold, so compare two
+  models **at equal precision** (or across the whole threshold sweep), never each at its own
+  best-F1 threshold: the one picked at a looser point will always show more recall.
+- **Validation and test want different thresholds.** On the HPO's validation scenes (2022–23)
+  precision is the weak side and the strictest threshold wins; on the 2025–26 test scenes
+  recall is the weak side and the loosest wins. A threshold chosen on one is not optimal on
+  the other.
 - **F1 is computed from the per-scene mean precision and mean recall** (`2PR/(P+R)`), the
   convention every table here uses. "Area-weighted" F1, where quoted, weights scenes by
   ground-truth area as the benchmark paper does.
@@ -177,7 +194,8 @@ val/dice in three independent pairs. At object level it **lost all five scored p
 (−0.008 to −0.029, both generations, both depths): it buys 0.04–0.08 precision and costs
 0.06–0.10 recall. History shrinks the loss (−0.016 for attention at k10 against −0.026 for
 the single frame), and costs ~3× the host memory. The HPO study re-asks the question at
-tuned settings on the t2026 split.
+tuned settings on the t2026 split; so far ctx50 recalls less than plain at equal precision
+too (⑫).
 
 ### ⑥ Filled history chains are worth +0.021 at k10
 
@@ -245,6 +263,49 @@ paper, never to choose a model.
 | RMSprop at momentum 0.999 | diverges once clipping is correct (③) |
 | bottleneck dropout 0.1–0.2, Jaccard region loss | +~0.01 dice in 20-epoch screens, inside 2× the noise, never scored on scenes |
 
+### ⑫ The HPO study so far: plain leads, and recalls more at equal precision
+
+First phase, 2026-10-26: the baseline (s0) and five spread-out settings per geometry, 30
+epochs, seed 42; ctx50 s1 and s2 are still training. Validation objective = mean object F1
+over epochs 20 and 30 on the 8 scored val scenes (2022–23), with its precision / recall, at
+each trial's best threshold:
+
+| | lr | wd | pos_w | plain | P / R | ctx50 | P / R |
+|---|---|---|---|---|---|---|---|
+| s0 (baseline) | 3.0e-4 | 1.0e-2 | 8 | 0.757 | 0.66 / 0.89 | 0.740 | 0.63 / 0.91 |
+| s1 | 1.1e-4 | 1.5e-2 | 4 | **0.770** | 0.71 / 0.85 | training | |
+| s2 | 1.9e-4 | 1.3e-3 | 12 | 0.760 | 0.67 / 0.88 | training | |
+| s3 | 2.6e-4 | 1.4e-4 | 2 | 0.759 | 0.69 / 0.85 | 0.727 | 0.61 / 0.90 |
+| s4 | 4.9e-4 | 7.0e-4 | 12 | 0.756 | 0.65 / 0.90 | 0.701 | 0.56 / 0.94 |
+| s5 | 7.1e-4 | 6.9e-3 | 4 | 0.759 | 0.68 / 0.87 | **0.757** | 0.65 / 0.91 |
+
+- **Plain is flat** across the settings (0.756–0.770); **ctx50 is sensitive** (0.701–0.757),
+  and its best only reaches plain's baseline.
+- **pos_w trades precision for recall**, as designed: 2–4 gives the highest precision, 12 the
+  highest recall (and ctx50's worst F1).
+- **Precision is the weak side on these scenes**, and most trials peak at the strictest
+  thresholds (0.875–0.9375).
+- **Recall, compared fairly.** At its best-F1 threshold ctx50 shows more recall (s0: 0.909 vs
+  0.891), but it is picked at a looser precision. Recall at equal precision, the best over all
+  thresholds:
+
+  | | P ≥ 0.55 | P ≥ 0.60 | P ≥ 0.625 | highest P reached |
+  |---|---|---|---|---|
+  | plain s0 | 0.983 | 0.973 | 0.953 | 0.674 |
+  | plain s1 (best plain) | 0.970 | 0.938 | 0.925 | 0.708 |
+  | ctx50 s0 | 0.936 | 0.920 | – | 0.625 |
+  | ctx50 s5 (best ctx50) | 0.953 | 0.934 | 0.915 | 0.647 |
+
+  Plain recalls as much or more at every precision ctx50 reaches, and reaches precisions
+  ctx50 does not. Between the two best settings the gap is small (0.004–0.017); between the
+  baselines it is 0.04–0.05. The study's visual panel is where "context looks better" gets
+  its own test.
+
+Two cautions. The 2022–23 validation scenes were never relabelled, and ⑧ showed that old
+labels miss objects the models find, so part of the low validation precision may be unmapped
+subsidence. And with 8 scenes and one seed, gaps of 0.01–0.02 are not yet established; the
+seed repeats measure that.
+
 ### Known data limits
 
 - **Six stride-4 masks are stale.** They were cut in June 2026 from the previous GT file,
@@ -266,11 +327,15 @@ paper, never to choose a model.
    t2026 split, tuned and seed-repeated, with 300-epoch runs. Study v2 (`k10t2026_hpo_v2`,
    thresholds in 1/16 steps up to 0.9375) adopted v1's baseline pair: val objective plain
    **0.7568** @ RTh 0.875, ctx50 0.7401 @ 0.9375 (best val/dice was the other way round,
-   0.6189 vs 0.6356). The ten `shared` trials were submitted 2026-10-24; TPE, promotion to 60
-   epochs, seed repeats, a locked threshold and the 300-epoch runs follow. The objective
-   averages 8 of the 11 val scenes (the stale masks below). Its plain baseline is the
-   leader's configuration on the t2026 split, so scoring its chosen checkpoint on the 10 test
-   scenes answers whether training up to 2025 helps (bar: 0.8660).
+   0.6189 vs 0.6356). The ten `shared` trials were submitted 2026-10-24; 8 are scored (⑫),
+   ctx50 s1 and s2 are still training. TPE, promotion to 60 epochs, seed repeats, a locked
+   threshold and the 300-epoch runs follow. The objective averages 8 of the 11 val scenes
+   (the stale masks below). Its plain baseline is the leader's configuration on the t2026
+   split, so scoring its chosen checkpoint on the 10 test scenes answers whether training up
+   to 2025 helps. **Read that test score across the whole threshold sweep, with precision and
+   recall:** the study locks its threshold on validation, where the strictest wins, while the
+   0.8660 bar was taken at the test scenes' own best threshold (the loosest), so the bar is
+   optimistic and a single locked-threshold number would understate recall.
 2. **The LiDAR control** and **extending `lidar_intf_mask.txt` past 2024-06-05** (above).
 3. **Deeper history.** The data layer materialises every sample's full stack, so host
    memory grows with T (ctx50 k10 peaked at 298 GB in the HPO baseline). A deduplicated frame store —
@@ -280,6 +345,10 @@ paper, never to choose a model.
    hybrids collapsed to uniform attention: give it a term that forces selection, or drop it.
 6. **Rebuild the six stale stride-4 masks** once the HPO study is finished (not before: its
    scores must stay comparable).
+7. **A recall-first operating point.** Choose the threshold by recall at a precision floor
+   (or by F2) instead of F1; the study records every threshold's precision and recall, so this
+   needs no new runs. On the test scenes, also score thresholds below 0.125, where recall is
+   still rising.
 
 ---
 

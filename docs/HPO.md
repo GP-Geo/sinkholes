@@ -8,7 +8,7 @@ peaked at v1's 0.5 ceiling; v1's finished baseline pair is adopted, not retraine
 page is the protocol; the code is the source of truth for every definition quoted here.
 
 **Nothing is submitted without an explicit approval per phase, and `step` is a dry run unless
-given `--submit`.**
+given `--submit`.** Results so far, with precision and recall: [`RESULTS.md`](RESULTS.md) ⑫.
 
 ## 1. The question and what is held fixed
 
@@ -334,6 +334,12 @@ would change it is refused.
    controller asks LSF for the job name right after each bsub (and after adopting a job lost
    in a crash) and kills every other live job under it, keeping the recorded id
    (`controller.kill_twins`; ledger `killed_twins`, event `duplicate`, a `DUPLICATE` line).
+6. **Validation and test want different thresholds.** On the val scenes (2022–23) the
+   strictest RTh wins (precision is the weak side); on the 2025–26 test scenes the loosest
+   scored, 0.125, wins (recall is the weak side). The threshold locked here will therefore be
+   far from the test optimum. Report the final test score across the whole sweep with
+   precision and recall, not only at the locked RTh; the 0.8660 bar was taken at the test's
+   own best threshold.
 
 ## 13. v1 → v2: the threshold ceiling (2026-10-17/18)
 
