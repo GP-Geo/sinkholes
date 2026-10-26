@@ -131,11 +131,23 @@ configuration is the building-block block at the top of `scripts/submit_all.sh`.
 | corrected | **0.8444** / **0.8455** | 0.8292 / 0.8291 | 0.8122 / 0.8140 |
 | corrected, flagged polygons not counted | **0.8863** / **0.8757** | 0.8660 / 0.8557 | 0.8583 / 0.8523 |
 
-**On the 2026 test block** (generation 5-t2026's 10 test scenes, Feb–Apr 2026), re-averaged
-from the 24-scene evaluations: the leader **0.8660** at RTh 0.125, its no-fill twin 0.8499.
-On the 8 of them that were relabelled: 0.8602 original / 0.8739 corrected / 0.8826 flagged
-not counted (twin 0.8450 / 0.8619 / 0.8701). This is the bar a model trained on the t2026
-split has to clear ([`HPO.md`](HPO.md)); with ten scenes, gaps under ~0.03 are scene noise.
+**On the 2026 scenes** (generation 5-t2026's test block: 10 scenes, Feb–Apr 2026), object F1
+(precision / recall), best of the four RTh (0.125 unless marked), strict tolerance. The single
+U-Net was evaluated on the 8 relabelled ones only, so the three-model comparison uses those 8:
+
+| 8 relabelled 2026 scenes | single-frame U-Net | temporal attention, k10 | + filled history chains |
+|---|---|---|---|
+| original labels | 0.849 (0.892 / 0.810) @0.25 | 0.845 (0.864 / 0.827) | **0.860** (0.873 / 0.848) |
+| corrected labels | 0.861 (0.843 / **0.880**) | 0.862 (0.878 / 0.846) | **0.874** (0.881 / 0.866) |
+| corrected, doubtful not counted | 0.868 (0.843 / **0.895**) | 0.870 (0.878 / 0.862) | **0.883** (0.882 / 0.883) |
+
+All 10 scenes, original labels: the leader **0.8660** (0.861 / 0.871), its no-fill twin 0.8499
+(0.859 / 0.841). That is the bar a model trained on the t2026 split has to clear
+([`HPO.md`](HPO.md)); it was taken at the test scenes' own best threshold.
+
+On 2026 the three models are close: the leader is ahead on F1 in every row, but the single
+U-Net has the highest **recall** on corrected labels (0.880 against 0.866), at lower precision.
+With eight scenes, gaps under ~0.03 are within scene noise.
 
 ---
 
