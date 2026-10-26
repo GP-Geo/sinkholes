@@ -163,9 +163,23 @@ history** (20260304, 20260326, 20260406; corrected labels, strict, RTh 0.125):
 | temporal attention, k10 | 0.870 (0.864 / 0.875) | **0.847** (0.902 / 0.798) |
 | + filled chains (leader) | **0.892** (0.889 / **0.894**) | 0.844 (0.868 / 0.820) |
 
-With a complete history the leader wins on every metric; where the history has gaps the
-single U-Net recalls more (two scenes, +0.09 and +0.13 against the leader) at much lower
-precision.
+Those three are also the only **South-frame** 2026 scenes, so frame and gaps are confounded
+here. Over all 20 relabelled scenes they separate (corrected, strict, RTh 0.125; recall,
+precision in brackets): on the 11 North scenes the leader recalls more (0.81 vs 0.77); on the 6
+South scenes with full history the single U-Net recalls slightly more (0.89 vs 0.87, at
+precision 0.77 vs 0.85); on the 3 gappy South scenes the gap widens (0.89 vs 0.82), because
+the temporal models lose recall there and the single frame does not. So the single U-Net
+predicts more on the South frame in general, and history gaps cost the temporal models
+recall on top of that.
+
+How the no-fill twin scores those three scenes at all: it was trained on gap-free chains only,
+and its own generation-4 evaluation leaves them out. Its numbers here come from the
+generation-5 evaluation (2026-10-06), which hands every model the filled chains: still ten
+previous frames, but reaching 154–198 days back instead of 110 (20260304's frame ages, in
+11-day slots: 0, 1, 2, 3, 4, 5, 8, 11, 12, 13, 18). Each frame's real age goes into the
+attention as a sinusoidal position code; it has no learned parameters, so the twin accepts
+ages it never trained on (up to 18 slots against 10) and runs, outside its training
+distribution. The leader was trained on exactly such chains.
 
 ---
 
