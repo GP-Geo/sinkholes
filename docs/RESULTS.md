@@ -300,6 +300,20 @@ each trial's best threshold:
   ctx50 does not. Between the two best settings the gap is small (0.004–0.017); between the
   baselines it is 0.04–0.05. The study's visual panel is where "context looks better" gets
   its own test.
+- **But ctx50's recall barely depends on the threshold.** At the *same* strict threshold
+  (RTh ≥ 0.8125) ctx50 recalls more than plain. From RTh 0.5 to 0.9375 every ctx50 trial loses
+  only 0.018–0.028 recall, every plain trial 0.095–0.120; precision rises by +0.05–0.06 against
+  +0.09–0.12. ctx50's overlapping tiles agree with each other, on true objects and on false
+  alarms alike, so a stricter vote removes little of either. Plain's tiles disagree more, so
+  the threshold trims both. (Likely cause, not yet measured: a ctx50 tile sees 50 px beyond its
+  edges, so tiles that overlap an object judge it with the same surroundings.) Two
+  consequences:
+  - an RTh is each model's own agreement level, not a common scale: at equal precision (0.62)
+    ctx50 sits at RTh 0.9375 and plain at 0.6875, where plain recalls 0.963 against 0.909;
+  - ctx50 is **robust to a mis-set threshold**. Validation and test want different thresholds
+    here, so at a threshold locked on validation and applied to test, ctx50 may lose less
+    recall than plain even though its precision–recall curve is lower. The study's final test
+    numbers must be read across the whole sweep for this reason.
 
 Two cautions. The 2022–23 validation scenes were never relabelled, and ⑧ showed that old
 labels miss objects the models find, so part of the low validation precision may be unmapped
