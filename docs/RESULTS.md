@@ -122,6 +122,17 @@ All four temporal models are plain (200×100 in, no context margin) temporal att
 `pos_w` 8, AdamW 3e-4 / wd 1e-2, ring negatives 1–10, flips `hv`. The leader's exact
 configuration is the building-block block at the top of `scripts/submit_all.sh`.
 
+**The best model, in brief.** `temporal_k10_th350_fill_tattn_posw8_30e` (trained 2026-10-06,
+LSF 261016) is a U-Net with temporal attention. One shared encoder reads the current 11-day
+interferogram and the ten before it (200×100 tiles of wrapped phase); at the bottleneck each
+cell of the current frame attends over the same cell in all eleven frames (8 heads, contrast
+and QK-norm, each frame's real age as a position code), and the decoder draws the current
+frame's subsidence mask. Trained on generation 5 (label-quality threshold 350 North / 200
+South; history chains that skip missing acquisitions) for 30 epochs: AdamW 3e-4, weight decay
+1e-2, BCE (pos_weight 8) + Dice, ring negatives 1–10 at 1:1, horizontal and vertical flips.
+The evaluated checkpoint is `best.pt`, **epoch 25 of 30**, picked by patch validation Dice,
+which is a weak selector (②); the HPO study picks checkpoints on whole scenes instead.
+
 **On the corrected labels** (the 20 relabelled official test scenes,
 [`RELABELING.md`](RELABELING.md) §6c), area-weighted / mean F1:
 
@@ -164,13 +175,25 @@ history** (20260304, 20260326, 20260406; corrected labels, strict, RTh 0.125):
 | + filled chains (leader) | **0.892** (0.889 / **0.894**) | 0.844 (0.868 / 0.820) |
 
 Those three are also the only **South-frame** 2026 scenes, so frame and gaps are confounded
-here. Over all 20 relabelled scenes they separate (corrected, strict, RTh 0.125; recall,
-precision in brackets): on the 11 North scenes the leader recalls more (0.81 vs 0.77); on the 6
-South scenes with full history the single U-Net recalls slightly more (0.89 vs 0.87, at
-precision 0.77 vs 0.85); on the 3 gappy South scenes the gap widens (0.89 vs 0.82), because
-the temporal models lose recall there and the single frame does not. So the single U-Net
-predicts more on the South frame in general, and history gaps cost the temporal models
-recall on top of that.
+here. Over all 20 relabelled scenes they separate. Recall (precision), strict, RTh 0.125:
+
+| scenes | labels | single U-Net | leader (fill) |
+|---|---|---|---|
+| North, full history (11) | original | 0.70 (0.81) | **0.76** (0.85) |
+| | corrected | 0.77 (0.83) | **0.81** (0.86) |
+| | corrected, doubtful not counted | 0.88 (0.82) | **0.92** (0.85) |
+| South, full history (6) | original | **0.83** (0.76) | 0.81 (0.84) |
+| | corrected | **0.89** (0.77) | 0.87 (0.85) |
+| | corrected, doubtful not counted | **0.91** (0.77) | 0.89 (0.85) |
+| South, gappy history (3) | original | **0.86** (0.79) | 0.80 (0.87) |
+| | corrected (= doubtful not counted: no flags there) | **0.89** (0.79) | 0.82 (0.87) |
+
+The pattern holds under all three label versions. On the North frame the leader wins on
+recall, precision and F1. On the South frame the single U-Net predicts more: about +0.02
+recall at about −0.08 precision with a full history, and history gaps widen its recall edge to
++0.06–0.07 because the temporal models lose recall there and the single frame does not. The
+leader still has the higher F1 on the South frame with full history (0.86–0.87 against
+0.82–0.83). Six and three scenes: a consistent pattern, not a measured effect.
 
 How the no-fill twin scores those three scenes at all: it was trained on gap-free chains only,
 and its own generation-4 evaluation leaves them out. Its numbers here come from the
