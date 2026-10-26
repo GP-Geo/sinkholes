@@ -149,6 +149,24 @@ On 2026 the three models are close: the leader is ahead on F1 in every row, but 
 U-Net has the highest **recall** on corrected labels (0.880 against 0.866), at lower precision.
 With eight scenes, gaps under ~0.03 are within scene noise.
 
+**Where the single U-Net passes the attention models.** On the 20 scenes, never past the
+leader (any tolerance, threshold or labeling), and past the no-fill twin only in a tie (strict,
+doubtful not counted, RTh 0.375: 0.845 each). On the eight 2026 scenes it passes the twin at most
+thresholds and the leader at the strict ones (RTh 0.375 and 0.5, both tolerances), where
+every model's precision converges (~0.93) and recall decides; never at either model's best
+threshold. The recall edge comes from the three 2026 scenes **without a complete 10-frame
+history** (20260304, 20260326, 20260406; corrected labels, strict, RTh 0.125):
+
+| | full history (5 scenes) | gappy history (3 scenes) |
+|---|---|---|
+| single U-Net | 0.877 (0.877 / 0.876) | 0.834 (0.787 / **0.886**) |
+| temporal attention, k10 | 0.870 (0.864 / 0.875) | **0.847** (0.902 / 0.798) |
+| + filled chains (leader) | **0.892** (0.889 / **0.894**) | 0.844 (0.868 / 0.820) |
+
+With a complete history the leader wins on every metric; where the history has gaps the
+single U-Net recalls more (two scenes, +0.09 and +0.13 against the leader) at much lower
+precision.
+
 ---
 
 ## What we know
